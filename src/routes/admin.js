@@ -7,7 +7,7 @@ import {
 import { Payment, Payout } from '../models/Payment.js';
 import {
   USER_ROLE, NANNY_STATUS, BOOKING_STATUS, PAYMENT_STATUS, PAYOUT_STATUS,
-  TICKET_STATUS, CANCELLED_BY, SERVICE_DAY_STATUS,
+  TICKET_STATUS, CANCELLED_BY, SERVICE_DAY_STATUS, BOOKING_SUBSTATUS,
 } from '../utils/constants.js';
 import { signToken, requireAuth, requireRole } from '../middleware/auth.js';
 import { cancelBooking, markNannyCancelled } from '../services/booking.js';
@@ -96,20 +96,145 @@ router.get('/dashboard/stats', wrap(async (req, res) => {
     { $sort: { _id: 1 } },
   ]);
 
+  // Extra counts the dashboard cards and the Action Required feed need.
+  const [
+    suspendedFamilies, replacementNeeded, pendingRequests,
+    paymentsPending, refundsInProcess, criticalTickets, nextUpcoming,
+  ] = await Promise.all([
+    User.countDocuments({ role: USER_ROLE.FAMILY, blocked: true }),
+    Booking.countDocuments({ subStatus: BOOKING_SUBSTATUS.NANNY_CANCELLED_AWAITING_REPLACEMENT }),
+    Booking.countDocuments({
+      'nannyResponses.outcome': 'pending',
+      status: { $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING] },
+    }),
+    Payment.countDocuments({ status: PAYMENT_STATUS.IN_PROCESS }),
+    Payment.countDocuments({ status: PAYMENT_STATUS.REFUND_IN_PROCESS }),
+    Ticket.countDocuments({
+      status: { $in: [TICKET_STATUS.OPEN, TICKET_STATUS.IN_PROGRESS] },
+      priority: { $in: ['urgent', 'high'] },
+    }),
+    Booking.findOne({ status: BOOKING_STATUS.UPCOMING }).sort({ startDate: 1 }).select('startDate'),
+  ]);
+
+  const [pendingAmountAgg, refundAmountAgg] = await Promise.all([
+    sumPayments({ status: PAYMENT_STATUS.IN_PROCESS }),
+    sumPayments({ status: PAYMENT_STATUS.REFUND_IN_PROCESS }),
+  ]);
+
+  // An ongoing booking is "OTP pending" when today's service day is still
+  // waiting on either the arrival or the end-of-service code.
+  const otpPending = await Booking.countDocuments({
+    status: BOOKING_STATUS.ONGOING,
+    'serviceDays.status': {
+      $in: [SERVICE_DAY_STATUS.AWAITING_ARRIVAL, SERVICE_DAY_STATUS.AWAITING_END_OF_SERVICE],
+    },
+  });
+
   res.json({
-    users: { families: totalFamilies, nannies: totalNannies, pendingNannies, verifiedNannies },
+    users: {
+      families: totalFamilies, nannies: totalNannies,
+      pendingNannies, verifiedNannies, suspendedFamilies,
+    },
     bookings: {
       active: activeBookings, upcoming: upcomingBookings,
       completed: completedBookings, cancelled: cancelledBookings,
+      replacementNeeded, pendingRequests, otpPending,
+      nextUpcomingDate: nextUpcoming?.startDate || null,
       total: activeBookings + upcomingBookings + completedBookings + cancelledBookings,
     },
     revenue: {
       total: revenueAgg, thisWeek: weekRevenueAgg,
       thisMonth: monthRevenueAgg, refunded: refundAgg,
+      pendingCount: paymentsPending, pendingAmount: pendingAmountAgg,
+      refundsInProcess: refundsInProcess, refundsAmount: refundAmountAgg,
     },
-    support: { openTickets },
+    support: { openTickets, criticalTickets },
     trend,
   });
+}));
+
+/* ------------------------------------------------------------------ *
+ * Action Required feed — the prioritised work queue on the dashboard.
+ * ------------------------------------------------------------------ */
+
+router.get('/dashboard/actions', wrap(async (req, res) => {
+  const items = [];
+
+  const [charged, expiring, otpBookings, replacements, pendingNannies, openTickets] =
+    await Promise.all([
+      Payment.find({ status: PAYMENT_STATUS.REFUND_IN_PROCESS })
+        .populate({ path: 'booking', select: 'bookingNumber family',
+                    populate: { path: 'family', select: 'fullName' } })
+        .limit(5),
+      Booking.find({
+        'nannyResponses.outcome': 'pending',
+        status: { $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING] },
+      }).populate('nanny', 'fullName').limit(5),
+      Booking.find({
+        status: BOOKING_STATUS.ONGOING,
+        'serviceDays.status': {
+          $in: [SERVICE_DAY_STATUS.AWAITING_ARRIVAL, SERVICE_DAY_STATUS.AWAITING_END_OF_SERVICE],
+        },
+      }).limit(5),
+      Booking.find({ subStatus: BOOKING_SUBSTATUS.NANNY_CANCELLED_AWAITING_REPLACEMENT })
+        .populate('family', 'fullName').limit(5),
+      User.find({ role: USER_ROLE.NANNY, nannyStatus: NANNY_STATUS.PENDING_VERIFICATION })
+        .select('fullName').limit(5),
+      Ticket.find({ status: { $in: [TICKET_STATUS.OPEN, TICKET_STATUS.IN_PROGRESS] } })
+        .sort({ createdAt: 1 }).limit(5),
+    ]);
+
+  if (charged.length) {
+    items.push({
+      severity: 'critical', title: 'Charged booking cancelled — refund needed',
+      subtitle: charged
+        .map((p) => `${p.booking?.family?.fullName || 'Family'} · #${p.booking?.bookingNumber || '—'}`)
+        .join(', '),
+      count: charged.length, action: 'View', link: '/bookings',
+    });
+  }
+  if (expiring.length) {
+    const soonest = expiring
+      .flatMap((b) => b.nannyResponses.filter((r) => r.outcome === 'pending'))
+      .map((r) => new Date(r.expiresAt))
+      .sort((a, b) => a - b)[0];
+    const mins = soonest ? Math.max(0, Math.round((soonest - Date.now()) / 60000)) : null;
+    items.push({
+      severity: 'high', title: 'Booking requests expiring soon',
+      subtitle: mins !== null ? `${mins} min remaining` : 'awaiting nanny response',
+      count: expiring.length, action: 'View', link: '/bookings',
+    });
+  }
+  if (otpBookings.length) {
+    items.push({
+      severity: 'high', title: 'OTP confirmation pending on active booking',
+      subtitle: otpBookings.map((b) => `#${b.bookingNumber}`).join(', '),
+      count: otpBookings.length, action: 'View', link: '/bookings',
+    });
+  }
+  if (replacements.length) {
+    items.push({
+      severity: 'high', title: 'Replacement nanny needed',
+      subtitle: replacements.map((b) => `#${b.bookingNumber} · ${b.family?.fullName || 'Family'}`).join(', '),
+      count: replacements.length, action: 'Assign', link: '/bookings',
+    });
+  }
+  if (pendingNannies.length) {
+    items.push({
+      severity: 'medium', title: 'Nanny verification pending review',
+      subtitle: pendingNannies.map((n) => n.fullName).join(', '),
+      count: pendingNannies.length, action: 'Review', link: '/nannies',
+    });
+  }
+  if (openTickets.length) {
+    items.push({
+      severity: 'low', title: 'Open support tickets',
+      subtitle: `Oldest: ${dayjs(openTickets[0].createdAt).format('D MMM')}`,
+      count: openTickets.length, action: 'View', link: '/support',
+    });
+  }
+
+  res.json({ items });
 }));
 
 async function sumPayments(match) {
@@ -119,6 +244,119 @@ async function sumPayments(match) {
   ]);
   return row?.total || 0;
 }
+
+/* ------------------------------------------------------------------ *
+ * Calendar — every booking day, plus nanny blocked dates, for a month.
+ * ------------------------------------------------------------------ */
+
+router.get('/calendar', wrap(async (req, res) => {
+  const month = req.query.month || dayjs().format('YYYY-MM');
+  const start = dayjs(`${month}-01`).startOf('month');
+  const end = start.endOf('month');
+
+  const bookings = await Booking.find({
+    status: { $ne: BOOKING_STATUS.DRAFT },
+    startDate: { $lte: end.format('YYYY-MM-DD') },
+    $or: [
+      { endDate: { $gte: start.format('YYYY-MM-DD') } },
+      { endDate: null, startDate: { $gte: start.format('YYYY-MM-DD') } },
+    ],
+  })
+    .populate('family', 'fullName')
+    .populate('nanny', 'fullName');
+
+  // One event per service day so multi-day bookings appear on each date.
+  const events = [];
+  for (const b of bookings) {
+    const family = b.family?.fullName?.split(' ')[0] || 'Family';
+    const familyLast = b.family?.fullName?.split(' ').slice(-1)[0] || '';
+    const nanny = b.nanny?.fullName?.split(' ')[0] || null;
+    const label = b.subStatus === BOOKING_SUBSTATUS.NANNY_CANCELLED_AWAITING_REPLACEMENT
+      ? `${family[0]}. ${familyLast} — Replacement Needed`
+      : b.status === BOOKING_STATUS.CANCELLED
+        ? `${family[0]}. ${familyLast} — Cancelled`
+        : `${family[0]}. ${familyLast}${nanny ? ` + ${nanny}` : ''}`;
+
+    const status = b.subStatus === BOOKING_SUBSTATUS.NANNY_CANCELLED_AWAITING_REPLACEMENT
+      ? 'replacement_needed' : b.status;
+
+    const days = b.serviceDays?.length
+      ? b.serviceDays.map((d) => dayjs(d.startAt).format('YYYY-MM-DD'))
+      : [b.startDate];
+
+    for (const date of days) {
+      if (date < start.format('YYYY-MM-DD') || date > end.format('YYYY-MM-DD')) continue;
+      events.push({
+        date, label, status, bookingId: String(b._id), bookingNumber: b.bookingNumber,
+        family: b.family?.fullName, nanny: b.nanny?.fullName,
+      });
+    }
+  }
+
+  // Nanny blocked dates within the month.
+  const nannies = await User.find({
+    role: USER_ROLE.NANNY, 'availability.blockedDates': { $exists: true, $ne: [] },
+  }).select('fullName availability.blockedDates');
+
+  for (const n of nannies) {
+    for (const date of n.availability?.blockedDates || []) {
+      if (date < start.format('YYYY-MM-DD') || date > end.format('YYYY-MM-DD')) continue;
+      events.push({ date, label: `${n.fullName} — Blocked`, status: 'blocked', nanny: n.fullName });
+    }
+  }
+
+  res.json({ month, events });
+}));
+
+/* ------------------------------------------------------------------ *
+ * Referrals — who invited whom, and how far they got.
+ * ------------------------------------------------------------------ */
+
+router.get('/referrals', wrap(async (req, res) => {
+  const referred = await User.find({ referredBy: { $ne: null } })
+    .populate('referredBy', 'fullName role referralCode')
+    .sort({ createdAt: -1 })
+    .limit(200);
+
+  const rows = await Promise.all(referred.map(async (u) => {
+    const bookings = await Booking.countDocuments({
+      [u.role === USER_ROLE.NANNY ? 'nanny' : 'family']: u._id,
+      status: { $ne: BOOKING_STATUS.DRAFT },
+    });
+    const verified = u.role === USER_ROLE.NANNY
+      ? u.nannyStatus === NANNY_STATUS.VERIFIED
+      : Boolean(u.emailVerified);
+
+    return {
+      _id: String(u._id),
+      referrer: u.referredBy?.fullName || '—',
+      referrerRole: u.referredBy?.role || null,
+      referrerCode: u.referredBy?.referralCode || null,
+      contact: u.fullName,
+      email: u.email || null,
+      phone: u.phone,
+      dateReferred: u.createdAt,
+      joined: true,
+      userType: u.role,
+      verified,
+      firstBooking: bookings > 0,
+      status: bookings > 0 ? 'successful' : verified ? 'pending' : 'invited',
+    };
+  }));
+
+  const successful = rows.filter((r) => r.status === 'successful').length;
+  const pending = rows.filter((r) => r.status === 'pending').length;
+
+  res.json({
+    rows,
+    summary: {
+      total: rows.length,
+      successful,
+      pending,
+      successRate: rows.length ? Math.round((successful / rows.length) * 100) : 0,
+    },
+  });
+}));
 
 /* ------------------------------------------------------------------ *
  * Nannies
@@ -135,7 +373,31 @@ router.get('/nannies', wrap(async (req, res) => {
       { phone: new RegExp(escapeRe(search), 'i') },
     ];
   }
-  res.json(await paginate(User, query, req.query, { sort: { createdAt: -1 } }));
+  const result = await paginate(User, query, req.query, { sort: { createdAt: -1 } });
+
+  // The listing shows live booking counts and a derived availability state,
+  // so enrich each row rather than making the table fetch per nanny.
+  result.items = await Promise.all(result.items.map(async (n) => {
+    const [active, total] = await Promise.all([
+      Booking.countDocuments({
+        nanny: n._id, status: { $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING] },
+      }),
+      Booking.countDocuments({ nanny: n._id, status: { $ne: BOOKING_STATUS.DRAFT } }),
+    ]);
+
+    // Availability reflects the calendar only; approval is shown separately.
+    const today = dayjs().format('YYYY-MM-DD');
+    const blocked = (n.availability?.blockedDates || []).includes(today);
+    const suspended = n.blocked || n.nannyStatus === NANNY_STATUS.SUSPENDED
+      || n.nannyStatus === NANNY_STATUS.REJECTED;
+    const availability = suspended || blocked
+      ? 'unavailable'
+      : active > 0 ? 'partially_booked' : 'available';
+
+    return { ...n.toObject(), activeBookings: active, totalBookings: total, availability };
+  }));
+
+  res.json(result);
 }));
 
 router.get('/nannies/:id', wrap(async (req, res) => {
@@ -235,7 +497,36 @@ router.get('/families', wrap(async (req, res) => {
       { phone: new RegExp(escapeRe(search), 'i') },
     ];
   }
-  res.json(await paginate(User, query, req.query, { sort: { createdAt: -1 } }));
+  const result = await paginate(User, query, req.query, { sort: { createdAt: -1 } });
+
+  // Per-family booking/spend/ticket counters shown in the listing.
+  result.items = await Promise.all(result.items.map(async (f) => {
+    const [total, active, completed, cancelled, tickets, spentAgg] = await Promise.all([
+      Booking.countDocuments({ family: f._id, status: { $ne: BOOKING_STATUS.DRAFT } }),
+      Booking.countDocuments({
+        family: f._id, status: { $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING] },
+      }),
+      Booking.countDocuments({ family: f._id, status: BOOKING_STATUS.COMPLETED }),
+      Booking.countDocuments({ family: f._id, status: BOOKING_STATUS.CANCELLED }),
+      Ticket.countDocuments({
+        raisedBy: f._id, status: { $in: [TICKET_STATUS.OPEN, TICKET_STATUS.IN_PROGRESS] },
+      }),
+      Payment.aggregate([
+        { $match: { family: f._id, status: PAYMENT_STATUS.COMPLETED, kind: { $ne: 'refund' } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ]),
+    ]);
+
+    return {
+      ...f.toObject(),
+      stats: {
+        total, active, completed, cancelled, tickets,
+        spent: spentAgg[0]?.total || 0,
+      },
+    };
+  }));
+
+  res.json(result);
 }));
 
 router.get('/families/:id', wrap(async (req, res) => {
@@ -389,7 +680,10 @@ router.get('/payments', wrap(async (req, res) => {
   if (kind) query.kind = kind;
   res.json(await paginate(Payment, query, req.query, {
     sort: { createdAt: -1 },
-    populate: [{ path: 'family', select: 'fullName phone' }, { path: 'booking', select: 'bookingNumber' }],
+    populate: [
+      { path: 'family', select: 'fullName phone' },
+      { path: 'booking', select: 'bookingNumber nanny', populate: { path: 'nanny', select: 'fullName' } },
+    ],
   }));
 }));
 
@@ -412,7 +706,12 @@ router.get('/payments/summary', wrap(async (req, res) => {
   const weekStart = dayjs().startOf('week').toDate();
   const weekEnd = dayjs().endOf('week').toDate();
 
-  const [familyWeek, nannyWeek, pendingNannies] = await Promise.all([
+  // Payouts are released on Mondays, so "next Monday" is the upcoming release.
+  const nextMonday = dayjs().day() === 1 && dayjs().hour() < 9
+    ? dayjs().startOf('day')
+    : dayjs().add(1, 'week').startOf('week').add(1, 'day');
+
+  const [familyWeek, nannyWeek, nextRelease, refunds] = await Promise.all([
     Payment.aggregate([
       { $match: { status: PAYMENT_STATUS.COMPLETED, kind: { $ne: 'refund' }, createdAt: { $gte: weekStart, $lte: weekEnd } } },
       { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
@@ -421,13 +720,25 @@ router.get('/payments/summary', wrap(async (req, res) => {
       { $match: { scheduledFor: { $gte: weekStart, $lte: weekEnd } } },
       { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
     ]),
-    User.countDocuments({ role: USER_ROLE.NANNY, nannyStatus: NANNY_STATUS.PENDING_VERIFICATION }),
+    Payout.aggregate([
+      { $match: { status: PAYOUT_STATUS.PENDING, scheduledFor: { $lte: nextMonday.endOf('day').toDate() } } },
+      { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
+    ]),
+    Payment.aggregate([
+      { $match: { status: PAYMENT_STATUS.REFUND_IN_PROCESS } },
+      { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
+    ]),
   ]);
 
   res.json({
     familyPaymentsThisWeek: { total: familyWeek[0]?.total || 0, count: familyWeek[0]?.count || 0 },
     nannyPaymentsThisWeek: { total: nannyWeek[0]?.total || 0, count: nannyWeek[0]?.count || 0 },
-    deletePendingNanny: { count: pendingNannies },
+    nextMondayRelease: {
+      total: nextRelease[0]?.total || 0,
+      count: nextRelease[0]?.count || 0,
+      date: nextMonday.format('YYYY-MM-DD'),
+    },
+    refundsInProcess: { total: refunds[0]?.total || 0, count: refunds[0]?.count || 0 },
   });
 }));
 
