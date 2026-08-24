@@ -13,7 +13,11 @@ import './flows/index.js';   // registers every conversation state
 export function createApp() {
   const app = express();
 
-  app.use(cors());
+  // Lock CORS to the dashboard's origin in production. CORS_ORIGINS is a
+  // comma-separated list; unset means allow any origin (fine for local dev).
+  const origins = (process.env.CORS_ORIGINS || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  app.use(cors(origins.length ? { origin: origins, credentials: true } : {}));
   app.use(express.json({ limit: '2mb' }));
   app.use(express.urlencoded({ extended: true }));
 

@@ -39,6 +39,7 @@ npm run dev               # auto-restart on change
 | `ULTRAMSG_INSTANCE_ID` | ✅ to send | From your UltraMsg instance |
 | `ULTRAMSG_TOKEN` | ✅ to send | From your UltraMsg instance |
 | `ULTRAMSG_WEBHOOK_TOKEN` | recommended | If set, webhook calls must include `?token=<value>` |
+| `CORS_ORIGINS` | ✅ in prod | Comma-separated dashboard origins; empty allows any origin |
 
 Business rules (all optional, sensible defaults applied):
 `CURRENCY`, `TRANSPORT_FEE_MIN`, `TRANSPORT_FEE_MAX`,
