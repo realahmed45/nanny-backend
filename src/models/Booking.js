@@ -84,7 +84,8 @@ const BookingSchema = new mongoose.Schema({
   totalAmount: Number,
   paidAmount: { type: Number, default: 0 },
   additionalDue: { type: Number, default: 0 },
-  refundedAmount: { type: Number, default: 0 },
+  refundDue: { type: Number, default: 0 },        // owed per policy
+  refundedAmount: { type: Number, default: 0 },   // actually transferred back
   transportFee: { type: Number, default: 0 },
   paymentStatus: { type: String, enum: Object.values(PAYMENT_STATUS), default: PAYMENT_STATUS.IN_PROCESS },
 

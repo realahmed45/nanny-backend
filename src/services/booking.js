@@ -208,7 +208,10 @@ export async function cancelBooking(booking, { cancelledBy, reason, at = new Dat
   booking.cancelledAt = at;
   booking.cancellationReason = reason;
   booking.cancellationBreakdown = breakdown;
-  booking.refundedAmount = round2((booking.refundedAmount || 0) + breakdown.totalRefund);
+  // What the policy says we owe. `refundedAmount` is only credited once an
+  // admin has actually transferred the money, so the dashboard never shows
+  // a refund as paid while it is still sitting in our account.
+  booking.refundDue = round2((booking.refundDue || 0) + breakdown.totalRefund);
   booking.paymentStatus = breakdown.totalRefund > 0
     ? PAYMENT_STATUS.REFUND_IN_PROCESS
     : booking.paymentStatus;

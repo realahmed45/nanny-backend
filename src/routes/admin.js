@@ -10,10 +10,14 @@ import {
   TICKET_STATUS, CANCELLED_BY, SERVICE_DAY_STATUS, BOOKING_SUBSTATUS,
 } from '../utils/constants.js';
 import { signToken, requireAuth, requireRole } from '../middleware/auth.js';
-import { cancelBooking, markNannyCancelled } from '../services/booking.js';
-import { refundBooking, releaseDuePayouts, queuePayout } from '../services/payments.js';
+import { cancelBooking, markNannyCancelled, openNannyResponseWindow } from '../services/booking.js';
+import {
+  refundBooking, releaseDuePayouts, queuePayout,
+  approveTransfer, rejectTransfer, completeRefund, markPayoutPaid,
+} from '../services/payments.js';
 import { computeCancellationRefund } from '../services/policy.js';
 import { notifyUser, notifyPhone } from '../services/notify.js';
+import { money } from '../utils/format.js';
 import * as M from '../utils/messages.js';
 import config from '../config/index.js';
 
@@ -711,7 +715,7 @@ router.get('/payments/summary', wrap(async (req, res) => {
     ? dayjs().startOf('day')
     : dayjs().add(1, 'week').startOf('week').add(1, 'day');
 
-  const [familyWeek, nannyWeek, nextRelease, refunds] = await Promise.all([
+  const [familyWeek, nannyWeek, nextRelease, refunds, awaiting] = await Promise.all([
     Payment.aggregate([
       { $match: { status: PAYMENT_STATUS.COMPLETED, kind: { $ne: 'refund' }, createdAt: { $gte: weekStart, $lte: weekEnd } } },
       { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
@@ -728,6 +732,10 @@ router.get('/payments/summary', wrap(async (req, res) => {
       { $match: { status: PAYMENT_STATUS.REFUND_IN_PROCESS } },
       { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
     ]),
+    Payment.aggregate([
+      { $match: { status: PAYMENT_STATUS.IN_PROCESS, kind: { $ne: 'refund' } } },
+      { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
+    ]),
   ]);
 
   res.json({
@@ -739,6 +747,7 @@ router.get('/payments/summary', wrap(async (req, res) => {
       date: nextMonday.format('YYYY-MM-DD'),
     },
     refundsInProcess: { total: refunds[0]?.total || 0, count: refunds[0]?.count || 0 },
+    awaitingReview: { total: awaiting[0]?.total || 0, count: awaiting[0]?.count || 0 },
   });
 }));
 
@@ -757,6 +766,70 @@ router.post('/payouts/:id/release', requireRole('admin', 'super_admin'), wrap(as
   res.json({ ok: true, released: released.length });
 }));
 
+/**
+ * Approve a family's transfer. This is the only path that marks a booking
+ * paid, and it is what releases the request to the nanny — so the nanny is
+ * never asked to hold a slot for money that has not arrived.
+ */
+router.post('/payments/:id/approve', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const payment = await Payment.findById(req.params.id);
+  if (!payment) return res.status(404).json({ error: 'Payment not found' });
+  if (payment.kind === 'refund') {
+    return res.status(400).json({ error: 'Use /complete-refund for refunds' });
+  }
+
+  const { booking } = await approveTransfer(payment, {
+    adminId: req.admin?.id,
+    note: req.body?.note || '',
+  });
+
+  if (booking) {
+    const [family, nanny] = await Promise.all([
+      User.findById(booking.family),
+      booking.nanny ? User.findById(booking.nanny) : null,
+    ]);
+
+    if (family) await notifyUser(family, M.PAYMENT_VERIFIED);
+
+    // Open the nanny's response window now that the money is confirmed.
+    if (nanny && booking.status === BOOKING_STATUS.PENDING_PAYMENT) {
+      const { expiresAt } = openNannyResponseWindow(booking, nanny._id, 'new_booking');
+      booking.status = BOOKING_STATUS.UPCOMING;
+      await booking.save();
+
+      await notifyUser(nanny, M.nannyBookingRequest(booking, family, expiresAt));
+      const { setNannyRequestState } = await import('../flows/familyBookingPayment.js');
+      await setNannyRequestState(nanny, booking);
+    }
+  }
+
+  res.json({ ok: true, payment, booking });
+}));
+
+/** Reject a transfer — the family is told why and can send a new screenshot. */
+router.post('/payments/:id/reject', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const payment = await Payment.findById(req.params.id);
+  if (!payment) return res.status(404).json({ error: 'Payment not found' });
+
+  const note = req.body?.note || '';
+  const { booking } = await rejectTransfer(payment, { adminId: req.admin?.id, note });
+
+  const family = await User.findById(payment.family);
+  if (family) {
+    await notifyUser(family, M.paymentRejected(note));
+    const session = await Session.findOne({ phone: family.phone });
+    if (session) {
+      session.state = 'FF_PAYMENT_REJECTED';
+      session.data = { ...(session.data || {}), payingBookingId: String(payment.booking) };
+      session.markModified('data');
+      await session.save();
+    }
+  }
+
+  res.json({ ok: true, payment, booking });
+}));
+
+/** Record a refund owed to a family (admin transfers it manually afterwards). */
 router.post('/payments/:id/refund', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
   const payment = await Payment.findById(req.params.id);
   if (!payment) return res.status(404).json({ error: 'Payment not found' });
@@ -765,8 +838,50 @@ router.post('/payments/:id/refund', requireRole('admin', 'super_admin'), wrap(as
   if (!booking) return res.status(404).json({ error: 'Booking not found' });
 
   const amount = Number(req.body?.amount ?? payment.amount);
-  const result = await refundBooking(booking, { amount, reason: req.body?.reason || 'Manual admin refund' });
+  const result = await refundBooking(booking, {
+    amount,
+    reason: req.body?.reason || 'Manual admin refund',
+  });
   res.json({ ok: result.success, refund: result.payment });
+}));
+
+/** Mark a refund as sent, with the transfer receipt attached. */
+router.post('/payments/:id/complete-refund', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const payment = await Payment.findById(req.params.id);
+  if (!payment) return res.status(404).json({ error: 'Payment not found' });
+  if (payment.kind !== 'refund') {
+    return res.status(400).json({ error: 'That payment is not a refund' });
+  }
+
+  const { booking } = await completeRefund(payment, {
+    adminId: req.admin?.id,
+    proof: { url: req.body?.proofUrl, mediaId: req.body?.proofMediaId },
+    note: req.body?.note || '',
+  });
+
+  const family = await User.findById(payment.family);
+  if (family) await notifyUser(family, M.refundIssued(payment.amount, payment.reference));
+
+  res.json({ ok: true, payment, booking });
+}));
+
+/** Mark a nanny payout as transferred, with proof. */
+router.post('/payouts/:id/mark-paid', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const payout = await Payout.findById(req.params.id);
+  if (!payout) return res.status(404).json({ error: 'Payout not found' });
+
+  await markPayoutPaid(payout, {
+    adminId: req.admin?.id,
+    proof: { url: req.body?.proofUrl, mediaId: req.body?.proofMediaId },
+    note: req.body?.note || '',
+  });
+
+  const nanny = await User.findById(payout.nanny);
+  if (nanny) {
+    await notifyUser(nanny, `\u{1F4B0} *Payout sent \u{2014} ${money(payout.amount)}*\n\nWe have transferred your earnings.\nReference: ${payout.reference}`);
+  }
+
+  res.json({ ok: true, payout });
 }));
 
 /* ------------------------------------------------------------------ *
@@ -875,6 +990,9 @@ router.get('/settings', (req, res) => {
     freeRescheduleLimit: config.freeRescheduleLimit,
     liveLocationWindowHours: config.liveLocationWindowHours,
     whatsappConfigured: !!(config.ultramsg.instanceId && config.ultramsg.token),
+    emailConfigured: !!config.smtp.host,
+    bank: config.bank,
+    bankConfigured: !!(config.bank.accountNumber || config.bank.iban),
   });
 });
 

@@ -8,6 +8,7 @@ import webhookRoutes from './routes/webhook.js';
 import adminRoutes from './routes/admin.js';
 import { startScheduler } from './jobs/scheduler.js';
 import { isDryRun } from './providers/ultramsg.js';
+import { isDryRun as emailIsDryRun } from './providers/email.js';
 import './flows/index.js';   // registers every conversation state
 
 export function createApp() {
@@ -26,7 +27,9 @@ export function createApp() {
       ok: true,
       service: 'my-nanny-server',
       env: config.env,
-      whatsapp: isDryRun() ? 'dry-run (no UltraMsg credentials)' : 'live',
+      whatsapp: isDryRun() ? 'dry-run (no WhatsApp credentials)' : 'live',
+      email: emailIsDryRun() ? 'dry-run (no SMTP configured)' : 'live',
+      payments: 'manual bank transfer (admin-verified)',
       time: new Date().toISOString(),
     });
   });

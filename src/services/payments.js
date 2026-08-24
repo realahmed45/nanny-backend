@@ -2,61 +2,114 @@ import dayjs from 'dayjs';
 import { Payment, Payout } from '../models/Payment.js';
 import { nextSequence } from '../models/Counter.js';
 import { Booking, User } from '../models/index.js';
-import gateway from '../providers/payments.js';
 import { PAYMENT_STATUS, PAYOUT_STATUS, BOOKING_STATUS, SERVICE_DAY_STATUS } from '../utils/constants.js';
 import { round2 } from './policy.js';
 import config from '../config/index.js';
+
+/**
+ * Money is moved by manual bank transfer, outside this system.
+ *
+ * The family transfers the amount and uploads a screenshot of the receipt; an
+ * admin checks it against the bank and approves or rejects it. Nothing here
+ * talks to a payment gateway — these functions only keep the record straight,
+ * so what the dashboard shows always matches what a human actually verified.
+ *
+ * The lifecycle of a payment is therefore:
+ *   IN_PROCESS  — proof uploaded, waiting for an admin
+ *   COMPLETED   — admin confirmed the transfer landed
+ *   FAILED      — admin rejected it (wrong amount, unreadable, not received)
+ *
+ * and for refunds:
+ *   REFUND_IN_PROCESS — owed to the family, admin still has to send it
+ *   REFUNDED          — admin sent it and recorded the proof
+ */
 
 async function reference(prefix) {
   return `${prefix}-${await nextSequence('payment_doc', 50000)}`;
 }
 
-/** Charge a family for a booking (or an additional top-up). */
-export async function chargeBooking(booking, { method = 'credit_card', amount = null, kind = 'booking' } = {}) {
+/**
+ * Record a family's transfer for a booking (or an additional top-up) and put it
+ * in the admin review queue. `proof` is the screenshot the family uploaded.
+ */
+export async function recordTransfer(booking, { amount = null, kind = 'booking', proof = {} } = {}) {
   const value = round2(amount ?? booking.totalAmount);
+
   const payment = await Payment.create({
     reference: await reference(kind === 'additional' ? 'ADD' : 'PAY'),
     booking: booking._id,
     family: booking.family,
     kind,
-    method,
+    method: 'bank_transfer',
     amount: value,
     currency: config.currency,
     status: PAYMENT_STATUS.IN_PROCESS,
+    proof: {
+      url: proof.url,
+      mediaId: proof.mediaId,
+      uploadedAt: new Date(),
+      note: proof.note,
+    },
   });
 
-  try {
-    const result = await gateway.charge({
-      amount: value,
-      currency: config.currency,
-      method,
-      metadata: { bookingNumber: booking.bookingNumber },
-    });
+  booking.paymentStatus = PAYMENT_STATUS.IN_PROCESS;
+  await booking.save();
 
-    if (!result.success) throw new Error(result.error || 'Payment declined');
-
-    payment.status = PAYMENT_STATUS.COMPLETED;
-    payment.providerRef = result.providerRef;
-    payment.processedAt = result.processedAt;
-    await payment.save();
-
-    booking.paidAmount = round2((booking.paidAmount || 0) + value);
-    booking.paymentStatus = PAYMENT_STATUS.COMPLETED;
-    if (kind === 'additional') booking.additionalDue = 0;
-    await booking.save();
-
-    return { success: true, payment };
-  } catch (err) {
-    payment.status = PAYMENT_STATUS.FAILED;
-    payment.failureReason = err.message;
-    await payment.save();
-    booking.paymentStatus = PAYMENT_STATUS.FAILED;
-    await booking.save();
-    return { success: false, payment, error: err.message };
-  }
+  return { success: true, payment };
 }
 
-/** Issue a refund against a booking and record the breakdown. */
+/**
+ * An admin confirmed the transfer arrived. This is the only path that marks a
+ * booking paid, so the money in the dashboard always reflects a human check.
+ */
+export async function approveTransfer(payment, { adminId = null, note = '' } = {}) {
+  if (payment.status === PAYMENT_STATUS.COMPLETED) {
+    return { success: true, payment, alreadyApproved: true };
+  }
+
+  payment.status = PAYMENT_STATUS.COMPLETED;
+  payment.reviewedBy = adminId;
+  payment.reviewedAt = new Date();
+  payment.reviewNote = note;
+  payment.processedAt = new Date();
+  await payment.save();
+
+  const booking = await Booking.findById(payment.booking);
+  if (booking) {
+    booking.paidAmount = round2((booking.paidAmount || 0) + (payment.amount || 0));
+    booking.paymentStatus = PAYMENT_STATUS.COMPLETED;
+    if (payment.kind === 'additional') {
+      booking.totalAmount = round2((booking.totalAmount || 0) + (payment.amount || 0));
+      booking.additionalDue = 0;
+    }
+    await booking.save();
+  }
+
+  return { success: true, payment, booking };
+}
+
+/** An admin rejected the proof — the family has to transfer again. */
+export async function rejectTransfer(payment, { adminId = null, note = '' } = {}) {
+  payment.status = PAYMENT_STATUS.FAILED;
+  payment.reviewedBy = adminId;
+  payment.reviewedAt = new Date();
+  payment.reviewNote = note;
+  payment.failureReason = note || 'Transfer could not be verified';
+  await payment.save();
+
+  const booking = await Booking.findById(payment.booking);
+  if (booking) {
+    booking.paymentStatus = PAYMENT_STATUS.FAILED;
+    await booking.save();
+  }
+
+  return { success: true, payment, booking };
+}
+
+/**
+ * Record that a refund is owed. No money moves here — an admin transfers it
+ * manually and then calls `completeRefund` with the proof.
+ */
 export async function refundBooking(booking, { amount, breakdown = null, reason = '' } = {}) {
   const value = round2(amount);
   if (value <= 0) return { success: true, payment: null, amount: 0 };
@@ -66,30 +119,42 @@ export async function refundBooking(booking, { amount, breakdown = null, reason 
     booking: booking._id,
     family: booking.family,
     kind: 'refund',
-    method: 'system',
+    method: 'bank_transfer',
     amount: value,
     currency: config.currency,
     status: PAYMENT_STATUS.REFUND_IN_PROCESS,
     breakdown,
-    failureReason: undefined,
+    reviewNote: reason,
   });
 
-  const result = await gateway.refund({
-    amount: value,
-    currency: config.currency,
-    metadata: { bookingNumber: booking.bookingNumber, reason },
-  });
+  booking.paymentStatus = PAYMENT_STATUS.REFUND_IN_PROCESS;
+  await booking.save();
 
-  payment.status = result.success ? PAYMENT_STATUS.REFUNDED : PAYMENT_STATUS.FAILED;
-  payment.providerRef = result.providerRef;
-  payment.processedAt = result.processedAt;
+  return { success: true, payment, amount: value };
+}
+
+/** An admin sent the refund by transfer and attached the receipt. */
+export async function completeRefund(payment, { adminId = null, proof = {}, note = '' } = {}) {
+  payment.status = PAYMENT_STATUS.REFUNDED;
+  payment.reviewedBy = adminId;
+  payment.reviewedAt = new Date();
+  payment.processedAt = new Date();
+  if (note) payment.reviewNote = note;
+  payment.refundProof = {
+    url: proof.url,
+    mediaId: proof.mediaId,
+    uploadedAt: proof.url ? new Date() : undefined,
+  };
   await payment.save();
 
-  if (result.success) {
+  const booking = await Booking.findById(payment.booking);
+  if (booking) {
+    booking.refundedAmount = round2((booking.refundedAmount || 0) + (payment.amount || 0));
     booking.paymentStatus = PAYMENT_STATUS.REFUNDED;
     await booking.save();
   }
-  return { success: result.success, payment, amount: value };
+
+  return { success: true, payment, booking };
 }
 
 /** The Monday on or after a date — payouts are released weekly on Monday. */
@@ -122,35 +187,40 @@ export async function queuePayout(booking, { nannyId, amount, serviceDayIds = []
   });
 }
 
-/** Release every payout scheduled for today or earlier (the Monday job). */
+/**
+ * The Monday job moves due payouts into "processing" — an admin then transfers
+ * each one by hand and marks it released. Nothing is auto-completed, because no
+ * money can move without a person doing it.
+ */
 export async function releaseDuePayouts(now = new Date()) {
   const due = await Payout.find({
     status: PAYOUT_STATUS.PENDING,
     scheduledFor: { $lte: now },
   });
 
-  const released = [];
+  const queued = [];
   for (const p of due) {
     p.status = PAYOUT_STATUS.PROCESSING;
+    // eslint-disable-next-line no-await-in-loop
     await p.save();
-    try {
-      // eslint-disable-next-line no-await-in-loop
-      const result = await gateway.payout({
-        amount: p.amount,
-        currency: p.currency,
-        metadata: { payoutRef: p.reference },
-      });
-      p.status = p.isFinalForBooking ? PAYOUT_STATUS.FINAL_DONE : PAYOUT_STATUS.COMPLETED;
-      p.releasedAt = result.processedAt || new Date();
-      await p.save();
-      released.push(p);
-    } catch (err) {
-      p.status = PAYOUT_STATUS.FAILED;
-      p.failureReason = err.message;
-      await p.save();
-    }
+    queued.push(p);
   }
-  return released;
+  return queued;
+}
+
+/** An admin transferred a payout to the nanny and recorded the proof. */
+export async function markPayoutPaid(payout, { adminId = null, proof = {}, note = '' } = {}) {
+  payout.status = payout.isFinalForBooking ? PAYOUT_STATUS.FINAL_DONE : PAYOUT_STATUS.COMPLETED;
+  payout.releasedAt = new Date();
+  payout.releasedBy = adminId;
+  if (note) payout.notes = note;
+  payout.proof = {
+    url: proof.url,
+    mediaId: proof.mediaId,
+    uploadedAt: proof.url ? new Date() : undefined,
+  };
+  await payout.save();
+  return { success: true, payout };
 }
 
 /** Earnings owed to a nanny for one completed service day (incl. overtime). */
@@ -159,6 +229,8 @@ export function dayEarnings(booking, day) {
 }
 
 export default {
-  chargeBooking, refundBooking, queuePayout, releaseDuePayouts,
+  recordTransfer, approveTransfer, rejectTransfer,
+  refundBooking, completeRefund,
+  queuePayout, releaseDuePayouts, markPayoutPaid,
   nextMonday, dayEarnings,
 };

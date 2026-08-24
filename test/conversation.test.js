@@ -78,6 +78,56 @@ async function familyBookingUpToListing(phone = FAMILY, { date = null } = {}) {
   return say(phone, 'None');        // other instructions -> summary
 }
 
+/**
+ * Walk the manual-transfer payment: upload the ID pair, send the receipt
+ * screenshot, then have an admin approve it (which is what releases the
+ * request to the nanny). Returns the booking.
+ */
+async function payAndApprove(phone = FAMILY, { approve = true } = {}) {
+  const { Booking } = await import('../src/models/index.js');
+  const { Payment } = await import('../src/models/Payment.js');
+
+  await say(phone, '1');                                   // start payment
+  await say(phone, '', { mediaUrl: 'https://cdn/id-front.jpg' });
+  await say(phone, '', { mediaUrl: 'https://cdn/id-back.jpg' });
+  await say(phone, '', { mediaUrl: 'https://cdn/receipt.jpg' });   // proof
+
+  const booking = await Booking.findOne({}).sort({ createdAt: -1 });
+  if (!approve) return booking;
+
+  const payment = await Payment.findOne({ booking: booking._id, kind: 'booking' });
+  await approvePaymentAsAdmin(payment);
+  return Booking.findById(booking._id);
+}
+
+/** Mimic the admin approving a transfer, including the nanny hand-off. */
+async function approvePaymentAsAdmin(payment) {
+  const { approveTransfer } = await import('../src/services/payments.js');
+  const { openNannyResponseWindow } = await import('../src/services/booking.js');
+  const { setNannyRequestState } = await import('../src/flows/familyBookingPayment.js');
+  const { notifyUser } = await import('../src/services/notify.js');
+  const { User, Booking } = await import('../src/models/index.js');
+  const { BOOKING_STATUS } = await import('../src/utils/constants.js');
+  const M = await import('../src/utils/messages.js');
+
+  const { booking } = await approveTransfer(payment, { note: 'verified in test' });
+  if (!booking) return;
+
+  const [family, nanny] = await Promise.all([
+    User.findById(booking.family),
+    booking.nanny ? User.findById(booking.nanny) : null,
+  ]);
+  if (family) await notifyUser(family, M.PAYMENT_VERIFIED);
+
+  if (nanny && booking.status === BOOKING_STATUS.PENDING_PAYMENT) {
+    const { expiresAt } = openNannyResponseWindow(booking, nanny._id, 'new_booking');
+    booking.status = BOOKING_STATUS.UPCOMING;
+    await booking.save();
+    await notifyUser(nanny, M.nannyBookingRequest(booking, family, expiresAt));
+    await setNannyRequestState(nanny, booking);
+  }
+}
+
 test('family registration collects name, email and verifies OTP', async () => {
   const { User } = await import('../src/models/index.js');
 
@@ -168,9 +218,10 @@ test('a nanny outside the budget is not matched', async () => {
   assert.match(reply, /couldn't find a nanny/i);
 });
 
-test('payment creates the booking and notifies the nanny with a 1-hour window', async () => {
-  const nanny = await createVerifiedNanny();
+test('manual transfer: proof is queued, and admin approval releases the request', async () => {
+  await createVerifiedNanny();
   const { Booking } = await import('../src/models/index.js');
+  const { Payment } = await import('../src/models/Payment.js');
 
   await familyBookingUpToListing();
   await say(FAMILY, '1');           // search
@@ -183,31 +234,75 @@ test('payment creates the booking and notifies the nanny with a 1-hour window', 
 
   await say(FAMILY, '', { mediaUrl: 'https://cdn/fam-id-front.jpg' });
   reply = await say(FAMILY, '', { mediaUrl: 'https://cdn/fam-id-back.jpg' });
-  assert.match(reply, /Choose payment/);
+  assert.match(reply, /Amount to transfer/, 'bank details are shown');
+  assert.match(reply, /send a screenshot/i);
 
-  reply = await say(FAMILY, '1');   // credit card
-  assert.match(reply, /Payment successful/);
-  assert.match(reply, /Waiting for nanny confirmation/);
-  assert.match(reply, /Booking ID#/);
-  assert.match(reply, /PAID/);
+  // Typing instead of attaching is rejected, so proof is never skipped.
+  reply = await say(FAMILY, 'I already paid');
+  assert.match(reply, /attach the screenshot/i);
 
-  const booking = await Booking.findOne({});
+  reply = await say(FAMILY, '', { mediaUrl: 'https://cdn/receipt.jpg' });
+  assert.match(reply, /received your payment proof/i);
+
+  let booking = await Booking.findOne({});
   assert.ok(booking, 'booking was created');
+  assert.equal(booking.status, 'pending_payment', 'held until an admin verifies');
+  assert.equal(booking.paymentStatus, 'payment_in_process');
+  assert.equal(booking.paidAmount, 0, 'nothing is counted as paid yet');
+  assert.equal(booking.totalAmount, 50, '$25/hr x 2 hrs x 1 day');
+
+  const payment = await Payment.findOne({ booking: booking._id });
+  assert.equal(payment.proof.url, 'https://cdn/receipt.jpg', 'screenshot is stored');
+  assert.equal(payment.method, 'bank_transfer');
+
+  // The nanny must NOT be asked to hold a slot before the money is verified.
+  assert.ok(
+    !messagesTo(NANNY).some((m) => m.includes('New Booking Request')),
+    'nanny is not notified until payment is approved',
+  );
+
+  await approvePaymentAsAdmin(payment);
+
+  booking = await Booking.findById(booking._id);
   assert.equal(booking.status, 'upcoming');
   assert.equal(booking.subStatus, 'awaiting_nanny_confirmation');
-  assert.equal(booking.totalAmount, 50, '$25/hr x 2 hrs x 1 day');
+  assert.equal(booking.paymentStatus, 'payment_completed');
   assert.equal(booking.paidAmount, 50);
 
-  // The nanny got the request, with a 1-hour clock.
-  const nannyMessages = messagesTo(NANNY);
-  const request = nannyMessages.find((m) => m.includes('New Booking Request'));
-  assert.ok(request, 'nanny received the booking request');
+  const request = messagesTo(NANNY).find((m) => m.includes('New Booking Request'));
+  assert.ok(request, 'nanny received the booking request after approval');
   assert.match(request, /Accept Booking/);
 
   const pending = booking.nannyResponses.find((r) => r.outcome === 'pending');
-  assert.ok(pending);
   const windowMinutes = Math.round((pending.expiresAt - pending.sentAt) / 60000);
   assert.equal(windowMinutes, 60, 'new bookings give the nanny 1 hour');
+
+  assert.ok(
+    messagesTo(FAMILY).some((m) => /Payment verified/i.test(m)),
+    'family was told the payment cleared',
+  );
+});
+
+test('a rejected transfer leaves the booking unpaid and lets the family retry', async () => {
+  await createVerifiedNanny();
+  const { Booking } = await import('../src/models/index.js');
+  const { Payment } = await import('../src/models/Payment.js');
+  const { rejectTransfer } = await import('../src/services/payments.js');
+
+  await familyBookingUpToListing();
+  await say(FAMILY, '1'); await say(FAMILY, '1'); await say(FAMILY, '1');
+  const booking = await payAndApprove(FAMILY, { approve: false });
+
+  const payment = await Payment.findOne({ booking: booking._id });
+  await rejectTransfer(payment, { note: 'Amount does not match' });
+
+  const after = await Booking.findById(booking._id);
+  assert.equal(after.paymentStatus, 'payment_failed');
+  assert.equal(after.paidAmount, 0, 'nothing was credited');
+  assert.ok(
+    !messagesTo(NANNY).some((m) => m.includes('New Booking Request')),
+    'a rejected payment never reaches the nanny',
+  );
 });
 
 test('nanny accepting confirms the booking and notifies the family', async () => {
@@ -216,10 +311,7 @@ test('nanny accepting confirms the booking and notifies the family', async () =>
 
   await familyBookingUpToListing();
   await say(FAMILY, '1'); await say(FAMILY, '1'); await say(FAMILY, '1');
-  await say(FAMILY, '1');
-  await say(FAMILY, '', { mediaUrl: 'https://cdn/a.jpg' });
-  await say(FAMILY, '', { mediaUrl: 'https://cdn/b.jpg' });
-  await say(FAMILY, '1');
+  await payAndApprove();
 
   const reply = await say(NANNY, '1');   // accept
   assert.match(reply, /Booking Accepted/);
@@ -237,10 +329,7 @@ test('nanny declining moves the booking to replacement-needed', async () => {
 
   await familyBookingUpToListing();
   await say(FAMILY, '1'); await say(FAMILY, '1'); await say(FAMILY, '1');
-  await say(FAMILY, '1');
-  await say(FAMILY, '', { mediaUrl: 'https://cdn/a.jpg' });
-  await say(FAMILY, '', { mediaUrl: 'https://cdn/b.jpg' });
-  await say(FAMILY, '1');
+  await payAndApprove();
 
   await say(NANNY, '2');              // decline
   const reply = await say(NANNY, 'Not available');
@@ -295,10 +384,7 @@ test('multi-day booking builds one service day per matching weekday', async () =
   assert.match(summary, /6 days/, 'two weeks x 3 days = 6 service days');
 
   await say(FAMILY, '1'); await say(FAMILY, '1'); await say(FAMILY, '1');
-  await say(FAMILY, '1');
-  await say(FAMILY, '', { mediaUrl: 'https://cdn/a.jpg' });
-  await say(FAMILY, '', { mediaUrl: 'https://cdn/b.jpg' });
-  await say(FAMILY, '1');
+  await payAndApprove();
 
   const booking = await Booking.findOne({});
   assert.equal(booking.serviceDays.length, 6);
@@ -346,10 +432,7 @@ test('OTP arrival and end-of-service confirmation complete a booking', async () 
   const today = dayjs().format('YYYY-MM-DD');
   await familyBookingUpToListing(FAMILY, { date: today });
   await say(FAMILY, '1'); await say(FAMILY, '1'); await say(FAMILY, '1');
-  await say(FAMILY, '1');
-  await say(FAMILY, '', { mediaUrl: 'https://cdn/a.jpg' });
-  await say(FAMILY, '', { mediaUrl: 'https://cdn/b.jpg' });
-  await say(FAMILY, '1');
+  await payAndApprove();
   await say(NANNY, '1');            // accept
 
   let booking = await Booking.findOne({});
@@ -419,10 +502,7 @@ test('family cancellation applies the policy and refunds correctly', async () =>
   // 10 days out => 100% refund for a single-day booking.
   await familyBookingUpToListing();
   await say(FAMILY, '1'); await say(FAMILY, '1'); await say(FAMILY, '1');
-  await say(FAMILY, '1');
-  await say(FAMILY, '', { mediaUrl: 'https://cdn/a.jpg' });
-  await say(FAMILY, '', { mediaUrl: 'https://cdn/b.jpg' });
-  await say(FAMILY, '1');
+  await payAndApprove();
   await say(NANNY, '1');
 
   await say(FAMILY, '0');
@@ -442,11 +522,22 @@ test('family cancellation applies the policy and refunds correctly', async () =>
 
   const booking = await Booking.findOne({});
   assert.equal(booking.status, 'cancelled');
-  assert.equal(booking.refundedAmount, 50);
+  assert.equal(booking.refundDue, 50, 'policy says $50 is owed');
+  assert.equal(booking.refundedAmount, 0, 'not credited until an admin sends it');
+  assert.equal(booking.paymentStatus, 'refund_in_process');
 
   const refund = await Payment.findOne({ kind: 'refund' });
   assert.ok(refund, 'refund payment recorded');
   assert.equal(refund.amount, 50);
+  assert.equal(refund.status, 'refund_in_process');
+
+  // The admin transfers the money and attaches the receipt.
+  const { completeRefund } = await import('../src/services/payments.js');
+  await completeRefund(refund, { proof: { url: 'https://cdn/refund.jpg' } });
+
+  const settled = await Booking.findById(booking._id);
+  assert.equal(settled.refundedAmount, 50, 'credited once actually sent');
+  assert.equal(settled.paymentStatus, 'refunded');
 });
 
 test('response timeout unassigns the nanny and offers replacements', async () => {
@@ -458,10 +549,7 @@ test('response timeout unassigns the nanny and offers replacements', async () =>
 
   await familyBookingUpToListing();
   await say(FAMILY, '1'); await say(FAMILY, '1'); await say(FAMILY, '1');
-  await say(FAMILY, '1');
-  await say(FAMILY, '', { mediaUrl: 'https://cdn/a.jpg' });
-  await say(FAMILY, '', { mediaUrl: 'https://cdn/b.jpg' });
-  await say(FAMILY, '1');
+  await payAndApprove();
 
   // Expire the window without a response.
   let booking = await Booking.findOne({});
@@ -487,10 +575,7 @@ test('nanny cancelling an accepted booking triggers replacement, not cancellatio
 
   await familyBookingUpToListing();
   await say(FAMILY, '1'); await say(FAMILY, '1'); await say(FAMILY, '1');
-  await say(FAMILY, '1');
-  await say(FAMILY, '', { mediaUrl: 'https://cdn/a.jpg' });
-  await say(FAMILY, '', { mediaUrl: 'https://cdn/b.jpg' });
-  await say(FAMILY, '1');
+  await payAndApprove();
   await say(NANNY, '1');            // accept
 
   // Nanny requests cancellation.

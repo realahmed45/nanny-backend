@@ -3,8 +3,8 @@ import { User, Booking, ChatThread } from '../models/index.js';
 import { BOOKING_STATUS, BOOKING_SUBSTATUS, USER_ROLE } from '../utils/constants.js';
 import { parseChoice, clean, lower } from '../utils/parse.js';
 import { draftToBooking } from './familyFindNanny.js';
-import { createBooking, openNannyResponseWindow } from '../services/booking.js';
-import { chargeBooking } from '../services/payments.js';
+import { createBooking } from '../services/booking.js';
+import { recordTransfer } from '../services/payments.js';
 import { notifyUser } from '../services/notify.js';
 import * as M from '../utils/messages.js';
 
@@ -154,10 +154,8 @@ const payConfirmHandler = async (ctx) => {
 
   // ID card is a one-time requirement — skip it once we already hold one.
   if (family?.idVerified || (family?.idDocuments?.length >= 2)) {
-    return [
-      { text: M.PAYMENT_START },
-      { text: M.ASK_PAYMENT_METHOD, state: 'FF_PAYMENT_METHOD' },
-    ];
+    const started = await beginTransfer(ctx);
+    return [{ text: M.PAYMENT_START }, started];
   }
   return [
     { text: M.PAYMENT_START },
@@ -197,30 +195,19 @@ const idBackHandler = async (ctx) => {
   family.idDocuments = (family.idDocuments || []).filter((d) => d.type !== 'id_back');
   family.idDocuments.push({ type: 'id_back', url: ctx.mediaUrl, mediaId: ctx.mediaId });
   await family.save();
-  return { text: M.ASK_PAYMENT_METHOD, state: 'FF_PAYMENT_METHOD' };
+  return beginTransfer(ctx);
 };
 idBackHandler.prompt = () => M.ASK_ID_BACK;
 on('FF_ID_BACK', idBackHandler);
 
-const paymentMethodHandler = async (ctx) => {
-  const t = lower(ctx.text);
-  let method = null;
-  const choice = parseChoice(ctx.text, 2);
-  if (choice === 1 || t.includes('card')) method = 'credit_card';
-  else if (choice === 2 || t.includes('bank') || t.includes('transfer')) method = 'bank_transfer';
-  if (!method) return M.ASK_PAYMENT_METHOD;
+/* ------------------------------------------------------------------ *
+ * Manual bank transfer: show the bank details, collect a screenshot, then
+ * wait for an admin to verify it. No gateway is involved, so a booking is
+ * only ever marked paid by a human checking the transfer arrived.
+ * ------------------------------------------------------------------ */
 
-  // Paying an outstanding difference on an existing booking?
-  const pendingId = ctx.get('additionalPaymentBookingId');
-  if (pendingId) return processAdditionalPayment(ctx, pendingId, method);
-
-  return processNewBookingPayment(ctx, method);
-};
-paymentMethodHandler.prompt = () => M.ASK_PAYMENT_METHOD;
-on('FF_PAYMENT_METHOD', paymentMethodHandler);
-
-/** Create the booking, take payment, then notify the nanny (1-hour clock). */
-async function processNewBookingPayment(ctx, method) {
+/** After the ID step: create the booking and ask for the transfer. */
+async function beginTransfer(ctx) {
   const family = await User.findById(ctx.session.user);
   const nanny = await User.findById(ctx.get('selectedNannyId'));
   if (!nanny) return { text: M.INVALID_CHOICE, state: 'FAMILY_MAIN_MENU' };
@@ -235,45 +222,65 @@ async function processNewBookingPayment(ctx, method) {
     },
   });
 
-  const result = await chargeBooking(booking, { method });
-
-  if (!result.success) {
-    ctx.set('failedBookingId', String(booking._id));
-    return [
-      { text: M.PAYMENT_PROCESSING },
-      { text: M.PAYMENT_FAILED, state: 'FF_PAYMENT_FAILED' },
-    ];
-  }
-
-  // Family provided an ID for the first time -> mark verified for later bookings.
+  // Family provided an ID for the first time -> remember it for later bookings.
   if (!family.idVerified && (family.idDocuments || []).length >= 2) {
     family.idVerified = true;
   }
-  // Persist the children/instructions onto the family profile for reuse.
   if (booking.children?.length) family.children = booking.children;
   if (booking.otherInstructions) family.familyInstructions = booking.otherInstructions;
   family.agentCallRequested = booking.agentCallRequested;
   await family.save();
 
-  booking.status = BOOKING_STATUS.UPCOMING;
-  const { expiresAt } = openNannyResponseWindow(booking, nanny._id, 'new_booking');
+  ctx.set('payingBookingId', String(booking._id));
+  return {
+    text: M.bankTransferInstructions(booking.totalAmount),
+    state: 'FF_AWAIT_PROOF',
+  };
+}
+
+/**
+ * The family sends the screenshot. We store it against a pending payment and
+ * hand it to the admin queue — the nanny is NOT notified yet, because the
+ * money has not been confirmed.
+ */
+const awaitProofHandler = async (ctx) => {
+  if (!ctx.mediaUrl) {
+    return `\u{1F4CE} Please attach the screenshot as an image.\n\n${M.ASK_PAYMENT_PROOF}`;
+  }
+
+  const bookingId = ctx.get('payingBookingId') || ctx.get('additionalPaymentBookingId');
+  const booking = await Booking.findById(bookingId);
+  if (!booking) return { text: M.INVALID_CHOICE, state: 'FAMILY_MAIN_MENU' };
+
+  const isAdditional = Boolean(ctx.get('additionalPaymentBookingId'));
+  await recordTransfer(booking, {
+    amount: isAdditional ? booking.additionalDue : booking.totalAmount,
+    kind: isAdditional ? 'additional' : 'booking',
+    proof: { url: ctx.mediaUrl, mediaId: ctx.mediaId, note: clean(ctx.text) },
+  });
+
+  booking.status = BOOKING_STATUS.PENDING_PAYMENT;
   await booking.save();
 
-  await notifyUser(nanny, M.nannyBookingRequest(booking, family, expiresAt));
-  await setNannyRequestState(nanny, booking);
-
   return [
-    { text: M.PAYMENT_PROCESSING },
-    { text: M.PAYMENT_SUCCESS },
+    { text: M.PAYMENT_PROOF_RECEIVED },
     {
-      text: M.bookingSummary(booking, { showId: true, nanny, paid: true, showStatus: true }),
+      text: M.bookingSummary(booking, { showId: true, showStatus: true }),
       state: 'FAMILY_MAIN_MENU',
       resetData: true,
       clearStack: true,
     },
-    { text: M.FAMILY_MAIN_MENU },
   ];
-}
+};
+awaitProofHandler.prompt = async (ctx) => {
+  const booking = await Booking.findById(
+    ctx.get('payingBookingId') || ctx.get('additionalPaymentBookingId')
+  );
+  return booking
+    ? M.bankTransferInstructions(booking.additionalDue || booking.totalAmount)
+    : M.ASK_PAYMENT_PROOF;
+};
+on('FF_AWAIT_PROOF', awaitProofHandler);
 
 /** Put the nanny's session into the accept/decline state for this booking. */
 export async function setNannyRequestState(nanny, booking) {
@@ -286,52 +293,23 @@ export async function setNannyRequestState(nanny, booking) {
   await session.save();
 }
 
-async function processAdditionalPayment(ctx, bookingId, method) {
-  const booking = await Booking.findById(bookingId).populate('nanny');
-  if (!booking) return { text: M.INVALID_CHOICE, state: 'FAMILY_MAIN_MENU' };
+/** An admin rejected the proof — let the family retry or reach support. */
+const paymentRejectedHandler = async (ctx) => {
+  const choice = parseChoice(ctx.text, 3);
+  if (!choice) return M.PAYMENT_REJECTED_ACTIONS;
 
-  const result = await chargeBooking(booking, { method, amount: booking.additionalDue, kind: 'additional' });
-  if (!result.success) {
-    return [
-      { text: M.PAYMENT_PROCESSING },
-      { text: M.PAYMENT_FAILED, state: 'FF_PAYMENT_FAILED' },
-    ];
+  if (choice === 1) {
+    const booking = await Booking.findById(ctx.get('payingBookingId'));
+    return {
+      text: booking ? M.bankTransferInstructions(booking.additionalDue || booking.totalAmount)
+                    : M.ASK_PAYMENT_PROOF,
+      state: 'FF_AWAIT_PROOF',
+    };
   }
-
-  booking.hourlyRate = booking.nanny?.hourlyRate ?? booking.hourlyRate;
-  booking.totalAmount = (booking.totalAmount || 0) + (result.payment.amount || 0);
-  booking.additionalDue = 0;
-  booking.status = BOOKING_STATUS.UPCOMING;
-
-  const family = await User.findById(booking.family);
-  const { expiresAt } = openNannyResponseWindow(booking, booking.nanny._id, 'new_booking');
-  await booking.save();
-
-  await notifyUser(booking.nanny, M.nannyBookingRequest(booking, family, expiresAt));
-  await setNannyRequestState(booking.nanny, booking);
-
-  ctx.set('additionalPaymentBookingId', null);
-  return [
-    { text: M.PAYMENT_PROCESSING },
-    { text: '✅ Additional payment successful. Waiting for nanny confirmation.' },
-    {
-      text: M.bookingSummary(booking, { showId: true, nanny: booking.nanny, paid: true, showStatus: true }),
-      state: 'FAMILY_MAIN_MENU',
-      resetData: true,
-    },
-  ];
-}
-
-const paymentFailedHandler = async (ctx) => {
-  const choice = parseChoice(ctx.text, 4);
-  if (!choice) return M.PAYMENT_FAILED;
-  if (choice === 1 || choice === 2) {
-    return { text: M.ASK_PAYMENT_METHOD, state: 'FF_PAYMENT_METHOD' };
-  }
-  if (choice === 3) return { text: 'Connecting you to support…', state: 'SUPPORT_MENU' };
+  if (choice === 2) return { text: 'Connecting you to support\u{2026}', state: 'SUPPORT_MENU' };
   return { text: M.FAMILY_MAIN_MENU, state: 'FAMILY_MAIN_MENU', resetData: true };
 };
-paymentFailedHandler.prompt = () => M.PAYMENT_FAILED;
-on('FF_PAYMENT_FAILED', paymentFailedHandler);
+paymentRejectedHandler.prompt = () => M.PAYMENT_REJECTED_ACTIONS;
+on('FF_PAYMENT_REJECTED', paymentRejectedHandler);
 
 export default { showPreBookingSummary, openChatWithNanny, setNannyRequestState };

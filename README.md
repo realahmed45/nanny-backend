@@ -40,6 +40,8 @@ npm run dev               # auto-restart on change
 | `ULTRAMSG_TOKEN` | ✅ to send | From your UltraMsg instance |
 | `ULTRAMSG_WEBHOOK_TOKEN` | recommended | If set, webhook calls must include `?token=<value>` |
 | `CORS_ORIGINS` | ✅ in prod | Comma-separated dashboard origins; empty allows any origin |
+| `BANK_*` | ✅ | Bank details shown to families (see **Money** below) |
+| `SMTP_*` | ✅ in prod | Mail server for verification codes (see **Email** below) |
 
 Business rules (all optional, sensible defaults applied):
 `CURRENCY`, `TRANSPORT_FEE_MIN`, `TRANSPORT_FEE_MAX`,
@@ -108,17 +110,41 @@ It is pure and fully unit-tested against the spec tables.
 
 ---
 
-## Going live: swapping the mock providers
+## Money: manual bank transfer
 
-Payments, email and file storage ship as mocks behind small interfaces so the
-flows are fully exercisable. Each is a drop-in replacement:
+There is no payment gateway. Families transfer the amount to your bank account
+and send a screenshot of the receipt; an admin checks it against the bank and
+approves or rejects it in the dashboard. The same applies in reverse for
+refunds and nanny payouts.
 
-- **`providers/payments.js`** — implement `charge`, `refund`, `payout` against
-  Stripe/PayPal and export it as `gateway`. Nothing in the flows changes.
-- **`providers/email.js`** — implement `send` with nodemailer/SES for the
-  verification codes.
-- **`providers/storage.js`** — currently records UltraMsg's hosted media URL;
-  swap for S3/GCS if you need to re-host ID documents.
+This means **a booking is only ever marked paid by a human**, and the nanny is
+not asked to hold a slot until the money is confirmed:
+
+```
+family sends screenshot  -> booking: pending_payment, payment: in_process
+admin approves           -> booking: upcoming, nanny gets the 1h request
+admin rejects            -> family is told why and can send a new screenshot
+```
+
+Refunds work the same way: cancelling records what is *owed* (`refundDue`), and
+`refundedAmount` is only credited once an admin marks the transfer sent, with a
+receipt attached. Payouts move to *processing* every Monday and an admin marks
+each one paid.
+
+Set `BANK_NAME`, `BANK_ACCOUNT_NAME`, `BANK_ACCOUNT_NUMBER`, `BANK_IBAN` (and
+optionally `BANK_INSTRUCTIONS`) so the bot can tell families where to send the
+money. Without them the bot says so rather than showing blank details.
+
+## Email
+
+Verification codes are emailed over SMTP (nodemailer). Set `SMTP_HOST`,
+`SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` and `SMTP_FROM`. Without a host, codes
+are logged to the console instead — fine locally, but nobody can verify an
+account in production, so `/health` reports `email: dry-run` to make that
+visible.
+
+`providers/storage.js` still just records the hosted media URL from WhatsApp;
+swap it for S3/GCS if you need to re-host ID documents and receipts.
 
 ---
 

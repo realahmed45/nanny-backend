@@ -13,7 +13,7 @@ import {
   cancelBooking, recalcServiceDays, openNannyResponseWindow, syncBookingStatus,
 } from '../services/booking.js';
 import { computeCancellationRefund, computeReschedulePenalty, round2 } from '../services/policy.js';
-import { refundBooking, queuePayout, chargeBooking } from '../services/payments.js';
+import { refundBooking, queuePayout } from '../services/payments.js';
 import { findReplacements } from '../services/matching.js';
 import { notifyUser } from '../services/notify.js';
 import { showBookingDetail, bookingActionMenu, menuText, MY_BOOKINGS_MENU } from './familyMenu.js';
@@ -580,8 +580,8 @@ We'll notify you as soon as she responds.`,
 async function startAdditionalPayment(ctx, booking) {
   ctx.set('additionalPaymentBookingId', String(booking._id));
   return {
-    text: `💰 Amount due: *${money(booking.additionalDue)}*\n\n${M.ASK_PAYMENT_METHOD}`,
-    state: 'FF_PAYMENT_METHOD',
+    text: M.bankTransferInstructions(booking.additionalDue),
+    state: 'FF_AWAIT_PROOF',
   };
 }
 
@@ -819,6 +819,9 @@ async function sendReceipt(ctx, booking) {
     '',
     `Subtotal: ${money(booking.totalAmount)}`,
     booking.refundedAmount > 0 ? `Refunded: -${money(booking.refundedAmount)}` : '',
+    booking.refundDue > booking.refundedAmount
+      ? `Refund pending: ${money(booking.refundDue - booking.refundedAmount)}`
+      : '',
     `*Total Paid: ${money(booking.paidAmount)}*`,
     '',
     `_Receipt generated ${dayjs().format('D MMMM YYYY')}_`,

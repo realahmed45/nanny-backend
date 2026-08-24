@@ -23,6 +23,29 @@ export const config = {
     webhookToken: process.env.ULTRAMSG_WEBHOOK_TOKEN || '',
   },
 
+  // SMTP for verification codes. Without a host we fall back to console
+  // logging, which is fine locally but must be configured in production.
+  smtp: {
+    host: process.env.SMTP_HOST || '',
+    port: int(process.env.SMTP_PORT, 587),
+    secure: String(process.env.SMTP_SECURE || '').toLowerCase() === 'true',
+    user: process.env.SMTP_USER || '',
+    pass: process.env.SMTP_PASS || '',
+    from: process.env.SMTP_FROM || 'My Nanny <no-reply@localhost>',
+    // Some relays present self-signed certs. Opt out of verification
+    // explicitly rather than silently trusting every certificate.
+    rejectUnauthorized: String(process.env.SMTP_REJECT_UNAUTHORIZED || 'true').toLowerCase() !== 'false',
+  },
+
+  // Bank details the bot shows families so they can make the transfer.
+  bank: {
+    name: process.env.BANK_NAME || '',
+    accountName: process.env.BANK_ACCOUNT_NAME || '',
+    accountNumber: process.env.BANK_ACCOUNT_NUMBER || '',
+    iban: process.env.BANK_IBAN || '',
+    instructions: process.env.BANK_INSTRUCTIONS || '',
+  },
+
   currency: process.env.CURRENCY || 'USD',
   transportFee: {
     min: int(process.env.TRANSPORT_FEE_MIN, 50000),

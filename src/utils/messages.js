@@ -3,6 +3,7 @@ import {
   childLines, weekdayList, statusLabel, numbered, durationMenu,
 } from './format.js';
 import { LANGUAGES, SKILLS, SUBJECTS, WEEKDAYS } from './constants.js';
+import config from '../config/index.js';
 
 /* ------------------------------------------------------------------ *
  * Shared / global
@@ -299,10 +300,45 @@ export const PAY_FIRST_NOTICE = (name) =>
 export const PAYMENT_START = 'Alright Lets start payment process';
 export const ASK_ID_FRONT = 'Add front image of your id card\nThis is a one time thing for security reasons';
 export const ASK_ID_BACK = 'Add back image of your id card\nThis is a one-time thing for security reasons';
-export const ASK_PAYMENT_METHOD = 'Choose payment.\n\n1. Credit Card\n2. Direct Bank Transfer';
-export const PAYMENT_PROCESSING = 'Processing payment...';
-export const PAYMENT_SUCCESS = '✅ Payment successful.\nYour booking has been done.\nWaiting for nanny confirmation.';
-export const PAYMENT_FAILED = '❌ Payment failed.\n\nWhat would you like to do?\n\n1. Try Again\n2. Change Payment Method\n3. Contact Support\n4. Back to Main Menu';
+/** Bank details + the amount owed, so the family can make the transfer. */
+export const bankTransferInstructions = (amount) => {
+  const b = config.bank;
+  const lines = [`\u{1F4B3} *Amount to transfer: ${money(amount)}*`, ''];
+
+  if (b.name || b.accountName || b.accountNumber || b.iban) {
+    lines.push('Please transfer to:');
+    if (b.name) lines.push(`\u{1F3E6} Bank: *${b.name}*`);
+    if (b.accountName) lines.push(`\u{1F464} Account name: *${b.accountName}*`);
+    if (b.accountNumber) lines.push(`\u{0023}\u{FE0F}\u{20E3} Account number: *${b.accountNumber}*`);
+    if (b.iban) lines.push(`\u{1F310} IBAN: *${b.iban}*`);
+  } else {
+    // Never invent bank details - say so rather than showing a blank block.
+    lines.push('\u{26A0}\u{FE0F} Our bank details are not configured yet.');
+    lines.push('Please contact support to complete this payment.');
+  }
+
+  if (b.instructions) lines.push('', b.instructions);
+  lines.push('', '\u{1F4F8} Once you have paid, *send a screenshot* of the transfer receipt here.');
+  return lines.join('\n');
+};
+
+export const ASK_PAYMENT_PROOF =
+  '\u{1F4F8} Please send a *screenshot* of your transfer receipt.\n\nAttach it as an image in this chat.';
+
+export const PAYMENT_PROOF_RECEIVED =
+  '\u{2705} Thanks! We have received your payment proof.\n\nOur team will verify the transfer and confirm your booking shortly. You will get a message as soon as it is checked.';
+
+export const PAYMENT_VERIFIED =
+  '\u{2705} *Payment verified.*\nYour booking has been confirmed.\nWaiting for nanny confirmation.';
+
+export const paymentRejected = (reason) =>
+  `\u{274C} *We could not verify your payment.*${reason ? `\n\nReason: ${reason}` : ''}\n\nWhat would you like to do?\n\n1. Send the screenshot again\n2. Contact Support\n3. Back to Main Menu`;
+
+export const PAYMENT_REJECTED_ACTIONS =
+  '\u{274C} We could not verify your payment.\n\nWhat would you like to do?\n\n1. Send the screenshot again\n2. Contact Support\n3. Back to Main Menu';
+
+export const refundIssued = (amount, ref) =>
+  `\u{1F4B8} *Refund sent \u{2014} ${money(amount)}*\n\nWe have transferred your refund back to you.${ref ? `\nReference: ${ref}` : ''}\n\nIt may take a few working days to appear in your account.`;
 
 /* ------------------------------------------------------------------ *
  * Nanny-side registration
