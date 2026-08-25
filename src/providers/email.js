@@ -1,47 +1,72 @@
 /**
- * Email provider — used for account verification codes.
+ * Email provider - used for account verification codes.
  *
- * With SMTP configured, mail is sent for real over nodemailer. Without it the
- * provider falls back to logging, so local development and the test suite work
- * with no mail server. `isDryRun()` tells the rest of the app which is active,
- * and /health surfaces it, so a misconfigured production deploy is visible
- * rather than silently swallowing verification codes.
+ * Three backends, chosen by what is configured:
+ *   1. Resend    (RESEND_API_KEY)  - recommended; an HTTP API, so there are no
+ *                                    SMTP ports to open and it works on hosts
+ *                                    that block outbound 587.
+ *   2. SMTP      (SMTP_HOST)       - any classic mail server.
+ *   3. Console   (nothing set)     - codes are logged, not sent. Fine locally
+ *                                    and in tests; in production it means
+ *                                    nobody can verify an account, so
+ *                                    /health reports it as dry-run.
  */
-import nodemailer from 'nodemailer';
 import config from '../config/index.js';
 
 export const sentEmails = [];
 
-/** True when no SMTP host is configured, so mail is logged instead of sent. */
-export const isDryRun = () => !config.smtp.host;
+/** True when nothing is configured, so mail is logged instead of sent. */
+export const isDryRun = () => !config.resend.apiKey && !config.smtp.host;
 
+/** Which backend is actually in use - surfaced in /health and Settings. */
+export const activeProvider = () => {
+  if (config.resend.apiKey) return 'resend';
+  if (config.smtp.host) return 'smtp';
+  return 'console';
+};
+
+let resendClient = null;
 let transporter = null;
 
-/** Built lazily so no connection is attempted until the first email. */
-function getTransport() {
-  if (transporter) return transporter;
+/* ------------------------------------------------------------------ *
+ * Backends - each built lazily, so an unused one is never imported.
+ * ------------------------------------------------------------------ */
 
-  transporter = nodemailer.createTransport({
-    host: config.smtp.host,
-    port: config.smtp.port,
-    secure: config.smtp.secure,
-    // Some relays (and local test servers) accept unauthenticated mail.
-    auth: config.smtp.user ? { user: config.smtp.user, pass: config.smtp.pass } : undefined,
-    tls: { rejectUnauthorized: config.smtp.rejectUnauthorized },
-  });
-  return transporter;
-}
-
-export const smtpEmailProvider = {
-  name: 'smtp',
+const resendProvider = {
+  name: 'resend',
   async send({ to, subject, text, html }) {
-    const info = await getTransport().sendMail({
-      from: config.smtp.from,
-      to,
+    if (!resendClient) {
+      const { Resend } = await import('resend');
+      resendClient = new Resend(config.resend.apiKey);
+    }
+    const { data, error } = await resendClient.emails.send({
+      from: config.resend.from,
+      to: [to],
       subject,
       text,
       html,
     });
+    // The SDK reports failures in `error` rather than throwing.
+    if (error) throw new Error(error.message || 'Resend rejected the message');
+    return { success: true, messageId: data?.id };
+  },
+};
+
+const smtpProvider = {
+  name: 'smtp',
+  async send({ to, subject, text, html }) {
+    if (!transporter) {
+      const nodemailer = (await import('nodemailer')).default;
+      transporter = nodemailer.createTransport({
+        host: config.smtp.host,
+        port: config.smtp.port,
+        secure: config.smtp.secure,
+        // Some relays (and local test servers) accept unauthenticated mail.
+        auth: config.smtp.user ? { user: config.smtp.user, pass: config.smtp.pass } : undefined,
+        tls: { rejectUnauthorized: config.smtp.rejectUnauthorized },
+      });
+    }
+    const info = await transporter.sendMail({ from: config.smtp.from, to, subject, text, html });
     return { success: true, messageId: info.messageId };
   },
 };
@@ -50,21 +75,23 @@ export const consoleEmailProvider = {
   name: 'console',
   async send({ to, subject, text }) {
     if (config.env !== 'test') {
-      console.log(`[email] to=${to} subject="${subject}"\n${text}`);
+      console.log(`[email] to=${to} subject="${subject}"
+${text}`);
     }
     return { success: true };
   },
 };
 
-/** Chosen per call so tests and runtime config changes are honoured. */
-function provider() {
-  return isDryRun() ? consoleEmailProvider : smtpEmailProvider;
-}
+const BACKENDS = {
+  resend: resendProvider,
+  smtp: smtpProvider,
+  console: consoleEmailProvider,
+};
 
 export async function send(message) {
-  // Always keep a local record — the admin dashboard and tests read it.
+  // Always keep a local record - the simulator and tests read it.
   sentEmails.push({ ...message, at: new Date() });
-  return provider().send(message);
+  return BACKENDS[activeProvider()].send(message);
 }
 
 const CODE_TEMPLATE = (code) => `

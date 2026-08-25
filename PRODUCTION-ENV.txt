@@ -1,0 +1,123 @@
+═══════════════════════════════════════════════════════════════════════
+  MY NANNY — PRODUCTION ENV
+  Everything is filled in except the lines marked  >>> YOU <<<
+═══════════════════════════════════════════════════════════════════════
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│  RENDER  (backend)          Build: npm install   Start: npm start   │
+└─────────────────────────────────────────────────────────────────────┘
+
+NODE_ENV=production
+PUBLIC_BASE_URL=https://YOUR-APP.onrender.com
+CORS_ORIGINS=https://YOUR-APP.vercel.app
+
+MONGODB_URI=mongodb+srv://ahmed:ROTATE_THIS_PASSWORD@cluster0.0wy8rqv.mongodb.net/mynanny?retryWrites=true&w=majority&appName=Cluster0
+
+JWT_SECRET=7b1c92374b8ed100a0165c59ab8627e7a3acdf1cf511d7ccbaddde69d0a81948
+ADMIN_EMAIL=muhammadmoosa6262@gmail.com
+ADMIN_PASSWORD=ChangeMe_After_First_Login_2026
+
+ULTRAMSG_INSTANCE_ID=                          >>> YOU <<<  (UltraMsg dashboard)
+ULTRAMSG_TOKEN=                                >>> YOU <<<  (UltraMsg dashboard)
+ULTRAMSG_BASE_URL=https://api.ultramsg.com
+ULTRAMSG_WEBHOOK_TOKEN=643ba16ea93c736bbbe37f441d040ca7
+
+BANK_NAME=                                     >>> YOU <<<  (see note 3)
+BANK_ACCOUNT_NAME=                             >>> YOU <<<
+BANK_ACCOUNT_NUMBER=                           >>> YOU <<<
+BANK_IBAN=
+BANK_INSTRUCTIONS=Please use your booking ID as the transfer reference.
+
+RESEND_API_KEY=                                >>> YOU <<<  (see note 4)
+RESEND_FROM=My Nanny <onboarding@resend.dev>
+
+CURRENCY=USD
+TRANSPORT_FEE_MIN=50000
+TRANSPORT_FEE_MAX=100000
+NEW_BOOKING_RESPONSE_MINUTES=60
+CHANGE_BOOKING_RESPONSE_MINUTES=120
+RESCHEDULE_PENALTY_PERCENT=5
+FREE_RESCHEDULE_LIMIT=3
+LIVE_LOCATION_WINDOW_HOURS=2
+
+  (do NOT set PORT — Render injects it)
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│  VERCEL  (frontend)         Build: npm run build   Output: dist     │
+└─────────────────────────────────────────────────────────────────────┘
+
+VITE_API_BASE=https://YOUR-APP.onrender.com/api/admin
+
+
+═══════════════════════════════════════════════════════════════════════
+  NOTES — 5 things to do
+═══════════════════════════════════════════════════════════════════════
+
+1. REPLACE "YOUR-APP" (3 places)
+   Two on Render (PUBLIC_BASE_URL, CORS_ORIGINS), one on Vercel
+   (VITE_API_BASE). Deploy the backend first so you know its URL.
+
+2. ROTATE THE DATABASE PASSWORD
+   The old password was shared in chat, so treat it as public.
+   Atlas -> Database Access -> edit user "ahmed" -> Edit Password.
+   Put the new one in MONGODB_URI above, replacing ROTATE_THIS_PASSWORD.
+   Also: Atlas -> Network Access -> Add IP -> 0.0.0.0/0
+   (without this Render cannot reach the database at all)
+
+3. BANK DETAILS — your real account
+   Payments are manual transfers. The bot shows families these details
+   and they send back a screenshot of the receipt, which you approve in
+   the dashboard. So this must be the actual account you want customers
+   paying into — I cannot invent it.
+
+   BANK_NAME           the bank, e.g. "Meezan Bank"
+   BANK_ACCOUNT_NAME   the account holder name
+   BANK_ACCOUNT_NUMBER the account number
+   BANK_IBAN           optional, leave empty if you do not use IBAN
+
+   If these are blank the bot tells families to contact support instead
+   of showing an empty block, so nothing breaks — but nobody can pay.
+
+4. RESEND_API_KEY — sends the verification codes (2 minutes)
+
+     a. Sign up free at resend.com
+     b. Go to API Keys -> Create API Key
+     c. Copy it (starts with "re_") and paste above
+
+   That is the whole setup. Free tier is 3,000 emails/month, which is
+   plenty to launch.
+
+   Leave RESEND_FROM exactly as it is for now. Resend only lets you send
+   from onboarding@resend.dev until you verify your own domain. Once you
+   own a domain, add it in Resend -> Domains and change RESEND_FROM to
+   something like "My Nanny <no-reply@yourdomain.com>".
+
+5. CURRENCY — check this one
+   Transport fee is 50,000-100,000 per your spec, which is not a USD
+   range. With CURRENCY=USD the bot quotes families "50,000 USD".
+   Set it to whatever your market actually uses (PKR, IDR, VND...).
+
+
+═══════════════════════════════════════════════════════════════════════
+  AFTER DEPLOYING
+═══════════════════════════════════════════════════════════════════════
+
+1. Point the UltraMsg webhook at (token included, it is required):
+
+   https://YOUR-APP.onrender.com/webhook/ultramsg?token=643ba16ea93c736bbbe37f441d040ca7
+
+   Enable the "Message Received" event.
+
+2. Open https://YOUR-APP.onrender.com/health
+   You want:  "whatsapp":"live"   and   "email":"live"
+   If either says "dry-run", those credentials did not take.
+
+3. Send "Hi" to your WhatsApp number -> you should get the welcome menu.
+
+4. Sign in to the dashboard and change the admin password.
+
+IMPORTANT: run ONE Render instance only. The scheduler runs in-process,
+so two instances would double-fire nanny response timeouts and the
+Monday payouts.

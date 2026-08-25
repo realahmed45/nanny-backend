@@ -23,6 +23,13 @@ export const config = {
     webhookToken: process.env.ULTRAMSG_WEBHOOK_TOKEN || '',
   },
 
+  // Resend is the preferred mail backend: an HTTP API, so nothing depends on
+  // outbound SMTP ports being open. Falls back to SMTP, then console logging.
+  resend: {
+    apiKey: process.env.RESEND_API_KEY || '',
+    from: process.env.RESEND_FROM || 'My Nanny <onboarding@resend.dev>',
+  },
+
   // SMTP for verification codes. Without a host we fall back to console
   // logging, which is fine locally but must be configured in production.
   smtp: {

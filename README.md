@@ -41,7 +41,8 @@ npm run dev               # auto-restart on change
 | `ULTRAMSG_WEBHOOK_TOKEN` | recommended | If set, webhook calls must include `?token=<value>` |
 | `CORS_ORIGINS` | ✅ in prod | Comma-separated dashboard origins; empty allows any origin |
 | `BANK_*` | ✅ | Bank details shown to families (see **Money** below) |
-| `SMTP_*` | ✅ in prod | Mail server for verification codes (see **Email** below) |
+| `RESEND_API_KEY` | ✅ in prod | Sends verification codes (see **Email** below) |
+| `SMTP_*` | | Alternative to Resend, if you prefer your own mail server |
 
 Business rules (all optional, sensible defaults applied):
 `CURRENCY`, `TRANSPORT_FEE_MIN`, `TRANSPORT_FEE_MAX`,
@@ -137,11 +138,16 @@ money. Without them the bot says so rather than showing blank details.
 
 ## Email
 
-Verification codes are emailed over SMTP (nodemailer). Set `SMTP_HOST`,
-`SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` and `SMTP_FROM`. Without a host, codes
-are logged to the console instead — fine locally, but nobody can verify an
-account in production, so `/health` reports `email: dry-run` to make that
-visible.
+Verification codes go out through **Resend** (an HTTP API, so nothing depends
+on outbound SMTP ports). Set `RESEND_API_KEY` and `RESEND_FROM`.
+
+A classic mail server works too — set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
+`SMTP_PASS`, `SMTP_FROM` and leave `RESEND_API_KEY` empty. If both are set,
+Resend wins.
+
+With neither configured, codes are logged to the console — fine locally, but
+nobody can verify an account in production, so `/health` reports
+`email: dry-run` to make that visible.
 
 `providers/storage.js` still just records the hosted media URL from WhatsApp;
 swap it for S3/GCS if you need to re-host ID documents and receipts.

@@ -990,7 +990,8 @@ router.get('/settings', (req, res) => {
     freeRescheduleLimit: config.freeRescheduleLimit,
     liveLocationWindowHours: config.liveLocationWindowHours,
     whatsappConfigured: !!(config.ultramsg.instanceId && config.ultramsg.token),
-    emailConfigured: !!config.smtp.host,
+    emailConfigured: !!(config.resend.apiKey || config.smtp.host),
+    emailProvider: config.resend.apiKey ? 'Resend' : config.smtp.host ? 'SMTP' : null,
     bank: config.bank,
     bankConfigured: !!(config.bank.accountNumber || config.bank.iban),
   });
