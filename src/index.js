@@ -16,9 +16,26 @@ export function createApp() {
 
   // Lock CORS to the dashboard's origin in production. CORS_ORIGINS is a
   // comma-separated list; unset means allow any origin (fine for local dev).
-  const origins = (process.env.CORS_ORIGINS || '')
-    .split(',').map((s) => s.trim()).filter(Boolean);
-  app.use(cors(origins.length ? { origin: origins, credentials: true } : {}));
+  //
+  // Origins are compared with the trailing slash stripped: browsers always
+  // send "https://host" with no path, but it is very easy to paste
+  // "https://host/" into the dashboard, and an exact match would then
+  // silently reject every request as a CORS error.
+  const normalize = (o) => String(o || '').trim().replace(/\/+$/, '').toLowerCase();
+  const allowed = new Set(
+    (process.env.CORS_ORIGINS || '').split(',').map(normalize).filter(Boolean),
+  );
+
+  app.use(cors(allowed.size
+    ? {
+        origin(origin, cb) {
+          // No Origin header: same-origin, curl, or a server-side call.
+          if (!origin) return cb(null, true);
+          return cb(null, allowed.has(normalize(origin)));
+        },
+        credentials: true,
+      }
+    : {}));
   app.use(express.json({ limit: '2mb' }));
   app.use(express.urlencoded({ extended: true }));
 
