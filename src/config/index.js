@@ -28,6 +28,9 @@ export const config = {
   resend: {
     apiKey: process.env.RESEND_API_KEY || '',
     from: process.env.RESEND_FROM || 'My Nanny <onboarding@resend.dev>',
+    // Where replies go. Safe to be a normal inbox — only the From
+    // address has to belong to a verified domain.
+    replyTo: process.env.RESEND_REPLY_TO || '',
   },
 
   // SMTP for verification codes. Without a host we fall back to console

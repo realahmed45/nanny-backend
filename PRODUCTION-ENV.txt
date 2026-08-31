@@ -30,7 +30,8 @@ BANK_IBAN=
 BANK_INSTRUCTIONS=Please use your booking ID as the transfer reference.
 
 RESEND_API_KEY=                                >>> YOU <<<  (see note 4)
-RESEND_FROM=My Nanny <onboarding@resend.dev>
+RESEND_FROM=My Nanny <no-reply@futurelifebali.com>
+RESEND_REPLY_TO=realahmedali4@gmail.com
 
 CURRENCY=USD
 TRANSPORT_FEE_MIN=50000
@@ -80,19 +81,18 @@ VITE_API_BASE=https://YOUR-APP.onrender.com/api/admin
    If these are blank the bot tells families to contact support instead
    of showing an empty block, so nothing breaks — but nobody can pay.
 
-4. RESEND_API_KEY — sends the verification codes (2 minutes)
+4. RESEND_API_KEY - sends the verification codes
 
-     a. Sign up free at resend.com
-     b. Go to API Keys -> Create API Key
-     c. Copy it (starts with "re_") and paste above
+     a. resend.com -> API Keys -> Create API Key
+     b. Copy it (starts with "re_") and paste above
 
-   That is the whole setup. Free tier is 3,000 emails/month, which is
-   plenty to launch.
+   The From address is already set to your verified domain
+   (futurelifebali.com), so emails reach anyone.
 
-   Leave RESEND_FROM exactly as it is for now. Resend only lets you send
-   from onboarding@resend.dev until you verify your own domain. Once you
-   own a domain, add it in Resend -> Domains and change RESEND_FROM to
-   something like "My Nanny <no-reply@yourdomain.com>".
+   Note: email CANNOT be sent from a Gmail address. Google's DNS forbids
+   other services sending as gmail.com, so those messages are rejected or
+   land in spam. RESEND_REPLY_TO is set to your Gmail instead, so anyone
+   who replies still reaches your normal inbox.
 
 5. CURRENCY — check this one
    Transport fee is 50,000-100,000 per your spec, which is not a USD

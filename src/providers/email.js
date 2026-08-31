@@ -32,20 +32,47 @@ let transporter = null;
  * Backends - each built lazily, so an unused one is never imported.
  * ------------------------------------------------------------------ */
 
+/**
+ * Free mailbox providers publish DNS records that forbid anyone else sending
+ * as them, so a gmail.com / outlook.com sender is rejected or lands in spam no
+ * matter which service is used. Catching it here names the real problem
+ * instead of leaving a confusing provider error.
+ */
+const PUBLIC_MAILBOX = /@(gmail|googlemail|yahoo|hotmail|outlook|live|icloud|aol|proton(mail)?)\./i;
+
+const senderAddress = (from) => {
+  const match = /<([^>]+)>/.exec(from || '');
+  return (match ? match[1] : from || '').trim();
+};
+
 const resendProvider = {
   name: 'resend',
   async send({ to, subject, text, html }) {
+    const address = senderAddress(config.resend.from);
+
+    if (PUBLIC_MAILBOX.test(address)) {
+      throw new Error(
+        `RESEND_FROM is set to ${address}. Email cannot be sent from a free mailbox address `
+        + '— use an address on a domain you have verified in Resend, e.g. '
+        + 'no-reply@yourdomain.com. Set a Reply-To if you want replies to reach your inbox.',
+      );
+    }
+
     if (!resendClient) {
       const { Resend } = await import('resend');
       resendClient = new Resend(config.resend.apiKey);
     }
+
     const { data, error } = await resendClient.emails.send({
       from: config.resend.from,
       to: [to],
       subject,
       text,
       html,
+      // Replies reach a real person rather than a no-reply mailbox.
+      ...(config.resend.replyTo ? { reply_to: config.resend.replyTo } : {}),
     });
+
     // The SDK reports failures in `error` rather than throwing.
     if (error) throw new Error(error.message || 'Resend rejected the message');
     return { success: true, messageId: data?.id };
