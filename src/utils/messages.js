@@ -38,6 +38,10 @@ export const NANNY_MAIN_MENU = `What would you like to do?
  * Shown when someone messages the bot before it has been started. Keeping the
  * trigger word explicit means a stray "hi" does not silently do nothing.
  */
+/** Shown when the mail provider rejected the verification email. */
+export const OTP_SEND_FAILED =
+  '\u{26A0}\u{FE0F} We could not send the email just now. Our team has been alerted.\n\nIf you do not receive a code, type *Resend* to try again, or *0* to return to the Main Menu.';
+
 export const START_HINT = `\u{1F44B} Welcome to *My Nanny*!
 
 To get started, just send:

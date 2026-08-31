@@ -263,7 +263,7 @@ on('FP_SET_EMAIL', async (ctx) => {
   // Changing the email requires re-verification.
   const { issueOtp } = await import('./common.js');
   ctx.set('pendingEmail', email);
-  await issueOtp(ctx.phone, email);
+  await issueOtp(ctx.phone, email);   // failure is reported to the user below
   return { text: `📲 We've sent a verification code to ${email}.\n\nEnter the 6-digit code.`, state: 'FP_VERIFY_EMAIL' };
 });
 

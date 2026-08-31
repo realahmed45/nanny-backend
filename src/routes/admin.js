@@ -980,6 +980,48 @@ router.post('/messages/send', wrap(async (req, res) => {
  * Settings / admins
  * ------------------------------------------------------------------ */
 
+/**
+ * Send a real verification email and report exactly what the provider said.
+ *
+ * Mail failures are otherwise invisible from outside the server logs, and a
+ * rejected send blocks every signup, so this makes the cause checkable from
+ * the dashboard.
+ */
+router.post('/settings/test-email', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const to = req.body?.to || req.admin?.email;
+  if (!to) return res.status(400).json({ error: 'No recipient given' });
+
+  const { sendVerificationCode, activeProvider } = await import('../providers/email.js');
+  const provider = activeProvider();
+
+  try {
+    const result = await sendVerificationCode(to, '123456');
+    res.json({
+      ok: true,
+      provider,
+      to,
+      messageId: result?.messageId || null,
+      note: provider === 'console'
+        ? 'No email provider is configured, so the code was only logged.'
+        : 'Sent. Check the inbox, including spam.',
+    });
+  } catch (err) {
+    res.status(502).json({
+      ok: false,
+      provider,
+      to,
+      error: err.message,
+      // Resend refuses any recipient other than the account owner until a
+      // sending domain is verified, which is the usual cause here.
+      hint: /verif|domain|testing emails|own email/i.test(err.message)
+        ? 'Resend only allows sending to your own account email until you verify a domain. Add a domain in Resend > Domains, then set RESEND_FROM to an address on it.'
+        : /api key/i.test(err.message)
+          ? 'RESEND_API_KEY is missing or wrong. Copy it again from Resend > API Keys.'
+          : 'Check RESEND_API_KEY and RESEND_FROM on the server.',
+    });
+  }
+}));
+
 router.get('/settings', (req, res) => {
   res.json({
     currency: config.currency,

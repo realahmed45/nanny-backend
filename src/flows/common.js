@@ -10,6 +10,13 @@ export function generateOtp() {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
 
+/**
+ * Create a verification code and email it.
+ *
+ * The code is stored before the send, and a delivery failure is reported
+ * rather than thrown: a bounced provider call must not abandon someone
+ * mid-registration with a generic error. The caller decides what to say.
+ */
 export async function issueOtp(phone, email) {
   await Otp.deleteMany({ phone, purpose: 'email_verification' });
   const code = generateOtp();
@@ -17,8 +24,16 @@ export async function issueOtp(phone, email) {
     phone, email, code,
     expiresAt: new Date(Date.now() + 10 * 60 * 1000),
   });
-  await sendVerificationCode(email, code);
-  return code;
+
+  try {
+    await sendVerificationCode(email, code);
+    return { code, delivered: true };
+  } catch (err) {
+    // Loud in the logs, because a misconfigured mail provider silently
+    // blocks every signup and is otherwise invisible from the outside.
+    console.error(`[otp] could not email ${email}: ${err.message}`);
+    return { code, delivered: false, error: err.message };
+  }
 }
 
 /**
@@ -124,7 +139,16 @@ export function makeEmailHandler(nextState) {
     }
 
     ctx.set('email', email);
-    await issueOtp(ctx.phone, email);
+    const { delivered } = await issueOtp(ctx.phone, email);
+
+    // Saying "we sent a code" when the send failed leaves people waiting on
+    // an email that will never arrive, so be straight about it.
+    if (!delivered) {
+      return {
+        text: `${M.OTP_SEND_FAILED}\n\n${M.ASK_OTP}`,
+        state: nextState,
+      };
+    }
     return { text: M.ASK_OTP, state: nextState };
   };
   handler.prompt = (ctx) => M.ASK_EMAIL((ctx.get('fullName') || '').split(' ')[0]);
@@ -140,8 +164,9 @@ export function makeOtpHandler({ role, onVerified }) {
     if (lower(ctx.text) === 'resend') {
       const email = ctx.get('email');
       if (!email) return M.ASK_EMAIL('');
-      await issueOtp(ctx.phone, email);
-      return `📲 A new code is on its way.\n\n${M.ASK_OTP}`;
+      const { delivered } = await issueOtp(ctx.phone, email);
+      if (!delivered) return `${M.OTP_SEND_FAILED}\n\n${M.ASK_OTP}`;
+      return `\u{1F4F2} A new code is on its way.\n\n${M.ASK_OTP}`;
     }
 
     const code = parseOtp(ctx.text);

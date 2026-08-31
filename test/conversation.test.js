@@ -128,6 +128,23 @@ async function approvePaymentAsAdmin(payment) {
   }
 }
 
+test('a mail provider failure does not abandon registration', async () => {
+  const { Otp } = await import('../src/models/index.js');
+  const { issueOtp } = await import('../src/flows/common.js');
+
+  // issueOtp must report delivery rather than throw: a provider outage used
+  // to surface as "something went wrong" and drop people mid-signup.
+  const result = await issueOtp('971500008888', 'someone@example.com');
+
+  assert.ok(result.code, 'a code is always generated');
+  assert.equal(typeof result.delivered, 'boolean', 'delivery is reported, not thrown');
+
+  // Stored regardless, so a resend (or an admin) can still complete signup.
+  const stored = await Otp.findOne({ phone: '971500008888' });
+  assert.ok(stored, 'the code is saved even when the email fails');
+  assert.equal(stored.code, result.code);
+});
+
 test('support menu offers technical problem, agent callback and FAQs', async () => {
   const { Ticket } = await import('../src/models/index.js');
 
