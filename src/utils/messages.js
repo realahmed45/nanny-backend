@@ -34,6 +34,16 @@ export const NANNY_MAIN_MENU = `What would you like to do?
 6. Refer a Friend
 7. Help / Support`;
 
+/**
+ * Shown when someone messages the bot before it has been started. Keeping the
+ * trigger word explicit means a stray "hi" does not silently do nothing.
+ */
+export const START_HINT = `\u{1F44B} Welcome to *My Nanny*!
+
+To get started, just send:
+
+*nanny*`;
+
 export const ROLE_PICKER = `👋 Welcome to *My Nanny*
 
 Are you looking for childcare, or do you want to work as a nanny?

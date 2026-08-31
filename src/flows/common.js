@@ -21,8 +21,26 @@ export async function issueOtp(phone, email) {
   return code;
 }
 
+/**
+ * The word that wakes the bot up. Matched case-insensitively and ignoring
+ * surrounding punctuation, because phones capitalise the first letter of a
+ * message automatically and people add greetings around it.
+ */
+const START_WORD = 'nanny';
+
+const isStartWord = (text) =>
+  clean(text)
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, '')   // drop punctuation, keep word breaks
+    .split(/\s+/)
+    .filter(Boolean)
+    .includes(START_WORD);
+
 /** Landing state: greet, route returning users, ask new ones who they are. */
 on('START', async (ctx) => {
+  // Anything other than the trigger word gets a nudge, not a menu.
+  if (!isStartWord(ctx.text)) return M.START_HINT;
+
   const existing = await User.findOne({ phone: ctx.phone });
 
   if (existing && existing.registrationComplete) {

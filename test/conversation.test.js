@@ -16,7 +16,7 @@ async function createVerifiedNanny(phone = NANNY, { rate = 25, name = 'Maria Gro
   const { User } = await import('../src/models/index.js');
   const { NANNY_STATUS, USER_ROLE } = await import('../src/utils/constants.js');
 
-  await say(phone, 'Hi');
+  await say(phone, 'nanny');
   await say(phone, '2');            // I'm a nanny
   await say(phone, name);
   await say(phone, address);
@@ -52,7 +52,7 @@ async function createVerifiedNanny(phone = NANNY, { rate = 25, name = 'Maria Gro
 async function familyBookingUpToListing(phone = FAMILY, { date = null } = {}) {
   const target = date || dayjs().add(10, 'day').format('YYYY-MM-DD');
 
-  await say(phone, 'Hi');
+  await say(phone, 'nanny');
   await say(phone, '1');            // I'm a family
   await say(phone, '1');            // Find a Nanny
   await say(phone, 'Sarah Johnson');
@@ -128,10 +128,27 @@ async function approvePaymentAsAdmin(payment) {
   }
 }
 
+test('only the word "nanny" starts the bot', async () => {
+  // Anything else gets a nudge rather than the menu, so a stray message
+  // never drops someone into registration half-way.
+  for (const text of ['hi', 'hello', 'Hi there', 'nannies', '1']) {
+    const reply = await say(FAMILY, text);
+    assert.match(reply, /send:\s*\*nanny\*/i, `"${text}" should only get the hint`);
+  }
+
+  // Phones capitalise the first letter, so casing must not matter.
+  for (const text of ['nanny', 'Nanny', 'NANNY', 'nanny!', 'Hi nanny']) {
+    await clearDb();
+    const reply = await say(FAMILY, text);
+    assert.match(reply, /Welcome to \*My Nanny\*/, `"${text}" should start the bot`);
+    assert.match(reply, /I'm a Family/);
+  }
+});
+
 test('family registration collects name, email and verifies OTP', async () => {
   const { User } = await import('../src/models/index.js');
 
-  let reply = await say(FAMILY, 'Hello');
+  let reply = await say(FAMILY, 'nanny');
   assert.match(reply, /Welcome to \*My Nanny\*/);
   assert.match(reply, /I'm a Family/);
 
@@ -353,7 +370,7 @@ test('multi-day booking builds one service day per matching weekday', async () =
   while (start.day() !== 1) start = start.add(1, 'day');
   const end = start.add(13, 'day');   // two full weeks
 
-  await say(FAMILY, 'Hi');
+  await say(FAMILY, 'nanny');
   await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
@@ -393,7 +410,7 @@ test('multi-day booking builds one service day per matching weekday', async () =
 });
 
 test('global commands work: 0 returns to the main menu', async () => {
-  await say(FAMILY, 'Hi');
+  await say(FAMILY, 'nanny');
   await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
