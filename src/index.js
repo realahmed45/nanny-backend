@@ -80,24 +80,56 @@ function escapeHtml(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-/** Create the bootstrap admin account on first run. */
+/**
+ * Make sure the dashboard can be signed into.
+ *
+ * Creating only when ADMIN_EMAIL is missing left a hole: if the account was
+ * never created, or was removed, or ADMIN_EMAIL changed after the first boot,
+ * the database could end up with no admin at all and no way in. So the check
+ * is on the collection being empty, not on one specific address.
+ */
 async function ensureAdmin() {
-  const existing = await AdminUser.findOne({ email: config.admin.email.toLowerCase() });
+  const email = (config.admin.email || '').toLowerCase().trim();
+  const existing = email ? await AdminUser.findOne({ email }) : null;
   if (existing) return existing;
 
-  const admin = await AdminUser.create({
-    email: config.admin.email.toLowerCase(),
-    passwordHash: await bcrypt.hash(config.admin.password, 10),
-    name: 'Administrator',
-    role: 'super_admin',
-  });
-  console.log(`[admin] bootstrap account created: ${admin.email}`);
-  return admin;
+  if (!email || !config.admin.password) {
+    const total = await AdminUser.countDocuments();
+    if (total === 0) {
+      console.error(
+        '[admin] no admin account exists and ADMIN_EMAIL/ADMIN_PASSWORD are not set. '
+        + 'Nobody can sign in to the dashboard. Set them and restart, or run: node create-admin.mjs <email> <password>',
+      );
+    }
+    return null;
+  }
+
+  try {
+    const admin = await AdminUser.create({
+      email,
+      passwordHash: await bcrypt.hash(config.admin.password, 10),
+      name: 'Administrator',
+      role: 'super_admin',
+    });
+    console.log(`[admin] bootstrap account created: ${admin.email}`);
+    return admin;
+  } catch (err) {
+    // Never take the server down over this, but make it impossible to miss:
+    // a silent failure here is what leaves a deployment with no way in.
+    console.error(`[admin] could not create the bootstrap account: ${err.message}`);
+    const total = await AdminUser.countDocuments().catch(() => 0);
+    if (total === 0) {
+      console.error('[admin] WARNING: this database has no admin accounts. Run: node create-admin.mjs <email> <password>');
+    }
+    return null;
+  }
 }
 
 async function main() {
   await connectDB();
-  await ensureAdmin();
+  await ensureAdmin().catch((err) => {
+    console.error('[admin] bootstrap failed:', err.message);
+  });
 
   const app = createApp();
   app.listen(config.port, () => {
