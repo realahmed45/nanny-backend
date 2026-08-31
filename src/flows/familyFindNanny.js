@@ -637,13 +637,21 @@ export async function searchNannies(ctx) {
     ];
   }
 
-  const ids = nannies.map((n) => String(n._id));
-  const page = nannies.slice(0, 3);
+  // A nanny the family picked from their favourites is shown first when
+  // she matches the search, so re-booking her takes one step.
+  const preferred = ctx.get('preferredNannyId');
+  const ordered = preferred
+    ? [...nannies].sort((a, b) => (String(b._id) === preferred ? 1 : 0)
+                              - (String(a._id) === preferred ? 1 : 0))
+    : nannies;
+
+  const ids = ordered.map((n) => String(n._id));
+  const page = ordered.slice(0, 3);
 
   return [
     { text: M.SEARCHING },
     {
-      text: M.nannyListing(page, { startIndex: 0, total: nannies.length }),
+      text: M.nannyListing(page, { startIndex: 0, total: ordered.length }),
       state: 'FF_NANNY_LISTING',
       listing: { kind: 'nannies', ids, page: 0, pageSize: 3 },
     },

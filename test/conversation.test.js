@@ -128,6 +128,128 @@ async function approvePaymentAsAdmin(payment) {
   }
 }
 
+test('support menu offers technical problem, agent callback and FAQs', async () => {
+  const { Ticket } = await import('../src/models/index.js');
+
+  await createVerifiedNanny();
+  await familyBookingUpToListing();          // registers the family
+  await say(FAMILY, '0');
+
+  let reply = await say(FAMILY, '6');        // Help / Support
+  assert.match(reply, /Technical Problem/);
+  assert.match(reply, /Talk to an Agent/);
+  assert.match(reply, /FAQs/);
+
+  // --- FAQs: topic -> question -> answer, then back out ---
+  reply = await say(FAMILY, '6');
+  assert.match(reply, /Frequently Asked Questions/);
+
+  reply = await say(FAMILY, '1');            // Payments
+  assert.match(reply, /Payment FAQ/);
+
+  reply = await say(FAMILY, '1');            // first question
+  assert.match(reply, /verified by our team/i, 'answers describe manual transfers');
+
+  reply = await say(FAMILY, 'Back');
+  assert.match(reply, /Help \/ Support/);
+
+  // --- Technical problem files a ticket with the chosen label ---
+  await say(FAMILY, '4');
+  reply = await say(FAMILY, '1');            // "Bot is not responding"
+  assert.match(reply, /describe the problem/i);
+
+  reply = await say(FAMILY, 'The bot stopped replying this morning.');
+  assert.match(reply, /support request has been submitted/i);
+  assert.match(reply, /Support Ticket/);
+
+  const technical = await Ticket.findOne({ category: 'technical_problem' });
+  assert.ok(technical, 'technical ticket was created');
+  assert.equal(technical.subject, 'Bot is not responding');
+
+  // --- Talk to an agent is filed as a high-priority callback ---
+  await say(FAMILY, '5');
+  reply = await say(FAMILY, 'I want to discuss a partnership.');
+  assert.match(reply, /agents are currently busy/i);
+
+  const agent = await Ticket.findOne({ category: 'agent_callback' });
+  assert.ok(agent, 'agent callback ticket was created');
+  assert.equal(agent.priority, 'high', 'someone is waiting, so it jumps the queue');
+});
+
+test('a nanny can be saved to favourites after rating, and reused', async () => {
+  const { User, Booking } = await import('../src/models/index.js');
+
+  const nanny = await createVerifiedNanny();
+  await familyBookingUpToListing();
+  await say(FAMILY, '1'); await say(FAMILY, '1'); await say(FAMILY, '1');
+  await payAndApprove();
+  await say(NANNY, '1');                     // nanny accepts
+
+  // Complete the booking so it can be rated.
+  const booking = await Booking.findOne({});
+  booking.status = 'completed';
+  booking.serviceDays.forEach((d) => { d.status = 'completed'; });
+  booking.markModified('serviceDays');
+  await booking.save();
+
+  await say(FAMILY, '0');
+  await say(FAMILY, '2');                    // My Bookings
+  await say(FAMILY, '3');                    // Completed
+  await say(FAMILY, '1');                    // the booking
+
+  // Find the "Rate" option rather than assuming its number.
+  const detail = await say(FAMILY, '');
+  const rateOption = /(\d+)\.\s*[^\n]*Rate/i.exec(detail);
+  assert.ok(rateOption, `expected a Rate option, got:\n${detail}`);
+
+  await say(FAMILY, rateOption[1]);
+  await say(FAMILY, '5');                    // five stars
+  let reply = await say(FAMILY, 'She was wonderful with Emma.');
+  assert.match(reply, /favourite nannies/i, 'offers to save her');
+
+  reply = await say(FAMILY, '1');            // Yes
+  assert.match(reply, /Added to your Favourite Nannies/i);
+
+  const family = await User.findOne({ phone: FAMILY, role: 'family' });
+  assert.equal(family.favouriteNannies.length, 1);
+  assert.equal(String(family.favouriteNannies[0]), String(nanny._id));
+
+  // She now appears under My Profile > Favourite Nannies.
+  await say(FAMILY, '0');
+  await say(FAMILY, '3');                    // My Profile
+  reply = await say(FAMILY, '4');            // Favourite Nannies
+  assert.match(reply, /Favourite Nannies/);
+  assert.match(reply, /Maria Grook/);
+});
+
+test('identity verification shows status, and emergency contacts can be managed', async () => {
+  const { User } = await import('../src/models/index.js');
+
+  await createVerifiedNanny();
+  await familyBookingUpToListing();
+  await say(FAMILY, '0');
+  await say(FAMILY, '3');                    // My Profile
+
+  let reply = await say(FAMILY, '5');        // Identity Verification
+  assert.match(reply, /Identity Verification/);
+  assert.match(reply, /Not verified|Pending review|Verified/);
+
+  await say(FAMILY, 'Back');
+
+  reply = await say(FAMILY, '6');            // Emergency Contacts
+  assert.match(reply, /Emergency Contacts/);
+  assert.match(reply, /None saved yet/i);
+
+  await say(FAMILY, '1');                    // Add
+  reply = await say(FAMILY, 'Lara Craft, Mother, +92 300 1234567');
+  assert.match(reply, /Lara Craft has been added/i);
+
+  const family = await User.findOne({ phone: FAMILY, role: 'family' });
+  assert.equal(family.emergencyContacts.length, 1);
+  assert.equal(family.emergencyContacts[0].name, 'Lara Craft');
+  assert.equal(family.emergencyContacts[0].relation, 'Mother');
+});
+
 test('only the word "nanny" starts the bot', async () => {
   // Anything else gets a nudge rather than the menu, so a stray message
   // never drops someone into registration half-way.

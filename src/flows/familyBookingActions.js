@@ -767,11 +767,54 @@ on('FB_RATING_REVIEW', async (ctx) => {
     await notifyUser(nanny, `⭐ You received a *${stars}-star* rating for Booking #${booking.bookingNumber}!${review ? `\n\n"${review}"` : ''}`);
   }
 
+  // Offer to save her, but only if she is not already on the list.
+  const family = await User.findById(booking.family);
+  const alreadySaved = (family?.favouriteNannies || [])
+    .some((id) => String(id) === String(booking.nanny));
+
+  if (nanny && !alreadySaved) {
+    ctx.set('favouriteCandidateId', String(nanny._id));
+    return [
+      { text: 'Thank you for your review. \u{2764}\u{FE0F}' },
+      {
+        text: `Would you like to add *${nanny.fullName}* to your favourite nannies?\n\n1. Yes\n2. No`,
+        state: 'FB_ADD_FAVOURITE',
+      },
+    ];
+  }
+
   return {
-    text: `✅ Thank you for your feedback!\n\nType *0* to return to the Main Menu.`,
+    text: `\u{2705} Thank you for your feedback!\n\nType *0* to return to the Main Menu.`,
     state: 'FAMILY_MAIN_MENU',
   };
 });
+
+const addFavouriteHandler = async (ctx) => {
+  const choice = parseChoice(ctx.text, 2);
+  if (!choice) return 'Please reply *1* for Yes or *2* for No.';
+
+  if (choice === 2) {
+    return {
+      text: `\u{2705} Thank you for your feedback!\n\nType *0* to return to the Main Menu.`,
+      state: 'FAMILY_MAIN_MENU',
+    };
+  }
+
+  const nannyId = ctx.get('favouriteCandidateId');
+  // $addToSet keeps the list unique even if this runs twice.
+  await User.updateOne(
+    { _id: ctx.session.user },
+    { $addToSet: { favouriteNannies: nannyId } },
+  );
+  ctx.set('favouriteCandidateId', null);
+
+  return {
+    text: `\u{2705} Added to your Favourite Nannies list.\n\nYou can find her under *My Profile > Favourite Nannies*.\n\nType *0* to return to the Main Menu.`,
+    state: 'FAMILY_MAIN_MENU',
+  };
+};
+addFavouriteHandler.prompt = () => 'Reply *1* for Yes or *2* for No.';
+on('FB_ADD_FAVOURITE', addFavouriteHandler);
 
 async function bookAgain(ctx, booking) {
   const nanny = await User.findById(booking.nanny);

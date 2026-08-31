@@ -87,6 +87,8 @@ export const TICKET_CATEGORY = {
   NANNY: 'nanny_issue',
   FAMILY: 'family_issue',
   ACCOUNT: 'account_issue',
+  TECHNICAL: 'technical_problem',
+  AGENT: 'agent_callback',
   OTHER: 'other',
 };
 

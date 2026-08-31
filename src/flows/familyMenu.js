@@ -241,16 +241,18 @@ export function menuText(options) {
  * Placeholders wired up by the other flow modules
  * ------------------------------------------------------------------ */
 
-export const PROFILE_MENU = `👤 *My Profile*
+export const PROFILE_MENU = `\u{1F464} *My Profile*
 
-What would you like to do?
+What would you like to manage?
 
-1. View My Profile
-2. Edit My Details
-3. My Addresses
-4. My Children Information
-5. My Documents
-6. Back to Main Menu`;
+1. Personal Information
+2. Saved Addresses
+3. My Children
+4. Favourite Nannies
+5. Identity Verification
+6. Emergency Contacts
+
+Type *0* Return to Main Menu`;
 
 export const PAYMENTS_MENU = `💳 *My Payments*
 
@@ -264,16 +266,17 @@ Choose a category:
 
 Type *0* Return to Main Menu`;
 
-export const SUPPORT_MENU_TEXT = `🆘 *Help / Support*
+export const SUPPORT_MENU_TEXT = `\u{1F198} *Help / Support*
 
-What do you need help with?
+How can we help you?
 
-1. 📅 Booking Issue
-2. 💳 Payment & Refunds
-3. 👩 Nanny Issue
-4. 👤 Account Issue
-5. 📄 View My Tickets
-6. ℹ️ Commands & How It Works
+1. \u{1F4C5} Booking Issue
+2. \u{1F4B3} Payment & Refunds
+3. \u{1F469} Nanny Issue
+4. \u{2699}\u{FE0F} Technical Problem
+5. \u{1F464} Talk to an Agent
+6. \u{2753} FAQs
+7. \u{1F3AB} My Support Tickets
 
 Type *0* Return to Main Menu`;
 

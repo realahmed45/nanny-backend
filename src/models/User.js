@@ -70,6 +70,8 @@ const UserSchema = new mongoose.Schema({
   documents: [DocumentSchema],
   availability: { type: AvailabilitySchema, default: () => ({ days: [], blockedDates: [] }) },
   emergencyContacts: [EmergencyContactSchema],
+  // Nannies the family saved after a booking, offered first when rebooking.
+  favouriteNannies: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   nannyStatus: { type: String, enum: Object.values(NANNY_STATUS), default: NANNY_STATUS.PENDING_VERIFICATION, index: true },
   rejectionReason: String,
   backgroundCheckPassed: { type: Boolean, default: false },
