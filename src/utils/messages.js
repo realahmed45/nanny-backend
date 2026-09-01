@@ -107,9 +107,10 @@ export const ASK_START_DATE = `When would you like the booking to start?
 2. Tomorrow
 3. Another day
 
-Or just type a date, e.g. *12 August*.`;
+Or just type it — *today*, *tomorrow*, a weekday like *Monday*, or a date like *12 August*.`;
 
-export const ASK_START_DATE_CUSTOM = '📅 Which date? Type it like *12 August* or *2026-08-12*.';
+export const ASK_START_DATE_CUSTOM =
+  '📅 Which date?\n\nType a weekday like *Monday*, or a date like *12 August*, *Aug 12* or *2026-08-12*.';
 
 /** Same-day bookings are urgent by definition, so we ask outright. */
 export const ASK_EMERGENCY = `⚡ *Booking for today*
@@ -118,7 +119,8 @@ Is this an emergency? We prioritise urgent same-day requests and contact availab
 
 1. Yes, it's urgent
 2. No, it's a normal booking`;
-export const ASK_END_DATE = 'When would you like the booking to end?\n📅 Select an end date.';
+export const ASK_END_DATE =
+  'When would you like the booking to end?\n\n📅 Type a weekday like *Friday*, or a date like *26 September*.';
 export const ASK_REPEAT_DAYS = `Which days should the booking repeat on?\n\n${numbered(WEEKDAYS)}\n8. All days of the week\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
 export const ASK_START_TIME = 'What time does the session start?';
 export const ASK_DURATION = `How long do you need the nanny?\n\n${durationMenu()}`;

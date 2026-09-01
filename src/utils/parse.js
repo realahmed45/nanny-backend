@@ -147,19 +147,70 @@ export function parseTime(text) {
  * "12 Aug 2026", "2026-08-12", "12/08/2026". Bare day+month resolves to the
  * next such date at or after `reference` (so "12 August" never lands in the past).
  */
-export function parseDate(text, reference = new Date()) {
-  const t = clean(text);
-  if (!t) return null;
-  const ref = dayjs(reference);
+export const WEEKDAY_NAMES = [
+  'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
+];
 
-  const formats = ['YYYY-MM-DD', 'D MMMM YYYY', 'D MMM YYYY', 'DD/MM/YYYY', 'D/M/YYYY', 'MMMM D YYYY', 'MMM D YYYY'];
-  for (const f of formats) {
-    const d = dayjs(t, f, true);
+/**
+ * A date the family typed, in whatever shape they typed it.
+ *
+ * Handles three kinds of answer:
+ *   - relative words: today, tomorrow, tmrw, day after tomorrow
+ *   - weekday names: "monday" means the *next* Monday, never today's date if
+ *     today happens to be Monday, because someone asking on Monday for
+ *     "monday" means the coming one
+ *   - explicit dates: 12 August, 12 aug, August 12, 12/08, 2026-08-12
+ *
+ * Bare month/day answers roll into next year when the date has passed, so
+ * "12 August" asked in September means next August rather than a date in the
+ * past. Returns YYYY-MM-DD, or null when it cannot be read as a date.
+ */
+export function parseDate(text, reference = new Date()) {
+  const t = clean(text).toLowerCase().replace(/[.,]+$/, '').trim();
+  if (!t) return null;
+  const ref = dayjs(reference).startOf('day');
+
+  // --- relative words ---
+  if (/^(today|tonight|now)$/.test(t)) return ref.format('YYYY-MM-DD');
+  if (/^(tomorrow|tmrw|tmw|tom)$/.test(t)) return ref.add(1, 'day').format('YYYY-MM-DD');
+  if (/^(day after tomorrow|overmorrow)$/.test(t)) return ref.add(2, 'day').format('YYYY-MM-DD');
+
+  // --- weekday names: always the next one, never today ---
+  const weekday = /^(next\s+|this\s+|coming\s+)?([a-z]+)$/.exec(t);
+  if (weekday) {
+    const name = weekday[2];
+    const idx = WEEKDAY_NAMES.findIndex(
+      (w) => w === name || (name.length >= 3 && w.startsWith(name.slice(0, 3))),
+    );
+    if (idx !== -1) {
+      let diff = (idx - ref.day() + 7) % 7;
+      if (diff === 0) diff = 7;        // "monday" on a Monday means next Monday
+      return ref.add(diff, 'day').format('YYYY-MM-DD');
+    }
+  }
+
+  // dayjs matches month names case-sensitively, so restore title case
+  // before trying the formats: "12 august" must parse like "12 August".
+  const cased = t.replace(/(^|\s)([a-z])/g, (m, sp, c) => sp + c.toUpperCase());
+
+  // --- explicit dates, full year given ---
+  const withYear = [
+    'YYYY-MM-DD', 'YYYY/MM/DD',
+    'D MMMM YYYY', 'D MMM YYYY', 'MMMM D YYYY', 'MMM D YYYY',
+    'DD/MM/YYYY', 'D/M/YYYY', 'DD-MM-YYYY', 'D-M-YYYY',
+  ];
+  for (const f of withYear) {
+    const d = dayjs(cased, f, true);
     if (d.isValid()) return d.format('YYYY-MM-DD');
   }
 
-  for (const f of ['D MMMM', 'D MMM', 'MMMM D', 'MMM D', 'D/M', 'DD/MM']) {
-    const d = dayjs(t, f, true);
+  // --- day and month only: assume the next occurrence ---
+  const withoutYear = [
+    'D MMMM', 'D MMM', 'MMMM D', 'MMM D',
+    'D/M', 'DD/MM', 'D-M', 'DD-MM',
+  ];
+  for (const f of withoutYear) {
+    const d = dayjs(cased, f, true);
     if (d.isValid()) {
       let candidate = d.year(ref.year());
       if (candidate.isBefore(ref, 'day')) candidate = candidate.add(1, 'year');
@@ -167,9 +218,11 @@ export function parseDate(text, reference = new Date()) {
     }
   }
 
-  const loose = dayjs(t);
-  return loose.isValid() ? loose.format('YYYY-MM-DD') : null;
+  // Deliberately no loose fallback: dayjs happily reads "12 augustus" as the
+  // year 2001, which silently produced dates nobody asked for.
+  return null;
 }
+
 
 /** Parse weekday selection: "1,2,3" or "Monday, Tuesday". */
 export function parseWeekdays(text) {

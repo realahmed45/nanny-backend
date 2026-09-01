@@ -71,3 +71,39 @@ test('parseMapUrl accepts links or None', () => {
   assert.equal(parseChoice('3', 3), 3);
   assert.equal(parseChoice('4', 3), null);
 });
+
+test('parseDate accepts relative words, weekdays and any date format', () => {
+  // A fixed Tuesday, so weekday maths is checkable rather than guesswork.
+  const tue = new Date('2026-09-01T12:00:00');
+
+  assert.equal(parseDate('today', tue), '2026-09-01');
+  assert.equal(parseDate('tomorrow', tue), '2026-09-02');
+  assert.equal(parseDate('tmrw', tue), '2026-09-02');
+  assert.equal(parseDate('day after tomorrow', tue), '2026-09-03');
+
+  // A weekday means the NEXT one, so asking on Tuesday for "monday" is the
+  // coming Monday, and "tuesday" is a week away rather than today.
+  assert.equal(parseDate('monday', tue), '2026-09-07');
+  assert.equal(parseDate('Monday', tue), '2026-09-07');
+  assert.equal(parseDate('next monday', tue), '2026-09-07');
+  assert.equal(parseDate('mon', tue), '2026-09-07');
+  assert.equal(parseDate('tuesday', tue), '2026-09-08', 'same weekday means next week');
+  assert.equal(parseDate('sunday', tue), '2026-09-06');
+
+  // The same date typed every plausible way.
+  for (const text of ['12 October', '12 oct', 'October 12', 'oct 12', '12 October.', '12/10']) {
+    assert.equal(parseDate(text, tue), '2026-10-12', `failed on "${text}"`);
+  }
+  assert.equal(parseDate('2026-10-12', tue), '2026-10-12');
+  assert.equal(parseDate('12/10/2026', tue), '2026-10-12');
+
+  // A month already past rolls into next year rather than the past.
+  assert.equal(parseDate('12 August', tue), '2027-08-12');
+
+  // Nonsense is refused rather than silently becoming a wrong date: dayjs
+  // used to read "12 augustus" as the year 2001.
+  assert.equal(parseDate('12 augustus', tue), null);
+  assert.equal(parseDate('garbage', tue), null);
+  assert.equal(parseDate('32 August', tue), null);
+  assert.equal(parseDate('', tue), null);
+});
