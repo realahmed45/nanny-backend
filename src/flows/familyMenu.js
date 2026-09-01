@@ -10,17 +10,43 @@ import { statusLabel, prettyDate, timeRange, money } from '../utils/format.js';
 import config from '../config/index.js';
 import * as M from '../utils/messages.js';
 
-export const MY_BOOKINGS_MENU = `📅 *My Bookings*
+/**
+ * Sent as three messages rather than one list.
+ *
+ * Ongoing and Upcoming are what people open this menu for, so each gets its
+ * own message instead of being a line item among five. The rest follow
+ * together. `MY_BOOKINGS_MENU` stays the single-message form, used when a
+ * handler needs to re-show the options inline (an invalid choice, or BACK).
+ */
+export const MY_BOOKINGS_ONGOING = `\u{1F4C5} *My Bookings*
 
 Choose a category:
 
-1. Upcoming
-2. Ongoing
-3. Completed
-4. Cancelled
-5. Bookings Pending for Additional Payment
+*1. Ongoing*
+Bookings happening now.`;
+
+export const MY_BOOKINGS_UPCOMING = `*2. Upcoming*
+Bookings that have not started yet.`;
+
+export const MY_BOOKINGS_REST = `*3. Completed*
+*4. Cancelled*
+*5. Bookings Pending for Additional Payment*
 
 Type *0* Return to Main Menu`;
+
+/** The same options in one message, for re-prompts. */
+export const MY_BOOKINGS_MENU = [
+  MY_BOOKINGS_ONGOING,
+  MY_BOOKINGS_UPCOMING,
+  MY_BOOKINGS_REST,
+].join('\n\n');
+
+/** The three-message form, for when the menu is shown fresh. */
+export const myBookingsMenu = (state = 'FB_BOOKINGS_MENU') => [
+  { text: MY_BOOKINGS_ONGOING },
+  { text: MY_BOOKINGS_UPCOMING },
+  { text: MY_BOOKINGS_REST, state },
+];
 
 /* ------------------------------------------------------------------ *
  * Family main menu
@@ -45,7 +71,7 @@ const familyMenuHandler = async (ctx) => {
       }
       return startFindNanny(ctx);
     }
-    case 2: return { text: MY_BOOKINGS_MENU, state: 'FB_BOOKINGS_MENU' };
+    case 2: return myBookingsMenu();
     case 3: return { text: PROFILE_MENU, state: 'FP_MENU' };
     case 4: return { text: PAYMENTS_MENU, state: 'FPAY_MENU' };
     case 5: return showReferral(ctx);
@@ -105,7 +131,7 @@ const bookingsMenuHandler = async (ctx) => {
   const choice = parseChoice(ctx.text, 5);
   if (!choice) return MY_BOOKINGS_MENU;
 
-  const categories = ['upcoming', 'ongoing', 'completed', 'cancelled', 'pending_additional'];
+  const categories = ['ongoing', 'upcoming', 'completed', 'cancelled', 'pending_additional'];
   const category = categories[choice - 1];
 
   const bookings = await Booking.find(categoryQuery(ctx.session.user, category)).sort({ startDate: 1 });

@@ -756,7 +756,7 @@ test('family cancellation applies the policy and refunds correctly', async () =>
 
   await say(FAMILY, '0');
   await say(FAMILY, '2');           // My Bookings
-  await say(FAMILY, '1');           // Upcoming
+  await say(FAMILY, '2');           // Upcoming
   let reply = await say(FAMILY, '1');
   assert.match(reply, /Booking ID#/);
   assert.match(reply, /Cancel Booking/);
