@@ -137,7 +137,14 @@ export const ASK_CHILD_COUNT = `How many children need care?
 export const ASK_CHILD_COUNT_EXACT = 'How many children need care? Please type the number.';
 export const CHILD_INTRO = 'Lets address each child one by one';
 export const ASK_CHILD_NAME = (ord) => `What is the ${ord} child's name?`;
-export const ASK_CHILD_AGE = (name) => `How old is ${name}?`;
+export const ASK_CHILD_AGE = (name) =>
+  `How old is ${name}?
+
+Reply with the age in years, e.g. *4*, *4y* or *4 years*.
+For a baby you can say *6 months*.`;
+
+export const INVALID_CHILD_AGE =
+  'Please give the age as a number of years — for example *4*, *4y* or *4 years*.\nFor a baby, *6 months* works too.';
 export const ASK_CHILD_MEDICAL = (name) =>
   `Does ${name} have any allergies, medical conditions, or special care needs? Please tell us about them. _Example: Peanut allergy, asthma, epilepsy, medication, etc._\n\nif none then type *None*`;
 export const ASK_CHILD_DIET = (name) =>
@@ -279,14 +286,35 @@ export function nannyListing(nannies, { startIndex = 0, total = null } = {}) {
   return head + items + tail;
 }
 
-export const NO_NANNIES = `😔 Sorry, we couldn't find a nanny matching your requirements right now.
+/**
+ * Split in two: the promise of a callback, then the options.
+ *
+ * After 00:30 there is nobody to ring, so we say when we will call instead of
+ * implying someone is about to pick up the phone in the middle of the night.
+ */
+export const noNanniesCallback = (now = new Date()) => {
+  const hour = now.getHours();
+  const minute = now.getMinutes();
+  const afterCutoff = hour === 0 ? minute >= 30 : hour < 10;
 
-What would you like to do?
+  return afterCutoff
+    ? `\u{1F4DE} *We will call you first thing in the morning \u{2014} 10:00 AM.*
+
+Our team will go through your request personally and find you a nanny.`
+    : `\u{1F4DE} *We will call you shortly.*
+
+Our team will go through your request personally and find you a nanny.`;
+};
+
+export const NO_NANNIES_ACTIONS = `What would you like to do?
 
 1. Change Skills or Language
 2. Change Date or Time
 3. Contact Support
 4. Back to Main Menu`;
+
+/** Kept for the prompt replay when re-entering the state. */
+export const NO_NANNIES = NO_NANNIES_ACTIONS;
 
 export function nannyProfile(n, { hourlyRate = null } = {}) {
   const lines = [

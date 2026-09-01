@@ -2,7 +2,7 @@ import express from 'express';
 import bcrypt from 'bcryptjs';
 import dayjs from 'dayjs';
 import {
-  User, Booking, Ticket, ChatThread, MessageLog, AdminUser, Session,
+  User, Booking, Ticket, ChatThread, MessageLog, AdminUser, Session, CallbackRequest,
 } from '../models/index.js';
 import { Payment, Payout } from '../models/Payment.js';
 import {
@@ -103,7 +103,7 @@ router.get('/dashboard/stats', wrap(async (req, res) => {
   // Extra counts the dashboard cards and the Action Required feed need.
   const [
     suspendedFamilies, replacementNeeded, pendingRequests,
-    paymentsPending, refundsInProcess, criticalTickets, nextUpcoming,
+    paymentsPending, refundsInProcess, criticalTickets, nextUpcoming, pendingCallbacks,
   ] = await Promise.all([
     User.countDocuments({ role: USER_ROLE.FAMILY, blocked: true }),
     Booking.countDocuments({ subStatus: BOOKING_SUBSTATUS.NANNY_CANCELLED_AWAITING_REPLACEMENT }),
@@ -118,6 +118,7 @@ router.get('/dashboard/stats', wrap(async (req, res) => {
       priority: { $in: ['urgent', 'high'] },
     }),
     Booking.findOne({ status: BOOKING_STATUS.UPCOMING }).sort({ startDate: 1 }).select('startDate'),
+    CallbackRequest.countDocuments({ status: 'pending' }),
   ]);
 
   const [pendingAmountAgg, refundAmountAgg] = await Promise.all([
@@ -153,6 +154,7 @@ router.get('/dashboard/stats', wrap(async (req, res) => {
       refundsInProcess: refundsInProcess, refundsAmount: refundAmountAgg,
     },
     support: { openTickets, criticalTickets },
+    callbacks: { pending: pendingCallbacks },
     trend,
   });
 }));
@@ -1020,6 +1022,155 @@ router.post('/settings/test-email', requireRole('admin', 'super_admin'), wrap(as
           : 'Check RESEND_API_KEY and RESEND_FROM on the server.',
     });
   }
+}));
+
+/* ------------------------------------------------------------------ *
+ * Callback requests — families the bot could not match to a nanny.
+ * ------------------------------------------------------------------ */
+
+router.get('/callbacks', wrap(async (req, res) => {
+  const { status, reason } = req.query;
+  const query = {};
+  if (status) query.status = status;
+  if (reason) query.reason = reason;
+
+  const result = await paginate(CallbackRequest, query, req.query, {
+    sort: { createdAt: -1 },
+    populate: [{ path: 'family', select: 'fullName phone email' }],
+  });
+
+  const [pending, inProgress, called] = await Promise.all([
+    CallbackRequest.countDocuments({ status: 'pending' }),
+    CallbackRequest.countDocuments({ status: 'in_progress' }),
+    CallbackRequest.countDocuments({ status: 'called' }),
+  ]);
+
+  res.json({ ...result, summary: { pending, inProgress, called } });
+}));
+
+/** One request, with the family's whole conversation attached. */
+router.get('/callbacks/:id', wrap(async (req, res) => {
+  const callback = await CallbackRequest.findById(req.params.id)
+    .populate('family', 'fullName phone email createdAt emailVerified idVerified');
+  if (!callback) return res.status(404).json({ error: 'Callback request not found' });
+
+  // Oldest first: whoever calls reads the conversation the way it happened.
+  const messages = await MessageLog.find({ phone: callback.phone })
+    .sort({ createdAt: 1 })
+    .limit(1000);
+
+  const bookings = await Booking.find({ family: callback.family })
+    .sort({ createdAt: -1 })
+    .select('bookingNumber status startDate totalAmount')
+    .limit(10);
+
+  res.json({ callback, messages, bookings });
+}));
+
+router.patch('/callbacks/:id', wrap(async (req, res) => {
+  const callback = await CallbackRequest.findById(req.params.id);
+  if (!callback) return res.status(404).json({ error: 'Callback request not found' });
+
+  const { status, notes, assignedTo } = req.body || {};
+  if (status) {
+    callback.status = status;
+    // Stamp the moment it was actually dialled, for response-time reporting.
+    if (status === 'called' && !callback.calledAt) callback.calledAt = new Date();
+  }
+  if (notes !== undefined) callback.notes = notes;
+  if (assignedTo !== undefined) callback.assignedTo = assignedTo;
+
+  await callback.save();
+  res.json({ ok: true, callback });
+}));
+
+/* ------------------------------------------------------------------ *
+ * Conversations — every chatbot exchange, grouped by customer.
+ * ------------------------------------------------------------------ */
+
+/**
+ * One row per phone number that has ever messaged the bot, newest first.
+ * Built from the message log itself so nobody is missing: a number that never
+ * finished registration still has a conversation worth reading.
+ */
+router.get('/conversations', wrap(async (req, res) => {
+  const { search } = req.query;
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
+
+  const match = search ? { phone: new RegExp(escapeRe(search)) } : {};
+
+  const grouped = await MessageLog.aggregate([
+    { $match: match },
+    { $sort: { createdAt: -1 } },
+    {
+      $group: {
+        _id: '$phone',
+        lastMessageAt: { $first: '$createdAt' },
+        lastMessage: { $first: '$body' },
+        lastDirection: { $first: '$direction' },
+        lastState: { $first: '$state' },
+        role: { $first: '$role' },
+        total: { $sum: 1 },
+        inbound: { $sum: { $cond: [{ $eq: ['$direction', 'in'] }, 1, 0] } },
+      },
+    },
+    { $sort: { lastMessageAt: -1 } },
+    { $skip: (page - 1) * limit },
+    { $limit: limit },
+  ]);
+
+  const totalRows = await MessageLog.distinct('phone', match);
+
+  // Attach the person behind each number where we know them.
+  const users = await User.find({ phone: { $in: grouped.map((g) => g._id) } })
+    .select('fullName phone role email');
+  const byPhone = Object.fromEntries(users.map((u) => [u.phone, u]));
+
+  res.json({
+    items: grouped.map((g) => ({
+      phone: g._id,
+      user: byPhone[g._id] || null,
+      fullName: byPhone[g._id]?.fullName || null,
+      role: byPhone[g._id]?.role || g.role || null,
+      lastMessageAt: g.lastMessageAt,
+      lastMessage: g.lastMessage,
+      lastDirection: g.lastDirection,
+      lastState: g.lastState,
+      messageCount: g.total,
+      inboundCount: g.inbound,
+    })),
+    total: totalRows.length,
+    page,
+    limit,
+    pages: Math.ceil(totalRows.length / limit),
+  });
+}));
+
+/** The full transcript for one number, plus who they are and what they booked. */
+router.get('/conversations/:phone', wrap(async (req, res) => {
+  const { phone } = req.params;
+
+  const [messages, user, session] = await Promise.all([
+    MessageLog.find({ phone }).sort({ createdAt: 1 }).limit(2000),
+    User.findOne({ phone }),
+    Session.findOne({ phone }).select('state data updatedAt'),
+  ]);
+
+  if (!messages.length && !user) {
+    return res.status(404).json({ error: 'No conversation found for that number' });
+  }
+
+  const bookings = user
+    ? await Booking.find({ $or: [{ family: user._id }, { nanny: user._id }] })
+        .sort({ createdAt: -1 })
+        .select('bookingNumber status startDate startTime hoursPerDay totalAmount isEmergency')
+        .limit(20)
+    : [];
+
+  const callbacks = await CallbackRequest.find({ phone }).sort({ createdAt: -1 });
+
+  res.json({ phone, user, session, messages, bookings, callbacks });
 }));
 
 router.get('/settings', (req, res) => {

@@ -39,6 +39,40 @@ export function parseChoice(text, max) {
 }
 
 /** Parse a multi-select like "1,3,4" into unique in-range 1-based indices. */
+/**
+ * A child's age, accepted loosely and stored consistently.
+ *
+ * Families type "4", "4y", "4 yrs", "4 years" and every spacing in between, so
+ * the summary ended up with a mix of "15 years" and "10y". Anything that boils
+ * down to a plain number of years is normalised to "N years"; months are kept
+ * separately because a 6-month-old is not the same as a 6-year-old.
+ *
+ * Returns a display string, or null when it cannot be read as an age.
+ */
+export function parseChildAge(text) {
+  const t = clean(text).toLowerCase().replace(/[.,]/g, ' ').trim();
+  if (!t) return null;
+
+  // Months first: "6 months", "6m", "6 mo".
+  const months = /^(\d{1,2})\s*(m|mo|mos|month|months)$/.exec(t);
+  if (months) {
+    const n = parseInt(months[1], 10);
+    if (n < 1 || n > 23) return null;
+    return `${n} month${n === 1 ? '' : 's'}`;
+  }
+
+  // Years: bare number, or with any of the usual suffixes.
+  const years = /^(\d{1,2})\s*(y|yr|yrs|year|years|yo)?$/.exec(t);
+  if (years) {
+    const n = parseInt(years[1], 10);
+    if (n < 0 || n > 18) return null;
+    if (n === 0) return 'under 1 year';
+    return `${n} year${n === 1 ? '' : 's'}`;
+  }
+
+  return null;
+}
+
 export function parseMultiChoice(text, max) {
   const parts = clean(text).split(/[,\s]+/).filter(Boolean);
   if (!parts.length) return null;

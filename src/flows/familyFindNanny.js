@@ -7,7 +7,7 @@ import {
 } from '../utils/constants.js';
 import {
   parseChoice, parseMultiChoice, pickFrom, parseYesNo, parseMoney, parseTime,
-  parseDate, parseWeekdays, parseMapUrl, parseInteger, clean, isNone, lower,
+  parseDate, parseWeekdays, parseMapUrl, parseInteger, parseChildAge, clean, isNone, lower,
 } from '../utils/parse.js';
 import { findNannies } from '../services/matching.js';
 import { buildServiceDays } from '../services/booking.js';
@@ -325,7 +325,7 @@ const skillsHandler = async (ctx) => {
     return { text: M.ASK_SUBJECTS, state: 'FF_SUBJECTS' };
   }
   ctx.set('subjects', []);
-  return { text: M.ASK_CHILD_COUNT, state: 'FF_CHILD_COUNT' };
+  return startChildren(ctx);
 };
 skillsHandler.prompt = () => M.ASK_SKILLS;
 on('FF_SKILLS', skillsHandler);
@@ -334,7 +334,7 @@ const subjectsHandler = async (ctx) => {
   const idx = parseMultiChoice(ctx.text, SUBJECTS.length);
   if (!idx) return M.ASK_SUBJECTS;
   ctx.set('subjects', pickFrom(SUBJECTS, idx));
-  return { text: M.ASK_CHILD_COUNT, state: 'FF_CHILD_COUNT' };
+  return startChildren(ctx);
 };
 subjectsHandler.prompt = () => M.ASK_SUBJECTS;
 on('FF_SUBJECTS', subjectsHandler);
@@ -342,6 +342,79 @@ on('FF_SUBJECTS', subjectsHandler);
 /* ------------------------------------------------------------------ *
  * Children
  * ------------------------------------------------------------------ */
+
+/**
+ * Families who have booked before already told us about their children, so
+ * asking again from scratch is a chore and invites inconsistent answers.
+ * Offer what we have on file and let them adjust instead.
+ */
+export async function startChildren(ctx) {
+  const user = await User.findById(ctx.session.user);
+  const saved = user?.children || [];
+  if (!saved.length) return { text: M.ASK_CHILD_COUNT, state: 'FF_CHILD_COUNT' };
+
+  const list = saved
+    .map((c, i) => `${i + 1}. ${c.name} \u{2014} ${c.age}`)
+    .join('\n');
+
+  return {
+    text: `\u{1F476} *Your children*\n\n${list}\n\nWho is this booking for?\n\n1. All of them\n2. Only some of them\n3. Add a different child`,
+    state: 'FF_CHILDREN_SAVED',
+  };
+}
+
+const savedChildrenHandler = async (ctx) => {
+  const choice = parseChoice(ctx.text, 3);
+  if (!choice) return M.INVALID_CHOICE;
+
+  const user = await User.findById(ctx.session.user);
+  const saved = (user?.children || []).map((c) => ({
+    name: c.name,
+    age: c.age,
+    medicalNotes: c.medicalNotes || '',
+    dietaryNotes: c.dietaryNotes || '',
+  }));
+
+  if (choice === 1) {
+    ctx.merge({ children: saved, childCount: saved.length, childIndex: saved.length });
+    return { text: M.ASK_OTHER_INSTRUCTIONS, state: 'FF_OTHER_INSTRUCTIONS' };
+  }
+
+  if (choice === 2) {
+    const list = saved.map((c, i) => `${i + 1}. ${c.name} \u{2014} ${c.age}`).join('\n');
+    return {
+      text: `Which children need care?\n\n${list}\n\nSelect multiple with spaces or commas (e.g. 1 2).`,
+      state: 'FF_CHILDREN_PICK',
+    };
+  }
+
+  // Add a different child: fall back to the normal question.
+  return { text: M.ASK_CHILD_COUNT, state: 'FF_CHILD_COUNT' };
+};
+savedChildrenHandler.prompt = (ctx) => startChildren(ctx).then((r) => r.text);
+on('FF_CHILDREN_SAVED', savedChildrenHandler);
+
+const pickChildrenHandler = async (ctx) => {
+  const user = await User.findById(ctx.session.user);
+  const saved = user?.children || [];
+  const idx = parseMultiChoice(ctx.text, saved.length);
+  if (!idx) return M.INVALID_CHOICE;
+
+  const chosen = idx.map((n) => {
+    const c = saved[n - 1];
+    return {
+      name: c.name,
+      age: c.age,
+      medicalNotes: c.medicalNotes || '',
+      dietaryNotes: c.dietaryNotes || '',
+    };
+  });
+
+  ctx.merge({ children: chosen, childCount: chosen.length, childIndex: chosen.length });
+  return { text: M.ASK_OTHER_INSTRUCTIONS, state: 'FF_OTHER_INSTRUCTIONS' };
+};
+pickChildrenHandler.prompt = () => M.INVALID_CHOICE;
+on('FF_CHILDREN_PICK', pickChildrenHandler);
 
 const childCountHandler = async (ctx) => {
   const choice = parseChoice(ctx.text, 4);
@@ -382,8 +455,8 @@ childNameHandler.prompt = (ctx) => M.ASK_CHILD_NAME(ORDINALS[ctx.get('childIndex
 on('FF_CHILD_NAME', childNameHandler);
 
 const childAgeHandler = async (ctx) => {
-  const age = clean(ctx.text);
-  if (!age) return M.ASK_CHILD_AGE(ctx.get('currentChild')?.name || 'the child');
+  const age = parseChildAge(ctx.text);
+  if (!age) return M.INVALID_CHILD_AGE;
   const child = { ...ctx.get('currentChild'), age };
   ctx.set('currentChild', child);
   return { text: M.ASK_CHILD_MEDICAL(child.name), state: 'FF_CHILD_MEDICAL' };
@@ -636,6 +709,55 @@ on('FF_EDIT_MORE', editMoreHandler);
  * Nanny search + listing
  * ------------------------------------------------------------------ */
 
+/**
+ * Save an unmatched request so the team can follow it up by phone.
+ *
+ * Everything lives in the session draft, which is wiped when the family starts
+ * again — so it is snapshotted here rather than looked up later.
+ */
+async function recordCallbackRequest(ctx) {
+  const { CallbackRequest, nextSequence } = await import('../models/index.js');
+  const d = ctx.session.data || {};
+  const user = await User.findById(ctx.session.user);
+
+  // After 00:30 and before 10:00 there is nobody to ring until the morning.
+  const now = new Date();
+  const hour = now.getHours();
+  const morning = hour === 0 ? now.getMinutes() >= 30 : hour < 10;
+
+  const promisedCallAt = new Date(now);
+  if (morning) {
+    promisedCallAt.setHours(10, 0, 0, 0);
+    if (promisedCallAt <= now) promisedCallAt.setDate(promisedCallAt.getDate() + 1);
+  }
+
+  await CallbackRequest.create({
+    reference: `CB-${await nextSequence('callback', 1000)}`,
+    family: ctx.session.user,
+    phone: ctx.phone,
+    fullName: user?.fullName,
+    email: user?.email,
+    reason: 'no_nanny_found',
+    callWindow: morning ? 'morning' : 'now',
+    promisedCallAt,
+    request: {
+      startDate: d.startDate,
+      endDate: d.isMultiDay ? d.endDate : d.startDate,
+      isMultiDay: !!d.isMultiDay,
+      isEmergency: !!d.isEmergency,
+      startTime: d.startTime,
+      hoursPerDay: d.hoursPerDay,
+      repeatDays: d.repeatDays || [],
+      languages: d.languages || [],
+      skills: d.skills || [],
+      subjects: d.subjects || [],
+      address: d.address || { mapUrl: d.mapUrl, addressLine: d.addressLine },
+      children: d.children || [],
+      otherInstructions: d.otherInstructions,
+    },
+  });
+}
+
 export async function searchNannies(ctx) {
   const d = ctx.session.data || {};
   const preview = draftToBooking(ctx);
@@ -652,9 +774,16 @@ export async function searchNannies(ctx) {
   });
 
   if (!nannies.length) {
+    // Capture everything they told us before the draft is cleared, so
+    // whoever calls back does not have to ask for it all over again.
+    await recordCallbackRequest(ctx).catch((err) => {
+      console.error('[callback] could not record request:', err.message);
+    });
+
     return [
       { text: M.SEARCHING },
-      { text: M.NO_NANNIES, state: 'FF_NO_NANNIES' },
+      { text: M.noNanniesCallback() },
+      { text: M.NO_NANNIES_ACTIONS, state: 'FF_NO_NANNIES' },
     ];
   }
 

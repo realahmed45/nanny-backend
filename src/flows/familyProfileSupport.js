@@ -3,7 +3,7 @@ import { User, Booking, Ticket, nextSequence } from '../models/index.js';
 import { Payment } from '../models/Payment.js';
 import { PAYMENT_STATUS, TICKET_CATEGORY } from '../utils/constants.js';
 import {
-  parseChoice, parseYesNo, parseEmail, parseMapUrl, parseInteger, clean, isNone, lower,
+  parseChoice, parseYesNo, parseEmail, parseMapUrl, parseInteger, parseChildAge, clean, isNone, lower,
 } from '../utils/parse.js';
 import { PROFILE_MENU, PAYMENTS_MENU, SUPPORT_MENU_TEXT } from './familyMenu.js';
 import { uniqueLabel } from './familyFindNanny.js';
@@ -402,8 +402,8 @@ on('FP_CHILD_NAME', async (ctx) => {
 });
 
 on('FP_CHILD_AGE', async (ctx) => {
-  const age = clean(ctx.text);
-  if (!age) return M.ASK_CHILD_AGE(ctx.get('childDraft')?.name || 'the child');
+  const age = parseChildAge(ctx.text);
+  if (!age) return M.INVALID_CHILD_AGE;
   ctx.set('childDraft', { ...ctx.get('childDraft'), age });
   return { text: M.ASK_CHILD_MEDICAL(ctx.get('childDraft').name), state: 'FP_CHILD_MEDICAL' };
 });

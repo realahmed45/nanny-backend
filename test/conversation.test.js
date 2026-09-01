@@ -817,5 +817,15 @@ test('nanny availability blocking prevents matching on that date', async () => {
 
   await familyBookingUpToListing(FAMILY, { date: target });
   const reply = await say(FAMILY, '1');
-  assert.match(reply, /couldn't find a nanny/i, 'blocked date removes her from results');
+  assert.match(reply, /we will call you/i, 'blocked date removes her from results');
+
+  // An unmatched search must leave a callback for the team to follow up.
+  const { CallbackRequest } = await import('../src/models/index.js');
+  const cb = await CallbackRequest.findOne({ phone: FAMILY });
+  assert.ok(cb, 'a callback request was recorded');
+  assert.equal(cb.reason, 'no_nanny_found');
+  assert.equal(cb.status, 'pending');
+  assert.equal(cb.request.startDate, target, 'the requested date is captured');
+  assert.deepEqual(cb.request.children.map((c) => c.name), ['Emma'], 'children are captured');
+  assert.ok(cb.request.skills.length, 'skills are captured');
 });
