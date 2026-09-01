@@ -310,6 +310,46 @@ test('asking for agent help queues a callback with what was captured', async () 
   assert.deepEqual(cb.request.children.map((c) => c.age), ['4 years'], 'age was normalised');
 });
 
+test('booking dates are limited to a sensible window', async () => {
+  await createVerifiedNanny();
+
+  const toStartDate = async (multi = false) => {
+    await clearDb();
+    await createVerifiedNanny();
+    await say(FAMILY, 'nanny');
+    await say(FAMILY, '1');
+    await say(FAMILY, '1');
+    await say(FAMILY, 'Sarah Johnson');
+    await say(FAMILY, 'sarah@email.com');
+    await say(FAMILY, await latestOtp(FAMILY));
+    await say(FAMILY, 'https://maps.google.com/?q=25.2,55.3');
+    await say(FAMILY, 'Downtown Dubai');
+    await say(FAMILY, '2');
+    await say(FAMILY, multi ? '2' : '1');
+  };
+
+  // A start date beyond three months is almost always a mistyped year.
+  await toStartDate();
+  let reply = await say(FAMILY, dayjs().add(4, 'month').format('YYYY-MM-DD'));
+  assert.match(reply, /within the next 3 months/i);
+
+  await toStartDate();
+  reply = await say(FAMILY, dayjs().add(2, 'month').format('YYYY-MM-DD'));
+  assert.doesNotMatch(reply, /within the next 3 months/i, 'two months ahead is fine');
+
+  // A recurring booking may run for up to a year.
+  const start = dayjs().add(7, 'day');
+  await toStartDate(true);
+  await say(FAMILY, start.format('YYYY-MM-DD'));
+  reply = await say(FAMILY, start.add(13, 'month').format('YYYY-MM-DD'));
+  assert.match(reply, /up to 12 months/i);
+
+  await toStartDate(true);
+  await say(FAMILY, start.format('YYYY-MM-DD'));
+  reply = await say(FAMILY, start.add(6, 'month').format('YYYY-MM-DD'));
+  assert.match(reply, /repeat on/i, 'six months is accepted');
+});
+
 test('only the word "nanny" starts the bot', async () => {
   // Anything else gets a nudge rather than the menu, so a stray message
   // never drops someone into registration half-way.
@@ -438,7 +478,7 @@ test('booking asks for a date by option, and flags same-day as an emergency', as
   let reply = await say(FAMILY, '1');            // single day
   assert.match(reply, /1\. Today/, 'offers Today');
   assert.match(reply, /2\. Tomorrow/, 'offers Tomorrow');
-  assert.match(reply, /3\. Another day/);
+  assert.match(reply, /3\. Date/);
 
   reply = await say(FAMILY, '1');                // Today
   assert.match(reply, /Is this an emergency/i, 'same-day asks about urgency');

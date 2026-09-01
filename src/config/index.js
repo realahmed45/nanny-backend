@@ -47,6 +47,14 @@ export const config = {
     rejectUnauthorized: String(process.env.SMTP_REJECT_UNAUTHORIZED || 'true').toLowerCase() !== 'false',
   },
 
+  // How far ahead a booking may be made. A start date beyond a few months is
+  // almost always a typo (a wrong year), and an end date years out would
+  // generate service days indefinitely.
+  booking: {
+    maxStartMonths: int(process.env.BOOKING_MAX_START_MONTHS, 3),
+    maxDurationMonths: int(process.env.BOOKING_MAX_DURATION_MONTHS, 12),
+  },
+
   // The thank-you for referring someone: they pay the discounted rate
   // instead of the standard one. Shown as typed, so "90k" stays "90k".
   referral: {

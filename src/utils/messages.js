@@ -105,7 +105,7 @@ export const ASK_START_DATE = `When would you like the booking to start?
 
 1. Today
 2. Tomorrow
-3. Another day
+3. Date
 
 Or just type it — *today*, *tomorrow*, a weekday like *Monday*, or a date like *12 August*.`;
 

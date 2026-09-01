@@ -1,4 +1,5 @@
 import dayjs from 'dayjs';
+import config from '../config/index.js';
 import { on } from './engine.js';
 import { makeNameHandler, makeEmailHandler, makeOtpHandler } from './common.js';
 import { User, Booking, ChatThread } from '../models/index.js';
@@ -178,6 +179,25 @@ const frequencyHandler = async (ctx) => {
 frequencyHandler.prompt = () => M.ASK_FREQUENCY;
 on('FF_FREQUENCY', frequencyHandler);
 
+/**
+ * Reject a start date that is in the past or implausibly far ahead.
+ * A date months out is nearly always a mistyped year, and accepting it
+ * silently produces a booking nobody is expecting.
+ *
+ * Returns an error string, or null when the date is fine.
+ */
+function startDateError(date) {
+  const day = dayjs(date);
+  if (day.isBefore(dayjs().startOf('day'))) {
+    return 'That date is in the past. Please choose a future date.';
+  }
+  const limit = dayjs().add(config.booking.maxStartMonths, 'month');
+  if (day.isAfter(limit)) {
+    return `Bookings can only start within the next ${config.booking.maxStartMonths} months (up to *${limit.format('D MMMM YYYY')}*).\n\nPlease choose an earlier date.`;
+  }
+  return null;
+}
+
 /** Move past the date question: multi-day asks for an end date, single-day for a time. */
 function afterStartDate(ctx) {
   if (ctx.get('isMultiDay')) {
@@ -213,9 +233,8 @@ const startDateHandler = async (ctx) => {
 
   const date = parseDate(ctx.text);
   if (!date) return M.ASK_START_DATE;
-  if (new Date(`${date}T23:59:59`) < new Date()) {
-    return '❌ That date is in the past. Please choose a future date.';
-  }
+  const problem = startDateError(date);
+  if (problem) return problem;
   ctx.set('startDate', date);
 
   if (date === today) return { text: M.ASK_EMERGENCY, state: 'FF_EMERGENCY' };
@@ -228,9 +247,8 @@ on('FF_START_DATE', startDateHandler);
 const startDateCustomHandler = async (ctx) => {
   const date = parseDate(ctx.text);
   if (!date) return `❌ I couldn't read that date. Try a format like *12 August* or *2026-08-12*.`;
-  if (new Date(`${date}T23:59:59`) < new Date()) {
-    return '❌ That date is in the past. Please choose a future date.';
-  }
+  const problem = startDateError(date);
+  if (problem) return problem;
   ctx.set('startDate', date);
 
   if (date === dayjs().format('YYYY-MM-DD')) {
@@ -267,8 +285,16 @@ on('FF_EMERGENCY', emergencyHandler);
 const endDateHandler = async (ctx) => {
   const date = parseDate(ctx.text);
   if (!date) return `❌ I couldn't read that date. Try a format like *30 August* or *2026-08-30*.`;
-  if (date < ctx.get('startDate')) {
-    return '❌ The end date must be on or after the start date.';
+  const startDate = ctx.get('startDate');
+  if (date < startDate) {
+    return 'The end date must be on or after the start date.';
+  }
+
+  // A recurring booking can run as long as the family likes, but not so far
+  // out that we would generate service days indefinitely.
+  const maxEnd = dayjs(startDate).add(config.booking.maxDurationMonths, 'month');
+  if (dayjs(date).isAfter(maxEnd)) {
+    return `A booking can run for up to ${config.booking.maxDurationMonths} months, so the latest end date is *${maxEnd.format('D MMMM YYYY')}*.\n\nPlease choose an earlier date.`;
   }
   ctx.set('endDate', date);
   return { text: M.ASK_REPEAT_DAYS, state: 'FF_REPEAT_DAYS' };
