@@ -47,6 +47,16 @@ export const config = {
     rejectUnauthorized: String(process.env.SMTP_REJECT_UNAUTHORIZED || 'true').toLowerCase() !== 'false',
   },
 
+  // The thank-you for referring someone: they pay the discounted rate
+  // instead of the standard one. Shown as typed, so "90k" stays "90k".
+  referral: {
+    // Referral links are read aloud and retyped, so they can point at a
+    // short domain instead of the long hosting URL.
+    linkBase: process.env.REFERRAL_LINK_BASE || '',
+    standardRate: process.env.REFERRAL_STANDARD_RATE || '120k',
+    discountedRate: process.env.REFERRAL_DISCOUNTED_RATE || '90k',
+  },
+
   // Bank details the bot shows families so they can make the transfer.
   bank: {
     name: process.env.BANK_NAME || '',

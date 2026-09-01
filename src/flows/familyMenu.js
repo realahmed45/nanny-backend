@@ -288,17 +288,19 @@ export async function showReferral(ctx) {
     user.referralCode = makeReferralCode(user.fullName);
     await user.save();
   }
-  const link = `${config.publicBaseUrl}/r/${user.referralCode}`;
+  // A short path is easier to read out over the phone or retype from a
+  // screenshot than a long one with the code repeated in it.
+  const link = `${config.referral.linkBase || config.publicBaseUrl}/r/${user.referralCode}`;
+  const { standardRate, discountedRate } = config.referral;
+
   return {
-    text: `🎁 *Refer a Friend*
+    text: `\u{1F381} *Refer a Friend*
 
 Share My Nanny with your friends and earn rewards!
 
-Your referral code: *${user.referralCode}*
 Your link: ${link}
 
-👥 Friends referred: *${user.referralCount || 0}*
-💰 Rewards earned: *${money(user.referralEarnings || 0)}*
+You pay only *${discountedRate}* instead of *${standardRate}* as a thank you for your referral.
 
 Type *0* to return to the Main Menu.`,
     state: 'FAMILY_MAIN_MENU',

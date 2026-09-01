@@ -21,12 +21,21 @@ export function detectCommand(text) {
   if (t === COMMANDS.BYE) return 'BYE';
   if (t === COMMANDS.CANCEL) return 'CANCEL';
   if (t === COMMANDS.BACK) return 'BACK';
-  if (t === COMMANDS.NONE) return 'NONE';
+  if (isNone(t)) return 'NONE';
   return null;
 }
 
+/**
+ * "None" and the ways people actually type it.
+ *
+ * "non" is the common slip, and a trailing full stop is easy to add without
+ * meaning to, so both count as none rather than being stored as a medical note
+ * that reads "non".
+ */
+const NONE_WORDS = new Set(['none', 'non', 'nil', 'na', 'n/a', 'nothing', 'no']);
+
 export function isNone(text) {
-  return lower(text) === 'none';
+  return NONE_WORDS.has(lower(text).replace(/[.!]+$/, ''));
 }
 
 /** Parse a single menu choice: "2" -> 2, out-of-range -> null. */

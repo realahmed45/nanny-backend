@@ -861,21 +861,21 @@ async function showNannyReferral(ctx) {
     user.referralCode = makeReferralCode(user.fullName);
     await user.save();
   }
+
+  const link = `${config.referral.linkBase || config.publicBaseUrl}/r/${user.referralCode}`;
+
   return {
-    text: `🎁 *Refer a Friend*
+    text: `\u{1F381} *Refer a Friend*
 
 Invite other nannies to join My Nanny and earn rewards when they complete their first booking.
 
-Your referral code: *${user.referralCode}*
-Your link: ${config.publicBaseUrl}/r/${user.referralCode}
-
-👥 Nannies referred: *${user.referralCount || 0}*
-💰 Rewards earned: *${money(user.referralEarnings || 0)}*
+Your link: ${link}
 
 Type *0* to return to the Main Menu.`,
     state: 'NANNY_MAIN_MENU',
   };
 }
+
 
 export default {
   NANNY_BOOKINGS_MENU, NANNY_AVAILABILITY_MENU, NANNY_PROFILE_MENU,

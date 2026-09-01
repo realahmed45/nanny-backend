@@ -45,6 +45,21 @@ on('FAMILY_REG_RESUME', async (ctx) => ({
  * Find a nanny — location & address
  * ------------------------------------------------------------------ */
 
+/**
+ * The long free-text questions send their guidance as a separate message, so
+ * the question itself stays short and the advice does not get skimmed past.
+ */
+const askOtherInstructions = () => [
+  { text: M.ASK_OTHER_INSTRUCTIONS },
+  { text: M.LONG_ANSWER_HINT, state: 'FF_OTHER_INSTRUCTIONS' },
+];
+
+/** The language list, followed by the note about English being the minimum. */
+const askLanguages = () => [
+  { text: M.ASK_LANGUAGES },
+  { text: M.LANGUAGE_NOTE, state: 'FF_LANGUAGES' },
+];
+
 export async function startFindNanny(ctx) {
   const user = ctx.user || (await User.findById(ctx.session.user));
 
@@ -296,7 +311,7 @@ const durationHandler = async (ctx) => {
   const choice = parseChoice(ctx.text, DURATION_OPTIONS.length);
   if (!choice) return M.ASK_DURATION;
   ctx.set('hoursPerDay', DURATION_OPTIONS[choice - 1]);
-  return { text: M.ASK_LANGUAGES, state: 'FF_LANGUAGES' };
+  return askLanguages();
 };
 durationHandler.prompt = () => M.ASK_DURATION;
 on('FF_DURATION', durationHandler);
@@ -377,7 +392,7 @@ const savedChildrenHandler = async (ctx) => {
 
   if (choice === 1) {
     ctx.merge({ children: saved, childCount: saved.length, childIndex: saved.length });
-    return { text: M.ASK_OTHER_INSTRUCTIONS, state: 'FF_OTHER_INSTRUCTIONS' };
+    return askOtherInstructions();
   }
 
   if (choice === 2) {
@@ -411,7 +426,7 @@ const pickChildrenHandler = async (ctx) => {
   });
 
   ctx.merge({ children: chosen, childCount: chosen.length, childIndex: chosen.length });
-  return { text: M.ASK_OTHER_INSTRUCTIONS, state: 'FF_OTHER_INSTRUCTIONS' };
+  return askOtherInstructions();
 };
 pickChildrenHandler.prompt = () => M.INVALID_CHOICE;
 on('FF_CHILDREN_PICK', pickChildrenHandler);
@@ -488,7 +503,7 @@ const childDietHandler = async (ctx) => {
   if (nextIndex >= total) {
     return [
       { text: M.CHILD_THANKS(child.name) },
-      { text: M.ASK_OTHER_INSTRUCTIONS, state: 'FF_OTHER_INSTRUCTIONS' },
+      ...askOtherInstructions(),
     ];
   }
 
@@ -524,7 +539,7 @@ const continueOrAgentHandler = async (ctx) => {
 
     return [
       { text: M.AGENT_WILL_CALL },
-      { text: M.ASK_OTHER_INSTRUCTIONS, state: 'FF_OTHER_INSTRUCTIONS' },
+      ...askOtherInstructions(),
     ];
   }
   const idx = ctx.get('childIndex', 1);

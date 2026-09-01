@@ -126,6 +126,10 @@ export const ASK_START_TIME = 'What time does the session start?';
 export const ASK_DURATION = `How long do you need the nanny?\n\n${durationMenu()}`;
 
 export const ASK_LANGUAGES = `Choose a language.\n\n${numbered(LANGUAGES)}\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
+
+/** Sent on its own after the language list, so it is not lost in the menu. */
+export const LANGUAGE_NOTE =
+  'We will try to find your language requirement. English is the minimum for every nanny.';
 export const ASK_SKILLS = `Choose required skills.\n\n${numbered(SKILLS)}\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
 export const ASK_SUBJECTS = `Choose subjects you want the nanny to teach\n\n${numbered(SUBJECTS)}\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
 
@@ -176,8 +180,6 @@ You can include:
 • Things the child should avoid
 • Special instructions
 • Family preferences
-
-${LONG_ANSWER_HINT}
 
 if none then type *None*`;
 
