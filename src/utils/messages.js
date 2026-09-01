@@ -101,18 +101,31 @@ export const ASK_FREQUENCY = `How often do you need a nanny?
 1. Single One Day
 2. Multiple Days, Weeks, Months etc`;
 
-export const ASK_START_DATE = 'When would you like the booking to start?\n📅 Select a start date.';
+export const ASK_START_DATE = `When would you like the booking to start?
+
+1. Today
+2. Tomorrow
+3. Another day
+
+Or just type a date, e.g. *12 August*.`;
+
+export const ASK_START_DATE_CUSTOM = '📅 Which date? Type it like *12 August* or *2026-08-12*.';
+
+/** Same-day bookings are urgent by definition, so we ask outright. */
+export const ASK_EMERGENCY = `⚡ *Booking for today*
+
+Is this an emergency? We prioritise urgent same-day requests and contact available nannies straight away.
+
+1. Yes, it's urgent
+2. No, it's a normal booking`;
 export const ASK_END_DATE = 'When would you like the booking to end?\n📅 Select an end date.';
-export const ASK_REPEAT_DAYS = `Which days should the booking repeat on?\n\n${numbered(WEEKDAYS)}\n\nSelect multiple, separated by comma (e.g. 1,2,3)`;
+export const ASK_REPEAT_DAYS = `Which days should the booking repeat on?\n\n${numbered(WEEKDAYS)}\n8. All days of the week\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
 export const ASK_START_TIME = 'What time does the session start?';
 export const ASK_DURATION = `How long do you need the nanny?\n\n${durationMenu()}`;
 
-export const ASK_LANGUAGES = `Choose a language.\n\n${numbered(LANGUAGES)}\n\nType multiple languages option separated by comma`;
-export const ASK_SKILLS = `Choose required skills.\n\n${numbered(SKILLS)}\n\nSelect multiple, separated by comma`;
-export const ASK_SUBJECTS = `Choose subjects you want the nanny to teach\n\n${numbered(SUBJECTS)}\n\nSelect multiple. Type separated by comma`;
-export const ASK_BUDGET_MIN = 'Your minimum hourly budget in USD?';
-export const ASK_BUDGET_MAX = 'Your maximum hourly budget in USD?';
-export const ASK_CPR = 'Do you want the nanny to be CPR certified?\n\n1. Yes CPR certification required\n2. No, not required\n3. Works fine if certified or not';
+export const ASK_LANGUAGES = `Choose a language.\n\n${numbered(LANGUAGES)}\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
+export const ASK_SKILLS = `Choose required skills.\n\n${numbered(SKILLS)}\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
+export const ASK_SUBJECTS = `Choose subjects you want the nanny to teach\n\n${numbered(SUBJECTS)}\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
 
 export const ASK_CHILD_COUNT = `How many children need care?
 
@@ -201,12 +214,27 @@ export function bookingSummary(b, {
     lines.push(`*Other Instructions:*\n ${b.otherInstructions}`);
   }
 
-  lines.push('');
-  lines.push(paid ? '*💰 Payment Info*' : '*💰Payment*');
-  lines.push(`Rate: ${money(b.hourlyRate)}/hr`);
+  if (b.isEmergency) {
+    lines.push('');
+    lines.push('⚡ *EMERGENCY BOOKING* — needed today');
+  }
+
   const days = dayCount || 1;
-  lines.push(`Duration: ${b.hoursPerDay}hrs per day for ${days} day${days > 1 ? 's' : ''}`);
-  lines.push(`Total Amount: *${money(b.totalAmount)}*${paid ? ' PAID' : ''}`);
+
+  // Before a nanny is chosen there is no rate yet, so quoting one would
+  // read as a price the family is being charged. Show the schedule only.
+  lines.push('');
+  if (b.hourlyRate) {
+    lines.push(paid ? '*💰 Payment Info*' : '*💰Payment*');
+    lines.push(`Rate: ${money(b.hourlyRate)}/hr`);
+    lines.push(`Duration: ${b.hoursPerDay}hrs per day for ${days} day${days > 1 ? 's' : ''}`);
+    lines.push(`Total Amount: *${money(b.totalAmount)}*${paid ? ' PAID' : ''}`);
+  } else {
+    lines.push('*⏱ Schedule*');
+    lines.push(`Duration: ${b.hoursPerDay}hrs per day for ${days} day${days > 1 ? 's' : ''}`);
+    lines.push('');
+    lines.push('_The total is shown once you choose a nanny._');
+  }
 
   if (showStatus) {
     lines.push('');
@@ -231,8 +259,7 @@ export const EDIT_MENU = `What do you want to edit?
 5. Languages
 6. Skills
 7. Subjects
-8. Budget
-9. Children Info`;
+8. Children Info`;
 
 export const EDIT_ANYTHING_ELSE = 'Do you want to edit anything else?\n\n1. Yes\n2. No';
 
@@ -256,7 +283,7 @@ export const NO_NANNIES = `😔 Sorry, we couldn't find a nanny matching your re
 
 What would you like to do?
 
-1. Change Skills, Language or Budget
+1. Change Skills or Language
 2. Change Date or Time
 3. Contact Support
 4. Back to Main Menu`;
@@ -360,13 +387,13 @@ export const refundIssued = (amount, ref) =>
 
 export const NANNY_ASK_AGE = 'What\'s your age?';
 export const NANNY_ASK_EXPERIENCE = 'How many years of nanny/childcare experience do you have?';
-export const NANNY_ASK_LANGUAGES = `Which languages can you speak?\n\n${numbered(LANGUAGES)}\n\nYou can select multiple separated by comma for example 1,2`;
+export const NANNY_ASK_LANGUAGES = `Which languages can you speak?\n\n${numbered(LANGUAGES)}\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
 export const NANNY_ASK_LANG_RATING = (lang) =>
   `Rate your proficiency in ${lang}.\n⭐ 1 – Basic\n⭐ 2 – Elementary\n⭐ 3 – Good\n⭐ 4 – Very Good\n⭐ 5 – Fluent`;
-export const NANNY_ASK_SKILLS = `What childcare skills do you have?\n\n${numbered(SKILLS)}\n\nYou can select multiple separated by comma for example 1,2`;
+export const NANNY_ASK_SKILLS = `What childcare skills do you have?\n\n${numbered(SKILLS)}\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
 export const NANNY_ASK_SKILL_RATING = (skill) =>
   `Rate your proficiency in ${skill}\n⭐ 1 – Beginner\n⭐ 2 – Basic\n⭐ 3 – Good\n⭐ 4 – Very Good\n⭐ 5 – Expert`;
-export const NANNY_ASK_SUBJECTS = `Which subjects can you teach?\n\n${numbered(SUBJECTS)}\n\nYou can select multiple separated by comma for example 1,2`;
+export const NANNY_ASK_SUBJECTS = `Which subjects can you teach?\n\n${numbered(SUBJECTS)}\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
 export const NANNY_ASK_RATE = 'What is your hourly rate in USD?';
 export const NANNY_ASK_CPR = 'Are you CPR certified?\n\n1. Yes\n2. No';
 export const NANNY_ASK_CPR_DOC = 'Please upload your *CPR certificate*.';
@@ -375,7 +402,7 @@ export const NANNY_ASK_ID_BACK = 'Please upload your National Identity card docu
 export const NANNY_ASK_ADDRESS = 'Please provide your current residing address.';
 export const NANNY_ASK_MAP = 'Please attach a google map location of your current residing address.\nType *None* if google map location is unavailable';
 export const NANNY_ASK_PHOTO = 'Please upload your *profile photo*.';
-export const NANNY_ASK_DAYS = `Which days are you available in the week?\nYou can later change it from My Availability section\n\n${numbered(WEEKDAYS)}\n\nYou can select multiple separated by comma for example 1,2`;
+export const NANNY_ASK_DAYS = `Which days are you available in the week?\nYou can later change it from My Availability section\n\n${numbered(WEEKDAYS)}\n8. All days of the week\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
 export const NANNY_ASK_AVAIL_START = 'What time are you available to start? 00:00 AM/PM';
 export const NANNY_ASK_AVAIL_HOURS = `How long can you provide a nanny service in a day?\n\n${durationMenu()}`;
 

@@ -141,14 +141,29 @@ export function parseDate(text, reference = new Date()) {
 export function parseWeekdays(text) {
   const t = clean(text);
   if (!t) return null;
+
   if (/^[\d,\s]+$/.test(t)) {
-    const idx = parseMultiChoice(t, 7);
-    return idx ? pickFrom(WEEKDAYS, idx) : null;
+    // 8 is the "All days of the week" shortcut, so it cannot be combined with
+    // individual days — picking it means every day.
+    const idx = parseMultiChoice(t, 8);
+    if (!idx) return null;
+    if (idx.includes(8)) return [...WEEKDAYS];
+    return pickFrom(WEEKDAYS, idx);
   }
-  const names = t.split(/[,&]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+
+  // Written days: accept commas, "and", or plain spaces between them.
+  if (/^(all|every ?day|everyday|all days|daily)$/i.test(t)) return [...WEEKDAYS];
+
+  const names = t
+    .split(/[,&]+|\s+and\s+|\s+/i)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+
   const out = [];
   for (const n of names) {
-    const match = WEEKDAYS.find((w) => w.toLowerCase() === n || w.toLowerCase().startsWith(n.slice(0, 3)));
+    const match = WEEKDAYS.find(
+      (w) => w.toLowerCase() === n || (n.length >= 3 && w.toLowerCase().startsWith(n.slice(0, 3))),
+    );
     if (!match) return null;
     if (!out.includes(match)) out.push(match);
   }

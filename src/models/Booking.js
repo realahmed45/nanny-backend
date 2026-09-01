@@ -79,6 +79,8 @@ const BookingSchema = new mongoose.Schema({
   children: [ChildSnapshotSchema],
   otherInstructions: String,
   agentCallRequested: { type: Boolean, default: false },
+  // Same-day request the family flagged as urgent.
+  isEmergency: { type: Boolean, default: false },
 
   hourlyRate: Number,                // locked at booking time; nanny rate changes don't apply
   totalAmount: Number,

@@ -1,3 +1,4 @@
+import dayjs from 'dayjs';
 import { on } from './engine.js';
 import { makeNameHandler, makeEmailHandler, makeOtpHandler } from './common.js';
 import { User, Booking, ChatThread } from '../models/index.js';
@@ -162,14 +163,8 @@ const frequencyHandler = async (ctx) => {
 frequencyHandler.prompt = () => M.ASK_FREQUENCY;
 on('FF_FREQUENCY', frequencyHandler);
 
-const startDateHandler = async (ctx) => {
-  const date = parseDate(ctx.text);
-  if (!date) return `❌ I couldn't read that date. Try a format like *12 August* or *2026-08-12*.`;
-  if (new Date(`${date}T23:59:59`) < new Date()) {
-    return '❌ That date is in the past. Please choose a future date.';
-  }
-  ctx.set('startDate', date);
-
+/** Move past the date question: multi-day asks for an end date, single-day for a time. */
+function afterStartDate(ctx) {
   if (ctx.get('isMultiDay')) {
     return { text: M.ASK_END_DATE, state: 'FF_END_DATE' };
   }
@@ -177,9 +172,82 @@ const startDateHandler = async (ctx) => {
     { text: M.IMPORTANT_FAMILY_INFO },
     { text: M.ASK_START_TIME, state: 'FF_START_TIME' },
   ];
+}
+
+const startDateHandler = async (ctx) => {
+  const today = dayjs().format('YYYY-MM-DD');
+  const choice = parseChoice(ctx.text, 3);
+
+  // The shortcuts only apply to a bare 1/2/3 — "3 September" is a date.
+  const isBareChoice = choice && /^[1-3]$/.test(clean(ctx.text));
+
+  if (isBareChoice && choice === 3) {
+    return { text: M.ASK_START_DATE_CUSTOM, state: 'FF_START_DATE_CUSTOM' };
+  }
+
+  if (isBareChoice && choice === 1) {
+    ctx.set('startDate', today);
+    // Same-day: ask whether it is urgent before going any further.
+    return { text: M.ASK_EMERGENCY, state: 'FF_EMERGENCY' };
+  }
+
+  if (isBareChoice && choice === 2) {
+    ctx.set('startDate', dayjs().add(1, 'day').format('YYYY-MM-DD'));
+    return afterStartDate(ctx);
+  }
+
+  const date = parseDate(ctx.text);
+  if (!date) return M.ASK_START_DATE;
+  if (new Date(`${date}T23:59:59`) < new Date()) {
+    return '❌ That date is in the past. Please choose a future date.';
+  }
+  ctx.set('startDate', date);
+
+  if (date === today) return { text: M.ASK_EMERGENCY, state: 'FF_EMERGENCY' };
+  return afterStartDate(ctx);
 };
 startDateHandler.prompt = () => M.ASK_START_DATE;
 on('FF_START_DATE', startDateHandler);
+
+/** "Another day" — a typed date, with no menu options in the way. */
+const startDateCustomHandler = async (ctx) => {
+  const date = parseDate(ctx.text);
+  if (!date) return `❌ I couldn't read that date. Try a format like *12 August* or *2026-08-12*.`;
+  if (new Date(`${date}T23:59:59`) < new Date()) {
+    return '❌ That date is in the past. Please choose a future date.';
+  }
+  ctx.set('startDate', date);
+
+  if (date === dayjs().format('YYYY-MM-DD')) {
+    return { text: M.ASK_EMERGENCY, state: 'FF_EMERGENCY' };
+  }
+  return afterStartDate(ctx);
+};
+startDateCustomHandler.prompt = () => M.ASK_START_DATE_CUSTOM;
+on('FF_START_DATE_CUSTOM', startDateCustomHandler);
+
+/**
+ * Flagged on the booking so support and the dashboard can see at a glance that
+ * someone needs a nanny today.
+ */
+const emergencyHandler = async (ctx) => {
+  const choice = parseChoice(ctx.text, 2);
+  if (!choice) return M.ASK_EMERGENCY;
+
+  ctx.set('isEmergency', choice === 1);
+  const steps = afterStartDate(ctx);
+  const rest = Array.isArray(steps) ? steps : [steps];
+
+  if (choice === 1) {
+    return [
+      { text: '⚡ Understood — we will treat this as an emergency and contact available nannies right away.' },
+      ...rest,
+    ];
+  }
+  return rest;
+};
+emergencyHandler.prompt = () => M.ASK_EMERGENCY;
+on('FF_EMERGENCY', emergencyHandler);
 
 const endDateHandler = async (ctx) => {
   const date = parseDate(ctx.text);
@@ -257,7 +325,7 @@ const skillsHandler = async (ctx) => {
     return { text: M.ASK_SUBJECTS, state: 'FF_SUBJECTS' };
   }
   ctx.set('subjects', []);
-  return { text: M.ASK_BUDGET_MIN, state: 'FF_BUDGET_MIN' };
+  return { text: M.ASK_CHILD_COUNT, state: 'FF_CHILD_COUNT' };
 };
 skillsHandler.prompt = () => M.ASK_SKILLS;
 on('FF_SKILLS', skillsHandler);
@@ -266,40 +334,10 @@ const subjectsHandler = async (ctx) => {
   const idx = parseMultiChoice(ctx.text, SUBJECTS.length);
   if (!idx) return M.ASK_SUBJECTS;
   ctx.set('subjects', pickFrom(SUBJECTS, idx));
-  return { text: M.ASK_BUDGET_MIN, state: 'FF_BUDGET_MIN' };
+  return { text: M.ASK_CHILD_COUNT, state: 'FF_CHILD_COUNT' };
 };
 subjectsHandler.prompt = () => M.ASK_SUBJECTS;
 on('FF_SUBJECTS', subjectsHandler);
-
-const budgetMinHandler = async (ctx) => {
-  const v = parseMoney(ctx.text);
-  if (v === null) return `❌ Please enter an amount, for example *$25*.`;
-  ctx.set('budgetMin', v);
-  return { text: M.ASK_BUDGET_MAX, state: 'FF_BUDGET_MAX' };
-};
-budgetMinHandler.prompt = () => M.ASK_BUDGET_MIN;
-on('FF_BUDGET_MIN', budgetMinHandler);
-
-const budgetMaxHandler = async (ctx) => {
-  const v = parseMoney(ctx.text);
-  if (v === null) return `❌ Please enter an amount, for example *$45*.`;
-  if (v < ctx.get('budgetMin')) {
-    return `❌ Your maximum budget must be at least your minimum (${ctx.get('budgetMin')}).`;
-  }
-  ctx.set('budgetMax', v);
-  return { text: M.ASK_CPR, state: 'FF_CPR' };
-};
-budgetMaxHandler.prompt = () => M.ASK_BUDGET_MAX;
-on('FF_BUDGET_MAX', budgetMaxHandler);
-
-const cprHandler = async (ctx) => {
-  const choice = parseChoice(ctx.text, 3);
-  if (!choice) return M.ASK_CPR;
-  ctx.set('cpr', [CPR_REQUIREMENT.REQUIRED, CPR_REQUIREMENT.NOT_REQUIRED, CPR_REQUIREMENT.EITHER][choice - 1]);
-  return { text: M.ASK_CHILD_COUNT, state: 'FF_CHILD_COUNT' };
-};
-cprHandler.prompt = () => M.ASK_CPR;
-on('FF_CPR', cprHandler);
 
 /* ------------------------------------------------------------------ *
  * Children
@@ -431,7 +469,7 @@ on('FF_OTHER_INSTRUCTIONS', otherInstructionsHandler);
 /** Build a booking-shaped preview object from the session draft. */
 export function draftToBooking(ctx, { hourlyRate = null } = {}) {
   const d = ctx.session.data || {};
-  const rate = hourlyRate ?? d.hourlyRate ?? d.budgetMin ?? 0;
+  const rate = hourlyRate ?? d.hourlyRate ?? 0;
   const serviceDays = buildServiceDays({
     startDate: d.startDate,
     endDate: d.isMultiDay ? d.endDate : d.startDate,
@@ -456,6 +494,7 @@ export function draftToBooking(ctx, { hourlyRate = null } = {}) {
     children: d.children || [],
     otherInstructions: d.otherInstructions,
     agentCallRequested: !!d.agentCallRequested,
+    isEmergency: !!d.isEmergency,
     hourlyRate: rate,
     totalAmount: computeBookingAmount({ hourlyRate: rate, hoursPerDay: d.hoursPerDay, days: serviceDays.length }),
   };
@@ -495,8 +534,7 @@ const editMenuHandler = async (ctx) => {
     5: { text: M.ASK_LANGUAGES, state: 'FF_EDIT_LANGUAGES' },
     6: { text: M.ASK_SKILLS, state: 'FF_EDIT_SKILLS' },
     7: { text: M.ASK_SUBJECTS, state: 'FF_EDIT_SUBJECTS' },
-    8: { text: M.ASK_BUDGET_MIN, state: 'FF_EDIT_BUDGET_MIN' },
-    9: { text: M.ASK_CHILD_COUNT, state: 'FF_EDIT_CHILDREN' },
+    8: { text: M.ASK_CHILD_COUNT, state: 'FF_EDIT_CHILDREN' },
   };
 
   // "Repeat on" only applies to multi-day bookings.
@@ -570,23 +608,6 @@ editStep('FF_EDIT_SUBJECTS', async (ctx) => {
   ctx.set('subjects', pickFrom(SUBJECTS, idx));
   return true;
 }, () => M.ASK_SUBJECTS);
-
-const editBudgetMin = async (ctx) => {
-  const v = parseMoney(ctx.text);
-  if (v === null) return '❌ Please enter an amount, for example *$25*.';
-  ctx.set('budgetMin', v);
-  return { text: M.ASK_BUDGET_MAX, state: 'FF_EDIT_BUDGET_MAX' };
-};
-editBudgetMin.prompt = () => M.ASK_BUDGET_MIN;
-on('FF_EDIT_BUDGET_MIN', editBudgetMin);
-
-editStep('FF_EDIT_BUDGET_MAX', async (ctx) => {
-  const v = parseMoney(ctx.text);
-  if (v === null) return '❌ Please enter an amount, for example *$45*.';
-  if (v < ctx.get('budgetMin')) return `❌ Maximum must be at least ${ctx.get('budgetMin')}.`;
-  ctx.set('budgetMax', v);
-  return true;
-}, () => M.ASK_BUDGET_MAX);
 
 /** Re-run the whole children sub-flow. */
 const editChildrenHandler = async (ctx) => {

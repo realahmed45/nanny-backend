@@ -63,13 +63,12 @@ async function familyBookingUpToListing(phone = FAMILY, { date = null } = {}) {
   await say(phone, '2');            // don't save address
   await say(phone, '1');            // single day
   await say(phone, target);
+  // Booking for today triggers the emergency question; answer it.
+  if (target === dayjs().format('YYYY-MM-DD')) await say(phone, '2');
   await say(phone, '9 AM');
   await say(phone, '2');            // two hours
-  await say(phone, '1,2');          // English, Arabic
-  await say(phone, '1,3');          // Cooking, Newborn Care
-  await say(phone, '$20');          // budget min
-  await say(phone, '$50');          // budget max
-  await say(phone, '1');            // CPR required
+  await say(phone, '1 2');          // English, Arabic (space-separated)
+  await say(phone, '1 3');          // Cooking, Newborn Care
   await say(phone, '1');            // one child
   await say(phone, 'Emma');
   await say(phone, '4 years');
@@ -366,12 +365,65 @@ test('nanny search lists matching nannies and shows a full profile', async () =>
   assert.match(reply, /Book this nanny/);
 });
 
-test('a nanny outside the budget is not matched', async () => {
-  await createVerifiedNanny(NANNY, { rate: 200 });   // above the $50 max
+test('nannies are no longer filtered by budget or CPR', async () => {
+  // The budget and CPR questions were removed, so an expensive nanny must
+  // still be offered rather than silently filtered out.
+  await createVerifiedNanny(NANNY, { rate: 200 });
   await familyBookingUpToListing();
 
   const reply = await say(FAMILY, '1');
-  assert.match(reply, /couldn't find a nanny/i);
+  assert.match(reply, /available nannies/, 'search still returns results');
+  assert.match(reply, /Maria Grook/);
+  assert.match(reply, /\$200\/hr/, 'the rate is shown, not used as a filter');
+});
+
+test('booking asks for a date by option, and flags same-day as an emergency', async () => {
+  const { Booking } = await import('../src/models/index.js');
+  await createVerifiedNanny();
+
+  await say(FAMILY, 'nanny');
+  await say(FAMILY, '1');
+  await say(FAMILY, '1');
+  await say(FAMILY, 'Sarah Johnson');
+  await say(FAMILY, 'sarah@email.com');
+  await say(FAMILY, await latestOtp(FAMILY));
+  await say(FAMILY, 'https://maps.google.com/?q=25.2,55.3');
+  await say(FAMILY, 'Downtown Dubai');
+  await say(FAMILY, '2');
+
+  let reply = await say(FAMILY, '1');            // single day
+  assert.match(reply, /1\. Today/, 'offers Today');
+  assert.match(reply, /2\. Tomorrow/, 'offers Tomorrow');
+  assert.match(reply, /3\. Another day/);
+
+  reply = await say(FAMILY, '1');                // Today
+  assert.match(reply, /Is this an emergency/i, 'same-day asks about urgency');
+
+  reply = await say(FAMILY, '1');                // yes, urgent
+  assert.match(reply, /emergency/i);
+
+  // Straight into the time question — no budget or CPR steps any more.
+  await say(FAMILY, '9 AM');
+  await say(FAMILY, '2');
+  await say(FAMILY, '1 2');
+  await say(FAMILY, '1 3');
+  await say(FAMILY, '1');
+  await say(FAMILY, 'Emma');
+  await say(FAMILY, '4 years');
+  await say(FAMILY, 'None');
+  await say(FAMILY, 'None');
+  const summary = await say(FAMILY, 'None');
+
+  assert.match(summary, /EMERGENCY BOOKING/, 'the summary marks it as urgent');
+  assert.doesNotMatch(summary, /budget/i, 'no budget anywhere in the flow');
+
+  // And it reaches the booking, so the dashboard can surface it.
+  await say(FAMILY, '1'); await say(FAMILY, '1'); await say(FAMILY, '1');
+  await payAndApprove();
+
+  const booking = await Booking.findOne({});
+  assert.equal(booking.isEmergency, true);
+  assert.equal(booking.startDate, dayjs().format('YYYY-MM-DD'));
 });
 
 test('manual transfer: proof is queued, and admin approval releases the request', async () => {
@@ -521,14 +573,11 @@ test('multi-day booking builds one service day per matching weekday', async () =
   await say(FAMILY, '2');                          // multiple days
   await say(FAMILY, start.format('YYYY-MM-DD'));
   await say(FAMILY, end.format('YYYY-MM-DD'));
-  await say(FAMILY, '1,2,3');                      // Mon, Tue, Wed
+  await say(FAMILY, '1 2 3');                      // Mon, Tue, Wed (spaces)
   await say(FAMILY, '9 AM');
   await say(FAMILY, '2');
-  await say(FAMILY, '1,2');
-  await say(FAMILY, '1,3');
-  await say(FAMILY, '$20');
-  await say(FAMILY, '$50');
-  await say(FAMILY, '3');                          // CPR either
+  await say(FAMILY, '1 2');
+  await say(FAMILY, '1 3');
   await say(FAMILY, '1');
   await say(FAMILY, 'Emma');
   await say(FAMILY, '4 years');

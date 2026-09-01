@@ -89,7 +89,7 @@ async function dispatchAction(ctx, booking, label) {
       return startReschedule(ctx, booking);
     case 'Change Address':
       return { text: M.ASK_LOCATION, state: 'FB_CHANGE_ADDRESS_MAP' };
-    case 'Change Skills, Language or Budget':
+    case 'Change Skills or Language':
       return { text: CHANGE_REQ_MENU, state: 'FB_CHANGE_REQ_MENU' };
     case 'Change Nanny':
     case 'View Replacement Nannies':
@@ -369,18 +369,16 @@ export const CHANGE_REQ_MENU = `What would you like to change?
 1. Languages
 2. Skills
 3. Subjects
-4. Budget
 
 Type *Back* to go back.`;
 
 on('FB_CHANGE_REQ_MENU', async (ctx) => {
-  const choice = parseChoice(ctx.text, 4);
+  const choice = parseChoice(ctx.text, 3);
   if (!choice) return CHANGE_REQ_MENU;
   const routes = {
     1: { text: M.ASK_LANGUAGES, state: 'FB_CHANGE_LANGUAGES' },
     2: { text: M.ASK_SKILLS, state: 'FB_CHANGE_SKILLS' },
     3: { text: M.ASK_SUBJECTS, state: 'FB_CHANGE_SUBJECTS' },
-    4: { text: M.ASK_BUDGET_MIN, state: 'FB_CHANGE_BUDGET_MIN' },
   };
   return routes[choice];
 });
@@ -402,24 +400,6 @@ changeReqStep('FB_CHANGE_LANGUAGES', LANGUAGES, 'languages');
 changeReqStep('FB_CHANGE_SKILLS', SKILLS, 'skills');
 changeReqStep('FB_CHANGE_SUBJECTS', SUBJECTS, 'subjects');
 
-on('FB_CHANGE_BUDGET_MIN', async (ctx) => {
-  const v = parseMoney(ctx.text);
-  if (v === null) return '❌ Please enter an amount, for example *$25*.';
-  ctx.set('newBudgetMin', v);
-  return { text: M.ASK_BUDGET_MAX, state: 'FB_CHANGE_BUDGET_MAX' };
-});
-
-on('FB_CHANGE_BUDGET_MAX', async (ctx) => {
-  const v = parseMoney(ctx.text);
-  if (v === null) return '❌ Please enter an amount, for example *$45*.';
-  const booking = await activeBooking(ctx);
-  if (!booking) return { text: MY_BOOKINGS_MENU, state: 'FB_BOOKINGS_MENU' };
-  booking.pendingChange = {
-    kind: 'requirements',
-    requirements: { budgetMin: ctx.get('newBudgetMin'), budgetMax: v },
-  };
-  return sendChangeToNanny(ctx, booking, '💰 Budget change');
-});
 
 /**
  * Route a change through the nanny's 2-hour approval window, or apply it

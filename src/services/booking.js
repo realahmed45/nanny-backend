@@ -82,6 +82,7 @@ export async function createBooking({ family, nanny, draft }) {
       cpr: draft.cpr,
     },
     children: draft.children || [],
+    isEmergency: !!draft.isEmergency,
     otherInstructions: draft.otherInstructions,
     agentCallRequested: !!draft.agentCallRequested,
     hourlyRate,
