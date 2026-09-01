@@ -515,6 +515,13 @@ const continueOrAgentHandler = async (ctx) => {
 
   if (choice === 2) {
     ctx.set('agentCallRequested', true);
+
+    // Put them in the same queue as an unmatched search, so somebody
+    // actually calls rather than the request only living on the booking.
+    await recordCallbackRequest(ctx, { reason: 'agent_requested' }).catch((err) => {
+      console.error('[callback] could not record agent request:', err.message);
+    });
+
     return [
       { text: M.AGENT_WILL_CALL },
       { text: M.ASK_OTHER_INSTRUCTIONS, state: 'FF_OTHER_INSTRUCTIONS' },
@@ -715,7 +722,7 @@ on('FF_EDIT_MORE', editMoreHandler);
  * Everything lives in the session draft, which is wiped when the family starts
  * again — so it is snapshotted here rather than looked up later.
  */
-async function recordCallbackRequest(ctx) {
+export async function recordCallbackRequest(ctx, { reason = 'no_nanny_found' } = {}) {
   const { CallbackRequest, nextSequence } = await import('../models/index.js');
   const d = ctx.session.data || {};
   const user = await User.findById(ctx.session.user);
@@ -731,13 +738,22 @@ async function recordCallbackRequest(ctx) {
     if (promisedCallAt <= now) promisedCallAt.setDate(promisedCallAt.getDate() + 1);
   }
 
-  await CallbackRequest.create({
+  // Do not stack duplicates: a family who loops back through the flow
+  // should not generate a new row for the same outstanding call.
+  const open = await CallbackRequest.findOne({
+    phone: ctx.phone,
+    reason,
+    status: { $in: ['pending', 'in_progress'] },
+  });
+  if (open) return open;
+
+  return CallbackRequest.create({
     reference: `CB-${await nextSequence('callback', 1000)}`,
     family: ctx.session.user,
     phone: ctx.phone,
     fullName: user?.fullName,
     email: user?.email,
-    reason: 'no_nanny_found',
+    reason,
     callWindow: morning ? 'morning' : 'now',
     promisedCallAt,
     request: {

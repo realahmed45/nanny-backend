@@ -266,6 +266,50 @@ test('identity verification shows status, and emergency contacts can be managed'
   assert.equal(family.emergencyContacts[0].relation, 'Mother');
 });
 
+test('asking for agent help queues a callback with what was captured', async () => {
+  const { CallbackRequest } = await import('../src/models/index.js');
+  await createVerifiedNanny();
+
+  await say(FAMILY, 'nanny');
+  await say(FAMILY, '1');
+  await say(FAMILY, '1');
+  await say(FAMILY, 'Sarah Johnson');
+  await say(FAMILY, 'sarah@email.com');
+  await say(FAMILY, await latestOtp(FAMILY));
+  await say(FAMILY, 'https://maps.google.com/?q=25.2,55.3');
+  await say(FAMILY, 'Downtown Dubai');
+  await say(FAMILY, '2');
+  await say(FAMILY, '1');
+  await say(FAMILY, dayjs().add(10, 'day').format('YYYY-MM-DD'));
+  await say(FAMILY, '9 AM');
+  await say(FAMILY, '2');
+  await say(FAMILY, '1 2');
+  await say(FAMILY, '1 3');
+  await say(FAMILY, '2');                      // two children
+  await say(FAMILY, 'Emma');
+
+  // Ages are normalised, so "4y" and "4 years" cannot disagree.
+  let reply = await say(FAMILY, 'not a number');
+  assert.match(reply, /number of years/i, 'a junk age is rejected');
+  reply = await say(FAMILY, '4y');
+  assert.match(reply, /as much detail as you'd like/i, 'long-answer hint is shown');
+
+  await say(FAMILY, 'Peanut allergy');
+  await say(FAMILY, 'Vegetarian');
+
+  reply = await say(FAMILY, '');
+  assert.match(reply, /Let an Agent Help/);
+
+  reply = await say(FAMILY, '2');              // let an agent help
+  assert.match(reply, /agent will call you/i);
+
+  const cb = await CallbackRequest.findOne({ phone: FAMILY, reason: 'agent_requested' });
+  assert.ok(cb, 'an agent callback was queued');
+  assert.equal(cb.status, 'pending');
+  assert.equal(cb.fullName, 'Sarah Johnson');
+  assert.deepEqual(cb.request.children.map((c) => c.age), ['4 years'], 'age was normalised');
+});
+
 test('only the word "nanny" starts the bot', async () => {
   // Anything else gets a nudge rather than the menu, so a stray message
   // never drops someone into registration half-way.

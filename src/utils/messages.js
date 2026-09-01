@@ -145,10 +145,14 @@ For a baby you can say *6 months*.`;
 
 export const INVALID_CHILD_AGE =
   'Please give the age as a number of years — for example *4*, *4y* or *4 years*.\nFor a baby, *6 months* works too.';
+/** Shown under every free-text question that expects a long answer. */
+export const LONG_ANSWER_HINT =
+  "Write as much detail as you'd like here! We recommend drafting your text elsewhere and pasting it in, or you can simply send us a voice message.";
+
 export const ASK_CHILD_MEDICAL = (name) =>
-  `Does ${name} have any allergies, medical conditions, or special care needs? Please tell us about them. _Example: Peanut allergy, asthma, epilepsy, medication, etc._\n\nif none then type *None*`;
+  `Does ${name} have any allergies, medical conditions, or special care needs? Please tell us about them. _Example: Peanut allergy, asthma, epilepsy, medication, etc._\n\n${LONG_ANSWER_HINT}\n\nif none then type *None*`;
 export const ASK_CHILD_DIET = (name) =>
-  `Does ${name} have any dietary requirements or foods to avoid?\nPlease provide the details. _Example: Vegan, vegetarian, halal, dairy-free, food allergy, etc._\n\nif none then type *None*`;
+  `Does ${name} have any dietary requirements or foods to avoid?\nPlease provide the details. _Example: Vegan, vegetarian, halal, dairy-free, food allergy, etc._\n\n${LONG_ANSWER_HINT}\n\nif none then type *None*`;
 export const CHILD_THANKS = (name) => `Thank you for providing details for ${name}`;
 
 export const ASK_CONTINUE_OR_AGENT = `Would you like to continue providing the remaining information yourself, or would you like our agent to call you after your booking is confirmed and fill it in for you?
@@ -170,6 +174,8 @@ You can include:
 • Things the child should avoid
 • Special instructions
 • Family preferences
+
+${LONG_ANSWER_HINT}
 
 if none then type *None*`;
 
