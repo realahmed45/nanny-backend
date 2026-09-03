@@ -1,8 +1,10 @@
+import config from '../config/index.js';
 import dayjs from 'dayjs';
 import { DURATION_OPTIONS } from './constants.js';
 
-export const money = (n, currency = 'USD') => {
-  const sym = currency === 'USD' ? '$' : `${currency} `;
+export const money = (n, currency = config.currency) => {
+  // IDR is written as a prefix with no decimals, e.g. Rp 90.000.
+  const sym = currency === 'USD' ? '$' : currency === 'IDR' ? 'Rp ' : `${currency} `;
   const v = Number(n || 0);
   return `${sym}${v % 1 === 0 ? v.toLocaleString('en-US') : v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };

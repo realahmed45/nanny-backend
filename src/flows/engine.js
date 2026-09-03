@@ -92,6 +92,17 @@ async function handleGlobalCommand(ctx) {
   // NONE / NEXT / SKIP are state-specific; handlers deal with them.
   if (['NONE', 'NEXT', 'SKIP'].includes(command)) return null;
 
+  // A full reset: back to the very first question, as if they had just
+  // messaged for the first time. Role is cleared too, so someone who picked
+  // the wrong side can switch.
+  if (command === 'RESTART') {
+    session.reset('START');
+    session.role = undefined;
+    session.user = undefined;
+    const { restartHandler } = await import('./common.js');
+    return restartHandler(ctx);
+  }
+
   if (command === 'MAIN_MENU') {
     const state = mainMenuState(session.role);
     session.reset(state);

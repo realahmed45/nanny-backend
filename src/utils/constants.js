@@ -100,6 +100,9 @@ export const COMMANDS = {
   BYE: 'bye',
   CANCEL: 'cancel',
   BACK: 'back',
+  // Full reset to the very first question (family or nanny), unlike BACK
+  // which only steps back one screen.
+  RESTART: 'return back',
   NONE: 'none',
 };
 

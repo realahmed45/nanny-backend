@@ -20,6 +20,8 @@ export function detectCommand(text) {
   if (t === COMMANDS.NEXT) return 'NEXT';
   if (t === COMMANDS.BYE) return 'BYE';
   if (t === COMMANDS.CANCEL) return 'CANCEL';
+  // Checked before BACK, since "return back" contains "back".
+  if (t === COMMANDS.RESTART || t === 'restart' || t === 'start over') return 'RESTART';
   if (t === COMMANDS.BACK) return 'BACK';
   if (isNone(t)) return 'NONE';
   return null;
@@ -156,6 +158,11 @@ export function parseTime(text) {
  * "12 Aug 2026", "2026-08-12", "12/08/2026". Bare day+month resolves to the
  * next such date at or after `reference` (so "12 August" never lands in the past).
  */
+const MONTH_NAMES = [
+  'january', 'february', 'march', 'april', 'may', 'june',
+  'july', 'august', 'september', 'october', 'november', 'december',
+];
+
 export const WEEKDAY_NAMES = [
   'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
 ];
@@ -198,9 +205,14 @@ export function parseDate(text, reference = new Date()) {
     }
   }
 
-  // dayjs matches month names case-sensitively, so restore title case
-  // before trying the formats: "12 august" must parse like "12 August".
-  const cased = t.replace(/(^|\s)([a-z])/g, (m, sp, c) => sp + c.toUpperCase());
+  // People type as much of the month as they feel like -- aug, augu, augus,
+  // august -- so expand any unambiguous prefix to the full name first.
+  // dayjs also matches month names case-sensitively, hence the title casing.
+  const expanded = t.replace(/[a-z]{3,}/g, (word) => {
+    const hits = MONTH_NAMES.filter((m) => m.startsWith(word));
+    return hits.length === 1 ? hits[0] : word;
+  });
+  const cased = expanded.replace(/(^|\s)([a-z])/g, (m, sp, c) => sp + c.toUpperCase());
 
   // --- explicit dates, full year given ---
   const withYear = [

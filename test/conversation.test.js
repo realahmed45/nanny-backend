@@ -350,6 +350,77 @@ test('booking dates are limited to a sensible window', async () => {
   assert.match(reply, /repeat on/i, 'six months is accepted');
 });
 
+test('"Return back" restarts from the very first question', async () => {
+  const { Session } = await import('../src/models/index.js');
+  await createVerifiedNanny();
+
+  await say(FAMILY, 'nanny');
+  await say(FAMILY, '1');
+  await say(FAMILY, '1');
+  await say(FAMILY, 'Sarah Johnson');
+  await say(FAMILY, 'sarah@email.com');
+  await say(FAMILY, await latestOtp(FAMILY));
+  await say(FAMILY, 'https://maps.google.com/?q=25.2,55.3');
+  await say(FAMILY, 'Downtown Dubai');
+  await say(FAMILY, '2');
+
+  // Deep in the booking flow, "Return back" goes all the way out — unlike
+  // BACK, which only steps back one screen.
+  const reply = await say(FAMILY, 'Return back');
+  assert.match(reply, /Welcome to/i);
+  assert.match(reply, /Family/i);
+
+  const session = await Session.findOne({ phone: FAMILY });
+  assert.equal(session.state, 'ROLE_PICK');
+  assert.ok(!session.role, 'role is cleared so they can switch sides');
+});
+
+test('a weekday answer is confirmed back as a real date', async () => {
+  const { Session } = await import('../src/models/index.js');
+  await createVerifiedNanny();
+
+  await say(FAMILY, 'nanny');
+  await say(FAMILY, '1');
+  await say(FAMILY, '1');
+  await say(FAMILY, 'Sarah Johnson');
+  await say(FAMILY, 'sarah@email.com');
+  await say(FAMILY, await latestOtp(FAMILY));
+  await say(FAMILY, 'https://maps.google.com/?q=25.2,55.3');
+  await say(FAMILY, 'Downtown Dubai');
+  await say(FAMILY, '2');
+  await say(FAMILY, '1');
+
+  // "Friday" is ambiguous until we say which Friday we heard.
+  const reply = await say(FAMILY, 'Friday');
+  assert.match(reply, /Start date:/i, 'the resolved date is echoed back');
+
+  const session = await Session.findOne({ phone: FAMILY });
+  const chosen = dayjs(session.data.startDate);
+  assert.equal(chosen.day(), 5, 'a Friday was chosen');
+  assert.ok(chosen.isAfter(dayjs()), 'and it is in the future');
+});
+
+test('bookings awaiting payment verification appear under category 5', async () => {
+  const { Booking } = await import('../src/models/index.js');
+  await createVerifiedNanny();
+
+  await familyBookingUpToListing();
+  await say(FAMILY, '1');
+  await say(FAMILY, '1');
+  await say(FAMILY, '1');
+  await payAndApprove(FAMILY, { approve: false });   // proof sent, not yet verified
+
+  const booking = await Booking.findOne({});
+  assert.equal(booking.status, 'pending_payment');
+
+  await say(FAMILY, '0');
+  await say(FAMILY, '2');                            // My Bookings
+  const reply = await say(FAMILY, '5');              // Bookings Pending for Payment
+
+  assert.match(reply, new RegExp(`#${booking.bookingNumber}`),
+    'a booking waiting on verification is listed');
+});
+
 test('only the word "nanny" starts the bot', async () => {
   // Anything else gets a nudge rather than the menu, so a stray message
   // never drops someone into registration half-way.
@@ -411,7 +482,7 @@ test('single-day booking flow reaches a correct summary', async () => {
   assert.match(summary, /Peanut allergy/);
   assert.match(summary, /Vegetarian/);
   assert.match(summary, /Total Children:\* 1/);
-  assert.match(summary, /Continue \(Start payment process\)/);
+  assert.match(summary, /1\. Continue/);
 });
 
 test('editing the booking updates the summary', async () => {
@@ -440,7 +511,7 @@ test('nanny search lists matching nannies and shows a full profile', async () =>
   assert.match(reply, /searching for a perfect nanny/);
   assert.match(reply, /available nannies/);
   assert.match(reply, /Maria Grook/);
-  assert.match(reply, /\$25\/hr/);
+  assert.match(reply, /25[,.\d]*\/hr/, 'her rate is shown');
 
   reply = await say(FAMILY, '1');               // view profile
   assert.match(reply, /Maria Grook/);
@@ -458,7 +529,7 @@ test('nannies are no longer filtered by budget or CPR', async () => {
   const reply = await say(FAMILY, '1');
   assert.match(reply, /available nannies/, 'search still returns results');
   assert.match(reply, /Maria Grook/);
-  assert.match(reply, /\$200\/hr/, 'the rate is shown, not used as a filter');
+  assert.match(reply, /200[,.\d]*\/hr/, 'the rate is shown, not used as a filter');
 });
 
 test('booking asks for a date by option, and flags same-day as an emergency', async () => {
@@ -478,7 +549,7 @@ test('booking asks for a date by option, and flags same-day as an emergency', as
   let reply = await say(FAMILY, '1');            // single day
   assert.match(reply, /1\. Today/, 'offers Today');
   assert.match(reply, /2\. Tomorrow/, 'offers Tomorrow');
-  assert.match(reply, /3\. Date/);
+  assert.match(reply, /3\. Select a date/);
 
   reply = await say(FAMILY, '1');                // Today
   assert.match(reply, /Is this an emergency/i, 'same-day asks about urgency');
@@ -803,11 +874,11 @@ test('family cancellation applies the policy and refunds correctly', async () =>
 
   // "Cancel Booking" is option 7 on the upcoming menu.
   reply = await say(FAMILY, '7');
-  assert.match(reply, /Refund you will receive: \*\$50/);
+  assert.match(reply, /Refund you will receive: \*[^0-9]*50/);
 
   reply = await say(FAMILY, '1');   // confirm
   assert.match(reply, /Booking Cancelled/);
-  assert.match(reply, /Refund: \*\$50/);
+  assert.match(reply, /Refund: \*[^0-9]*50/);
 
   const booking = await Booking.findOne({});
   assert.equal(booking.status, 'cancelled');

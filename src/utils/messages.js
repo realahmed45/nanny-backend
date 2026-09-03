@@ -105,7 +105,7 @@ export const ASK_START_DATE = `When would you like the booking to start?
 
 1. Today
 2. Tomorrow
-3. Date
+3. Select a date
 
 Or just type it — *today*, *tomorrow*, a weekday like *Monday*, or a date like *12 August*.`;
 
@@ -119,10 +119,19 @@ Is this an emergency? We prioritise urgent same-day requests and contact availab
 
 1. Yes, it's urgent
 2. No, it's a normal booking`;
+/** Echo the date we settled on, so a weekday answer is unambiguous. */
+export const startDateConfirmed = (date) =>
+  `\u{1F4C5} Start date: *${prettyDate(date)}*`;
+
+/** Same for the end date of a multi-day booking. */
+export const endDateConfirmed = (date) =>
+  `\u{1F4C5} End date: *${prettyDate(date)}*`;
+
 export const ASK_END_DATE =
   'When would you like the booking to end?\n\n📅 Type a weekday like *Friday*, or a date like *26 September*.';
 export const ASK_REPEAT_DAYS = `Which days should the booking repeat on?\n\n${numbered(WEEKDAYS)}\n8. All days of the week\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
-export const ASK_START_TIME = 'What time does the session start?';
+export const ASK_START_TIME =
+  'What time does the session start?\n\nUse a time like *9:00 AM* or *2:30 PM*.';
 export const ASK_DURATION = `How long do you need the nanny?\n\n${durationMenu()}`;
 
 export const ASK_LANGUAGES = `Choose a language.\n\n${numbered(LANGUAGES)}\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
@@ -142,6 +151,16 @@ export const ASK_CHILD_COUNT = `How many children need care?
 
 export const ASK_CHILD_COUNT_EXACT = 'How many children need care? Please type the number.';
 export const CHILD_INTRO = 'Lets address each child one by one';
+/**
+ * Said once the first of several children is named, so it is clear the others
+ * are not being skipped -- people otherwise wonder why only one was asked for.
+ */
+export const childFocusNotice = (name, remaining) =>
+  `Perfect! Let's go through ${name}'s details first` +
+  (remaining > 0
+    ? `, then we will cover the ${remaining === 1 ? 'second child' : `other ${remaining} children`}.`
+    : '.');
+
 export const ASK_CHILD_NAME = (ord) => `What is the ${ord} child's name?`;
 export const ASK_CHILD_AGE = (name) =>
   `How old is ${name}?
@@ -264,7 +283,7 @@ export const CONFIRM_BOOKING_DETAILS = `Please review the booking summary above.
 
 Would you like to continue with these booking details?
 
-1. Continue (Start payment process)
+1. Continue
 2. Edit Booking`;
 
 export const EDIT_MENU = `What do you want to edit?
@@ -432,7 +451,7 @@ export const NANNY_ASK_SKILLS = `What childcare skills do you have?\n\n${numbere
 export const NANNY_ASK_SKILL_RATING = (skill) =>
   `Rate your proficiency in ${skill}\n⭐ 1 – Beginner\n⭐ 2 – Basic\n⭐ 3 – Good\n⭐ 4 – Very Good\n⭐ 5 – Expert`;
 export const NANNY_ASK_SUBJECTS = `Which subjects can you teach?\n\n${numbered(SUBJECTS)}\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
-export const NANNY_ASK_RATE = 'What is your hourly rate in USD?';
+export const NANNY_ASK_RATE = `What is your hourly rate in ${config.currency}?`;
 export const NANNY_ASK_CPR = 'Are you CPR certified?\n\n1. Yes\n2. No';
 export const NANNY_ASK_CPR_DOC = 'Please upload your *CPR certificate*.';
 export const NANNY_ASK_ID_FRONT = 'Please upload your National Identity card document front image';

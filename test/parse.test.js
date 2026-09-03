@@ -107,3 +107,19 @@ test('parseDate accepts relative words, weekdays and any date format', () => {
   assert.equal(parseDate('32 August', tue), null);
   assert.equal(parseDate('', tue), null);
 });
+
+test('parseDate expands partial month names', () => {
+  const ref = new Date('2026-09-01T12:00:00');
+
+  // People type as much of the month as they feel like.
+  for (const text of ['12 aug', '12 augu', '12 augus', '12 august']) {
+    assert.equal(parseDate(text, ref), '2027-08-12', `failed on "${text}"`);
+  }
+  for (const text of ['12 sep', '12 sept', '12 septem', '12 september']) {
+    assert.equal(parseDate(text, ref), '2026-09-12', `failed on "${text}"`);
+  }
+
+  // An ambiguous prefix is refused rather than guessed: "ju" could be June
+  // or July, and picking one silently would book the wrong month.
+  assert.equal(parseDate('12 ju', ref), null);
+});

@@ -74,7 +74,7 @@ export const config = {
     instructions: process.env.BANK_INSTRUCTIONS || '',
   },
 
-  currency: process.env.CURRENCY || 'USD',
+  currency: process.env.CURRENCY || 'IDR',
   transportFee: {
     min: int(process.env.TRANSPORT_FEE_MIN, 50000),
     max: int(process.env.TRANSPORT_FEE_MAX, 100000),

@@ -51,6 +51,16 @@ const isStartWord = (text) =>
     .filter(Boolean)
     .includes(START_WORD);
 
+/**
+ * "Return back": drop straight to the role picker.
+ *
+ * Unlike the START state this does not require the trigger word, because
+ * the family has already typed a command to get here.
+ */
+export async function restartHandler() {
+  return { text: M.ROLE_PICKER, state: 'ROLE_PICK', noPush: true };
+}
+
 /** Landing state: greet, route returning users, ask new ones who they are. */
 on('START', async (ctx) => {
   // Anything other than the trigger word gets a nudge, not a menu.

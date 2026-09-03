@@ -30,7 +30,7 @@ Bookings that have not started yet.`;
 
 export const MY_BOOKINGS_REST = `*3. Completed*
 *4. Cancelled*
-*5. Bookings Pending for Additional Payment*
+*5. Bookings Pending for Payment*
 
 Type *0* Return to Main Menu`;
 
@@ -98,8 +98,16 @@ export function categoryQuery(familyId, category) {
       return { ...base, status: BOOKING_STATUS.COMPLETED };
     case 'cancelled':
       return { ...base, status: BOOKING_STATUS.CANCELLED };
-    case 'pending_additional':
-      return { ...base, status: BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT };
+    case 'pending_payment':
+      // Everything waiting on money: a first transfer still being verified,
+      // and a top-up owed after a change. Both leave the family waiting, so
+      // they belong in one place.
+      return {
+        ...base,
+        status: {
+          $in: [BOOKING_STATUS.PENDING_PAYMENT, BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT],
+        },
+      };
     default:
       return base;
   }
@@ -107,7 +115,7 @@ export function categoryQuery(familyId, category) {
 
 const CATEGORY_LABELS = {
   upcoming: 'upcoming', ongoing: 'ongoing', completed: 'completed',
-  cancelled: 'cancelled', pending_additional: 'pending additional payment',
+  cancelled: 'cancelled', pending_payment: 'pending payment',
 };
 
 /** One-line-per-booking list, as in the script. */
@@ -131,7 +139,7 @@ const bookingsMenuHandler = async (ctx) => {
   const choice = parseChoice(ctx.text, 5);
   if (!choice) return MY_BOOKINGS_MENU;
 
-  const categories = ['ongoing', 'upcoming', 'completed', 'cancelled', 'pending_additional'];
+  const categories = ['ongoing', 'upcoming', 'completed', 'cancelled', 'pending_payment'];
   const category = categories[choice - 1];
 
   const bookings = await Booking.find(categoryQuery(ctx.session.user, category)).sort({ startDate: 1 });

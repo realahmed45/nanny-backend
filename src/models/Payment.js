@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import config from '../config/index.js';
 import { PAYMENT_STATUS, PAYOUT_STATUS } from '../utils/constants.js';
 
 /** Money moving from a family in (charge/refund). */
@@ -9,7 +10,7 @@ const PaymentSchema = new mongoose.Schema({
   kind: { type: String, enum: ['booking', 'additional', 'refund', 'penalty'], default: 'booking' },
   method: { type: String, enum: ['bank_transfer', 'system'], default: 'bank_transfer' },
   amount: Number,
-  currency: { type: String, default: 'USD' },
+  currency: { type: String, default: () => config.currency },
   status: { type: String, enum: Object.values(PAYMENT_STATUS), default: PAYMENT_STATUS.IN_PROCESS, index: true },
 
   // Money moves by manual bank transfer, so the record of truth is the proof
@@ -43,7 +44,7 @@ const PayoutSchema = new mongoose.Schema({
   booking: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking', index: true },
   serviceDayIds: [String],
   amount: Number,
-  currency: { type: String, default: 'USD' },
+  currency: { type: String, default: () => config.currency },
   status: { type: String, enum: Object.values(PAYOUT_STATUS), default: PAYOUT_STATUS.PENDING, index: true },
   scheduledFor: Date,
   releasedAt: Date,

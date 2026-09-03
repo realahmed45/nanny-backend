@@ -198,12 +198,21 @@ function startDateError(date) {
   return null;
 }
 
-/** Move past the date question: multi-day asks for an end date, single-day for a time. */
-function afterStartDate(ctx) {
+/**
+ * Move past the date question: multi-day asks for an end date, single-day
+ * for a time.
+ *
+ * Whatever they typed, the date we settled on is confirmed back first.
+ * Someone answering "Friday" cannot otherwise tell which Friday we heard.
+ */
+function afterStartDate(ctx, { confirm = true } = {}) {
+  const steps = confirm ? [{ text: M.startDateConfirmed(ctx.get('startDate')) }] : [];
+
   if (ctx.get('isMultiDay')) {
-    return { text: M.ASK_END_DATE, state: 'FF_END_DATE' };
+    return [...steps, { text: M.ASK_END_DATE, state: 'FF_END_DATE' }];
   }
   return [
+    ...steps,
     { text: M.IMPORTANT_FAMILY_INFO },
     { text: M.ASK_START_TIME, state: 'FF_START_TIME' },
   ];
@@ -297,7 +306,10 @@ const endDateHandler = async (ctx) => {
     return `A booking can run for up to ${config.booking.maxDurationMonths} months, so the latest end date is *${maxEnd.format('D MMMM YYYY')}*.\n\nPlease choose an earlier date.`;
   }
   ctx.set('endDate', date);
-  return { text: M.ASK_REPEAT_DAYS, state: 'FF_REPEAT_DAYS' };
+  return [
+    { text: M.endDateConfirmed(date) },
+    { text: M.ASK_REPEAT_DAYS, state: 'FF_REPEAT_DAYS' },
+  ];
 };
 endDateHandler.prompt = () => M.ASK_END_DATE;
 on('FF_END_DATE', endDateHandler);
@@ -490,7 +502,14 @@ const childNameHandler = async (ctx) => {
   const name = clean(ctx.text);
   if (name.length < 1) return M.ASK_CHILD_NAME(ORDINALS[ctx.get('childIndex', 0)] || 'next');
   ctx.set('currentChild', { name });
-  return { text: M.ASK_CHILD_AGE(name), state: 'FF_CHILD_AGE' };
+
+  // With more than one child, say whose details we are collecting now.
+  const remaining = ctx.get('childCount', 1) - ctx.get('childIndex', 0) - 1;
+  const steps = remaining > 0 && ctx.get('childIndex', 0) === 0
+    ? [{ text: M.childFocusNotice(name, remaining) }]
+    : [];
+
+  return [...steps, { text: M.ASK_CHILD_AGE(name), state: 'FF_CHILD_AGE' }];
 };
 childNameHandler.prompt = (ctx) => M.ASK_CHILD_NAME(ORDINALS[ctx.get('childIndex', 0)] || 'next');
 on('FF_CHILD_NAME', childNameHandler);
