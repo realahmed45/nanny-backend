@@ -1173,8 +1173,17 @@ router.get('/conversations/:phone', wrap(async (req, res) => {
   res.json({ phone, user, session, messages, bookings, callbacks });
 }));
 
-router.get('/settings', (req, res) => {
+router.get('/settings', wrap(async (req, res) => {
+  const { getSettings } = await import('../services/settings.js');
+  const { isConfigured: sttConfigured, activeProvider: sttProvider } =
+    await import('../providers/transcription.js');
+  const runtime = await getSettings();
+
   res.json({
+    // Switches an admin can change here, as opposed to env-only config.
+    voiceTranscription: runtime.voiceTranscription,
+    voiceConfigured: sttConfigured(),
+    voiceProvider: sttProvider(),
     currency: config.currency,
     transportFee: config.transportFee,
     newBookingResponseMinutes: config.newBookingResponseMinutes,
@@ -1188,7 +1197,36 @@ router.get('/settings', (req, res) => {
     bank: config.bank,
     bankConfigured: !!(config.bank.accountNumber || config.bank.iban),
   });
-});
+}));
+
+/**
+ * Flip a runtime switch from the dashboard.
+ *
+ * Kept separate from the env-driven config: these are things an
+ * operator needs to change while the bot is running, where waiting on a
+ * redeploy would mean leaving customers stuck.
+ */
+const RUNTIME_SETTINGS = new Set(['voiceTranscription']);
+
+router.patch('/settings', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const { setSetting, getSettings } = await import('../services/settings.js');
+
+  const updates = Object.entries(req.body || {})
+    .filter(([key]) => RUNTIME_SETTINGS.has(key));
+
+  if (!updates.length) {
+    return res.status(400).json({
+      error: `Nothing to update. Allowed: ${[...RUNTIME_SETTINGS].join(', ')}`,
+    });
+  }
+
+  for (const [key, value] of updates) {
+    // eslint-disable-next-line no-await-in-loop
+    await setSetting(key, value, req.admin?.id);
+  }
+
+  res.json({ ok: true, settings: await getSettings() });
+}));
 
 router.get('/admins', requireRole('super_admin'), wrap(async (req, res) => {
   const admins = await AdminUser.find().select('-passwordHash').sort({ createdAt: -1 });

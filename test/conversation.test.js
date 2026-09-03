@@ -421,6 +421,74 @@ test('bookings awaiting payment verification appear under category 5', async () 
     'a booking waiting on verification is listed');
 });
 
+test('a voice note is answered rather than ignored', async () => {
+  const { Session } = await import('../src/models/index.js');
+  const { handleMessage } = await import('../src/flows/index.js');
+
+  await createVerifiedNanny();
+  await say(FAMILY, 'nanny');
+  await say(FAMILY, '1');
+  await say(FAMILY, '1');
+  await say(FAMILY, 'Sarah Johnson');
+  await say(FAMILY, 'sarah@email.com');
+  await say(FAMILY, await latestOtp(FAMILY));
+  await say(FAMILY, 'https://maps.google.com/?q=25.2,55.3');
+  await say(FAMILY, 'Downtown Dubai');
+  await say(FAMILY, '2');
+  await say(FAMILY, '1');
+  await say(FAMILY, 'tomorrow');
+  await say(FAMILY, '9 AM');
+  await say(FAMILY, '2');
+  await say(FAMILY, '1 2');
+  await say(FAMILY, '1 3');
+  await say(FAMILY, '1');
+  await say(FAMILY, 'Emma');
+  await say(FAMILY, '4y');
+
+  const before = await Session.findOne({ phone: FAMILY });
+  assert.equal(before.state, 'FF_CHILD_MEDICAL');
+
+  // No speech-to-text key in tests, so the bot must say so and stay put --
+  // silently swallowing the note would strand the family on this question.
+  const replies = await handleMessage({
+    phone: FAMILY,
+    text: '',
+    mediaUrl: 'https://cdn/voice-note.ogg',
+    mediaType: 'ptt',
+  });
+
+  assert.ok(
+    replies.some((r) => /voice message/i.test(r)),
+    'the family is told the voice note could not be read',
+  );
+  assert.ok(
+    replies.some((r) => /allergies/i.test(r)),
+    'and the question is repeated so they can answer',
+  );
+
+  const after = await Session.findOne({ phone: FAMILY });
+  assert.equal(after.state, 'FF_CHILD_MEDICAL', 'the flow does not move on');
+});
+
+test('runtime settings can be flipped without a redeploy', async () => {
+  const { getSetting, setSetting, invalidateSettings } = await import('../src/services/settings.js');
+  const { Setting } = await import('../src/models/index.js');
+
+  await Setting.deleteMany({});
+  invalidateSettings();
+
+  assert.equal(await getSetting('voiceTranscription'), true, 'on by default');
+
+  await setSetting('voiceTranscription', false);
+  assert.equal(await getSetting('voiceTranscription'), false, 'change is visible at once');
+
+  await setSetting('voiceTranscription', true);
+  assert.equal(await getSetting('voiceTranscription'), true);
+
+  await Setting.deleteMany({});
+  invalidateSettings();
+});
+
 test('only the word "nanny" starts the bot', async () => {
   // Anything else gets a nudge rather than the menu, so a stray message
   // never drops someone into registration half-way.

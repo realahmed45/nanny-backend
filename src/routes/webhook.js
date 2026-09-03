@@ -56,6 +56,9 @@ router.post('/ultramsg', async (req, res) => {
       text,
       mediaUrl: ['image', 'document', 'video', 'audio', 'ptt'].includes(type) ? media : undefined,
       mediaId: data.id,
+      // Voice notes arrive as 'ptt' (push-to-talk); the engine needs to
+      // know so it can transcribe rather than treat them as an attachment.
+      mediaType: type,
     });
   } catch (err) {
     console.error('[webhook] processing error:', err);

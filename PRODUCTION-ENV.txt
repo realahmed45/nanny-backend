@@ -33,7 +33,12 @@ RESEND_API_KEY=                                >>> YOU <<<  (see note 4)
 RESEND_FROM=My Nanny <no-reply@futurelifebali.com>
 RESEND_REPLY_TO=realahmedali4@gmail.com
 
-CURRENCY=USD
+CURRENCY=IDR
+
+# Voice notes: either key turns on speech-to-text. Groq has a free tier.
+# https://console.groq.com/keys   (leave both empty to disable)
+GROQ_API_KEY=
+OPENAI_API_KEY=
 TRANSPORT_FEE_MIN=50000
 TRANSPORT_FEE_MAX=100000
 NEW_BOOKING_RESPONSE_MINUTES=60
@@ -94,10 +99,19 @@ VITE_API_BASE=https://YOUR-APP.onrender.com/api/admin
    land in spam. RESEND_REPLY_TO is set to your Gmail instead, so anyone
    who replies still reaches your normal inbox.
 
-5. CURRENCY — check this one
-   Transport fee is 50,000-100,000 per your spec, which is not a USD
-   range. With CURRENCY=USD the bot quotes families "50,000 USD".
-   Set it to whatever your market actually uses (PKR, IDR, VND...).
+5. VOICE NOTES (optional)
+   The bot invites families to send a voice message for the long
+   free-text questions. To read them, add a speech-to-text key:
+
+     Groq (free tier, recommended): console.groq.com/keys -> GROQ_API_KEY
+     or OpenAI: platform.openai.com -> OPENAI_API_KEY
+
+   Without a key the bot politely asks them to type instead, so nothing
+   breaks. There is an on/off switch in the dashboard under
+   Settings -> Voice Messages, so it can be turned off at any time
+   without a redeploy.
+
+   Currency is set to IDR, so amounts render as "Rp 90,000".
 
 
 ═══════════════════════════════════════════════════════════════════════

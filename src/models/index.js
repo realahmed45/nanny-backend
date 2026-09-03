@@ -9,3 +9,4 @@ export { default as Counter, nextSequence } from './Counter.js';
 export { default as AdminUser } from './AdminUser.js';
 export { default as MessageLog } from './MessageLog.js';
 export { default as CallbackRequest } from './CallbackRequest.js';
+export { default as Setting } from './Setting.js';

@@ -47,6 +47,18 @@ export const config = {
     rejectUnauthorized: String(process.env.SMTP_REJECT_UNAUTHORIZED || 'true').toLowerCase() !== 'false',
   },
 
+  // Speech-to-text for WhatsApp voice notes. Either key enables it; Groq is
+  // tried first because its free tier covers this comfortably.
+  transcription: {
+    groqKey: process.env.GROQ_API_KEY || '',
+    openaiKey: process.env.OPENAI_API_KEY || '',
+    // Override the endpoint host (used by tests, or behind a proxy).
+    baseUrl: process.env.TRANSCRIPTION_BASE_URL || '',
+    // Leave empty to let Whisper detect the language, which suits a market
+    // where people mix languages in one message.
+    language: process.env.TRANSCRIPTION_LANGUAGE || '',
+  },
+
   // How far ahead a booking may be made. A start date beyond a few months is
   // almost always a typo (a wrong year), and an end date years out would
   // generate service days indefinitely.

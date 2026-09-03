@@ -132,7 +132,51 @@ async function handleGlobalCommand(ctx) {
  * Process one inbound WhatsApp message end to end.
  * Returns the outbound message bodies (useful for tests and the simulator).
  */
-export async function handleMessage({ phone: rawPhone, text = '', mediaUrl, mediaId }) {
+/** WhatsApp sends voice notes as 'ptt'; plain audio files come as 'audio'. */
+const isVoice = (mediaType) => ['ptt', 'audio'].includes(mediaType);
+
+/**
+ * Turn a voice note into text before any handler sees it.
+ *
+ * The bot invites voice messages for the long free-text questions, so the
+ * transcript has to arrive as ordinary text — otherwise the handler waiting
+ * for an answer just sees an attachment and asks again.
+ *
+ * Returns the text to use, plus an optional note to send back when we could
+ * not transcribe. Never throws: a failed transcription asks the family to
+ * type instead of breaking the booking they are part-way through.
+ */
+async function resolveVoiceNote({ text, mediaUrl, mediaType }) {
+  if (!isVoice(mediaType) || !mediaUrl) return { text, notice: null };
+
+  // A caption alongside the audio is what they meant to say.
+  if (String(text || '').trim()) return { text, notice: null };
+
+  const { getSetting } = await import('../services/settings.js');
+  const { transcribe, isConfigured } = await import('../providers/transcription.js');
+
+  const enabled = await getSetting('voiceTranscription').catch(() => true);
+  if (!enabled || !isConfigured()) {
+    return {
+      text: '',
+      notice: '\u{1F3A4} Sorry, I cannot listen to voice messages right now. Please type your answer instead.',
+    };
+  }
+
+  const config = (await import('../config/index.js')).default;
+  const transcript = await transcribe(mediaUrl, { language: config.transcription.language || undefined });
+
+  if (!transcript) {
+    return {
+      text: '',
+      notice: '\u{1F3A4} I could not make out that voice message. Please try again, or type your answer.',
+    };
+  }
+
+  return { text: transcript, notice: null, transcribed: true };
+}
+
+export async function handleMessage({ phone: rawPhone, text = '', mediaUrl, mediaId, mediaType }) {
   const phone = normalizePhone(rawPhone);
   if (!phone) return [];
 
@@ -141,12 +185,41 @@ export async function handleMessage({ phone: rawPhone, text = '', mediaUrl, medi
 
   session.lastMessageAt = new Date();
 
+  const voice = await resolveVoiceNote({ text, mediaUrl, mediaType });
+
+  // A transcribed note continues as text, so the media is not passed on:
+  // handlers that require an attachment (an ID photo, a receipt) must not
+  // accept a voice message as one.
+  const effectiveText = voice.text;
+  const effectiveMedia = voice.transcribed ? undefined : mediaUrl;
+
   await MessageLog.create({
-    direction: 'in', phone, body: text, mediaUrl,
-    state: session.state, role: session.role,
+    direction: 'in',
+    phone,
+    // Keep the transcript in the log so the dashboard shows what was said.
+    body: voice.transcribed ? `\u{1F3A4} ${effectiveText}` : text,
+    mediaUrl,
+    state: session.state,
+    role: session.role,
   }).catch(() => {});
 
-  const ctx = await buildContext({ phone, text, mediaUrl, mediaId, session });
+  // Could not transcribe: say so and leave the conversation where it was.
+  if (voice.notice) {
+    await session.save();
+    const ctxForPrompt = await buildContext({ phone, text: '', session });
+    const handler = handlers.get(session.state);
+    const prompt = handler?.prompt ? await handler.prompt(ctxForPrompt) : null;
+    const bodies = [voice.notice, prompt].filter(Boolean);
+    for (const body of bodies) {
+      // eslint-disable-next-line no-await-in-loop
+      await sendText(phone, body, { role: session.role, state: session.state }).catch(() => {});
+    }
+    return bodies;
+  }
+
+  const ctx = await buildContext({
+    phone, text: effectiveText, mediaUrl: effectiveMedia, mediaId, session,
+  });
 
   let result;
   try {
