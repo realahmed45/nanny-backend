@@ -139,6 +139,16 @@ export function parseInteger(text, { min = 0, max = Infinity } = {}) {
  */
 export function parseTime(text) {
   const t = clean(text).toUpperCase().replace(/\./g, '');
+  // 24-hour without a separator: 1700, 0930. Matched first so "1700" is not
+  // read as 17 minutes past something.
+  const military = t.match(/^(\d{2})(\d{2})$/);
+  if (military) {
+    const h = parseInt(military[1], 10);
+    const min = parseInt(military[2], 10);
+    if (h > 23 || min > 59) return null;
+    return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+  }
+
   const m = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?$/);
   if (!m) return null;
   let hour = parseInt(m[1], 10);

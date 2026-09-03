@@ -1,6 +1,6 @@
 import {
   money, prettyDate, timeRange, prettyTime, ratedList, starLine,
-  childLines, weekdayList, statusLabel, numbered, durationMenu,
+  childLines, weekdayList, statusLabel, numbered, durationMenu, firstName, nannyDisplayName,
 } from './format.js';
 import { LANGUAGES, SKILLS, SUBJECTS, WEEKDAYS } from './constants.js';
 import config from '../config/index.js';
@@ -226,7 +226,7 @@ export function bookingSummary(b, {
 
   if (nanny) {
     lines.push('');
-    lines.push(`👩 *${nanny.fullName}*`);
+    lines.push(`👩 *${nannyDisplayName(nanny)}*`);
     lines.push(`${starLine(nanny.ratingAverage)} | ${nanny.distanceKm ?? 2} km | ${money(b.hourlyRate ?? nanny.hourlyRate)}/hr | Experience ${nanny.experienceYears ?? 0} yrs`);
   }
 
@@ -308,7 +308,7 @@ export const SEARCHING = 'Hang on I am searching for a perfect nanny.';
 export function nannyListing(nannies, { startIndex = 0, total = null } = {}) {
   const head = `I found *${total ?? nannies.length} available nannies*.\n`;
   const items = nannies.map((n, i) =>
-    `${startIndex + i + 1}. 👩 *${n.fullName}*\n   ${starLine(n.ratingAverage)} | ${n.distanceKm ?? 2} km | ${money(n.hourlyRate)}/hr | Experience ${n.experienceYears ?? 0} yrs`
+    `${startIndex + i + 1}. 👩 *${nannyDisplayName(n)}*\n   ${starLine(n.ratingAverage)} | ${n.distanceKm ?? 2} km | ${money(n.hourlyRate)}/hr | Experience ${n.experienceYears ?? 0} yrs`
   ).join('\n\n');
   const nums = nannies.map((_, i) => startIndex + i + 1).join(',');
   const tail = `\n\nReply with ${nums} to view details\nType *NEXT* to view more profiles`;
@@ -347,7 +347,7 @@ export const NO_NANNIES = NO_NANNIES_ACTIONS;
 
 export function nannyProfile(n, { hourlyRate = null } = {}) {
   const lines = [
-    `*${n.fullName}*`,
+    `*${nannyDisplayName(n)}*`,
     `${starLine(n.ratingAverage)} | ${n.distanceKm ?? 2} km | ${money(hourlyRate ?? n.hourlyRate)}/hr | Experience ${n.experienceYears ?? 0} yrs.`,
     '',
     `*Age*: ${n.age ?? '-'}yr`,
@@ -426,11 +426,41 @@ export const ASK_PAYMENT_PROOF =
 export const PAYMENT_PROOF_RECEIVED =
   '\u{2705} Thanks! We have received your payment proof.\n\nOur team will verify the transfer and confirm your booking shortly. You will get a message as soon as it is checked.';
 
-export const PAYMENT_VERIFIED =
-  '\u{2705} *Payment verified.*\nYour booking has been confirmed.\nWaiting for nanny confirmation.';
+/**
+ * Approval and rejection both name the payment and booking.
+ *
+ * A family with more than one booking in flight cannot tell which was approved
+ * without a reference, and support cannot help them without one either.
+ */
+export const paymentVerified = ({ reference, bookingNumber } = {}) => {
+  const ids = [
+    reference ? `Payment: *${reference}*` : '',
+    bookingNumber ? `Booking: *#${bookingNumber}*` : '',
+  ].filter(Boolean).join('\n');
 
-export const paymentRejected = (reason) =>
-  `\u{274C} *We could not verify your payment.*${reason ? `\n\nReason: ${reason}` : ''}\n\nWhat would you like to do?\n\n1. Send the screenshot again\n2. Contact Support\n3. Back to Main Menu`;
+  return [
+    '\u{2705} *Payment verified.*',
+    ids,
+    'Your booking has been confirmed.\nWaiting for nanny confirmation.',
+  ].filter(Boolean).join('\n\n');
+};
+
+/** Kept for callers that have no reference to hand. */
+export const PAYMENT_VERIFIED = paymentVerified();
+
+export const paymentRejected = (reason, { reference, bookingNumber } = {}) => {
+  const ids = [
+    reference ? `Payment: *${reference}*` : '',
+    bookingNumber ? `Booking: *#${bookingNumber}*` : '',
+  ].filter(Boolean).join('\n');
+
+  return [
+    '\u{274C} *We could not verify your payment.*',
+    ids,
+    reason ? `Reason: ${reason}` : '',
+    'What would you like to do?\n\n1. Send the screenshot again\n2. Contact Support\n3. Back to Main Menu',
+  ].filter(Boolean).join('\n\n');
+};
 
 export const PAYMENT_REJECTED_ACTIONS =
   '\u{274C} We could not verify your payment.\n\nWhat would you like to do?\n\n1. Send the screenshot again\n2. Contact Support\n3. Back to Main Menu';
@@ -441,6 +471,12 @@ export const refundIssued = (amount, ref) =>
 /* ------------------------------------------------------------------ *
  * Nanny-side registration
  * ------------------------------------------------------------------ */
+
+export const NANNY_ASK_NICKNAME = `What would you like families to call you?
+
+This is the name families will see — your full name stays private.
+
+For example: *Maria*, *Ibu Sari*, *Nanny Anna*`;
 
 export const NANNY_ASK_AGE = 'What\'s your age?';
 export const NANNY_ASK_EXPERIENCE = 'How many years of nanny/childcare experience do you have?';

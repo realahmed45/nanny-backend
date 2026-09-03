@@ -21,6 +21,7 @@ async function createVerifiedNanny(phone = NANNY, { rate = 25, name = 'Maria Gro
   await say(phone, name);
   await say(phone, address);
   await say(phone, await latestOtp(phone));
+  await say(phone, name.split(' ')[0]);   // nickname families will see
   await say(phone, '24');           // age
   await say(phone, '5');            // experience
   await say(phone, '1,2');          // English, Arabic
@@ -235,7 +236,8 @@ test('a nanny can be saved to favourites after rating, and reused', async () => 
   await say(FAMILY, '3');                    // My Profile
   reply = await say(FAMILY, '4');            // Favourite Nannies
   assert.match(reply, /Favourite Nannies/);
-  assert.match(reply, /Maria Grook/);
+  assert.match(reply, /Maria/, 'families see her nickname');
+  assert.doesNotMatch(reply, /Grook/, 'her legal surname stays private');
 });
 
 test('identity verification shows status, and emergency contacts can be managed', async () => {
@@ -489,6 +491,74 @@ test('runtime settings can be flipped without a redeploy', async () => {
   invalidateSettings();
 });
 
+test('a nanny is known to families by her nickname only', async () => {
+  const { User } = await import('../src/models/index.js');
+
+  // The helper answers the nickname question with her first name.
+  const nanny = await createVerifiedNanny(NANNY, { name: 'Maria Grook' });
+  assert.equal(nanny.nickname, 'Maria', 'the nickname is stored');
+  assert.equal(nanny.fullName, 'Maria Grook', 'her legal name is still on file');
+
+  await familyBookingUpToListing();
+  const listing = await say(FAMILY, '1');
+  assert.match(listing, /Maria/);
+  assert.doesNotMatch(listing, /Grook/, 'her surname is never shown to a family');
+
+  const profile = await say(FAMILY, '1');
+  assert.doesNotMatch(profile, /Grook/, 'not in the full profile either');
+
+  // Admins still see the real name, since they are the ones verifying it.
+  const onFile = await User.findById(nanny._id);
+  assert.equal(onFile.fullName, 'Maria Grook');
+});
+
+test('contact details are stripped from relayed chat messages', async () => {
+  const { redactContactDetails } = await import('../src/utils/contactFilter.js');
+
+  // Ordinary conversation is untouched.
+  for (const ok of ['See you at 9am', 'Emma is 4 years old', 'I have 2 kids']) {
+    assert.equal(redactContactDetails(ok).redacted, false, `"${ok}" should pass`);
+  }
+
+  // Numbers, however they are dressed up, do not get through.
+  for (const blocked of [
+    'call me on 081234567890',
+    'my number is 0812 3456 7890',
+    'reach me 0812-3456-7890',
+    'email maria@gmail.com',
+    'add me on wa.me/628123456789',
+  ]) {
+    const r = redactContactDetails(blocked);
+    assert.equal(r.redacted, true, `"${blocked}" should be blocked`);
+    assert.match(r.text, /\[removed\]/);
+  }
+});
+
+test('the bot greets people by their first name', async () => {
+  await say(FAMILY, 'nanny');
+  await say(FAMILY, '1');
+  await say(FAMILY, '1');
+
+  const reply = await say(FAMILY, 'Ahmed Ali');
+  assert.match(reply, /Great Ahmed/, 'greeted by first name');
+  assert.doesNotMatch(reply, /Ahmed Ali/, 'not the full name');
+});
+
+test('time is understood however it is written', async () => {
+  const { parseTime } = await import('../src/utils/parse.js');
+
+  // 1700 was previously rejected, which is a natural way to write 5pm.
+  assert.equal(parseTime('1700'), '17:00');
+  assert.equal(parseTime('0930'), '09:30');
+  assert.equal(parseTime('17'), '17:00');
+  assert.equal(parseTime('17:30'), '17:30');
+  assert.equal(parseTime('5 PM'), '17:00');
+  assert.equal(parseTime('9 AM'), '09:00');
+
+  assert.equal(parseTime('2500'), null, 'an impossible hour is refused');
+  assert.equal(parseTime('1799'), null, 'an impossible minute is refused');
+});
+
 test('only the word "nanny" starts the bot', async () => {
   // Anything else gets a nudge rather than the menu, so a stray message
   // never drops someone into registration half-way.
@@ -578,11 +648,13 @@ test('nanny search lists matching nannies and shows a full profile', async () =>
   let reply = await say(FAMILY, '1');           // Continue -> search
   assert.match(reply, /searching for a perfect nanny/);
   assert.match(reply, /available nannies/);
-  assert.match(reply, /Maria Grook/);
+  assert.match(reply, /Maria/, 'families see her nickname');
+  assert.doesNotMatch(reply, /Grook/, 'her legal surname stays private');
   assert.match(reply, /25[,.\d]*\/hr/, 'her rate is shown');
 
   reply = await say(FAMILY, '1');               // view profile
-  assert.match(reply, /Maria Grook/);
+  assert.match(reply, /Maria/, 'families see her nickname');
+  assert.doesNotMatch(reply, /Grook/, 'her legal surname stays private');
   assert.match(reply, /English ⭐4, Arabic ⭐5/);
   assert.match(reply, /✅CPR Certificate/);
   assert.match(reply, /Book this nanny/);
@@ -596,7 +668,8 @@ test('nannies are no longer filtered by budget or CPR', async () => {
 
   const reply = await say(FAMILY, '1');
   assert.match(reply, /available nannies/, 'search still returns results');
-  assert.match(reply, /Maria Grook/);
+  assert.match(reply, /Maria/, 'families see her nickname');
+  assert.doesNotMatch(reply, /Grook/, 'her legal surname stays private');
   assert.match(reply, /200[,.\d]*\/hr/, 'the rate is shown, not used as a filter');
 });
 
@@ -838,7 +911,8 @@ test('family and nanny chat relays messages without exposing numbers', async () 
   await say(FAMILY, '1');           // profile
 
   let reply = await say(FAMILY, '2');   // chat with nanny
-  assert.match(reply, /You can now chat with Maria Grook/);
+  assert.match(reply, /You can now chat with Maria/);
+  assert.doesNotMatch(reply, /Grook/, 'her legal surname stays private');
   assert.match(reply, /phone numbers remain private/);
 
   await say(FAMILY, 'Do you have newborn experience?');
@@ -1027,7 +1101,7 @@ test('nanny cancelling an accepted booking triggers replacement, not cancellatio
 
   const familyMsgs = messagesTo(FAMILY);
   assert.ok(familyMsgs.some((m) => /nanny has cancelled/i.test(m)));
-  assert.ok(familyMsgs.some((m) => /Anna Smith/.test(m)), 'replacement offered');
+  assert.ok(familyMsgs.some((m) => /Anna/.test(m)), 'replacement offered');
 });
 
 test('nanny availability blocking prevents matching on that date', async () => {

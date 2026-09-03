@@ -57,6 +57,9 @@ const UserSchema = new mongoose.Schema({
   idVerified: { type: Boolean, default: false },
 
   // --- Nanny fields ---
+  // The name families see. Her legal name is ours to verify, not theirs
+  // to know, so this is what appears in listings, chats and bookings.
+  nickname: String,
   age: Number,
   experienceYears: Number,
   languages: [RatedItemSchema],
@@ -83,6 +86,11 @@ const UserSchema = new mongoose.Schema({
   referralCode: { type: String, index: true },
   referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   referralCount: { type: Number, default: 0 },
+  // When the discount window started. Held separately from createdAt so a
+  // later referral extends the window rather than restarting it.
+  firstReferralAt: Date,
+  // An admin can end the discount early, even one set to never expire.
+  referralDiscountCancelled: { type: Boolean, default: false },
   referralEarnings: { type: Number, default: 0 },
   registrationComplete: { type: Boolean, default: false },
   blocked: { type: Boolean, default: false },

@@ -9,6 +9,23 @@ export const money = (n, currency = config.currency) => {
   return `${sym}${v % 1 === 0 ? v.toLocaleString('en-US') : v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
 
+/**
+ * Just the first name, for greetings.
+ * "Ahmed Ali" -> "Ahmed". Addressing someone by their full name reads like a
+ * form letter, not a conversation.
+ */
+export const firstName = (name) => String(name || '').trim().split(/\s+/)[0] || '';
+
+/**
+ * What a family is shown for a nanny.
+ *
+ * Nannies give a nickname at signup and that is what families see: her legal
+ * name is ours to verify, not theirs to know. Falls back to the first name
+ * when no nickname was given, never the full name.
+ */
+export const nannyDisplayName = (nanny) =>
+  String(nanny?.nickname || '').trim() || firstName(nanny?.fullName) || 'Your nanny';
+
 export const prettyDate = (d) => (d ? dayjs(d).format('D MMMM') : '');
 export const prettyDateFull = (d) => (d ? dayjs(d).format('D MMMM YYYY') : '');
 export const prettyTime = (t) => {

@@ -13,6 +13,9 @@ const TTL_MS = 30_000;
 /** Defaults used until an admin overrides them. */
 export const DEFAULTS = {
   voiceTranscription: true,
+  // Set in the dashboard; see services/pricing.js for the shape.
+  pricing: null,
+  referralDiscount: null,
 };
 
 let cache = null;

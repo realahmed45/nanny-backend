@@ -791,7 +791,12 @@ router.post('/payments/:id/approve', requireRole('admin', 'super_admin'), wrap(a
       booking.nanny ? User.findById(booking.nanny) : null,
     ]);
 
-    if (family) await notifyUser(family, M.PAYMENT_VERIFIED);
+    if (family) {
+      await notifyUser(family, M.paymentVerified({
+        reference: payment.reference,
+        bookingNumber: booking.bookingNumber,
+      }));
+    }
 
     // Open the nanny's response window now that the money is confirmed.
     if (nanny && booking.status === BOOKING_STATUS.PENDING_PAYMENT) {
@@ -808,6 +813,80 @@ router.post('/payments/:id/approve', requireRole('admin', 'super_admin'), wrap(a
   res.json({ ok: true, payment, booking });
 }));
 
+/**
+ * Approve several transfers at once.
+ *
+ * Verifying payments is a queue job: an admin checks a batch against the bank
+ * statement and then wants them cleared together. One at a time means one
+ * round trip and one page reload each.
+ *
+ * Each is processed independently so a single bad row cannot stop the rest,
+ * and the result says exactly what happened to each.
+ */
+router.post('/payments/bulk-approve', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  if (!ids.length) return res.status(400).json({ error: 'No payments selected' });
+  if (ids.length > 100) return res.status(400).json({ error: 'Please approve at most 100 at a time' });
+
+  const note = req.body?.note || 'Bulk approved';
+  const approved = [];
+  const skipped = [];
+
+  for (const id of ids) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const payment = await Payment.findById(id);
+      if (!payment) { skipped.push({ id, reason: 'not found' }); continue; }
+      if (payment.kind === 'refund') { skipped.push({ id, reference: payment.reference, reason: 'is a refund' }); continue; }
+      if (payment.status === PAYMENT_STATUS.COMPLETED) {
+        skipped.push({ id, reference: payment.reference, reason: 'already approved' });
+        continue;
+      }
+
+      // eslint-disable-next-line no-await-in-loop
+      const { booking } = await approveTransfer(payment, { adminId: req.admin?.id, note });
+
+      if (booking) {
+        // eslint-disable-next-line no-await-in-loop
+        const [family, nanny] = await Promise.all([
+          User.findById(booking.family),
+          booking.nanny ? User.findById(booking.nanny) : null,
+        ]);
+
+        if (family) {
+          // eslint-disable-next-line no-await-in-loop
+          await notifyUser(family, M.paymentVerified({
+            reference: payment.reference,
+            bookingNumber: booking.bookingNumber,
+          }));
+        }
+
+        // Releasing the request to the nanny is part of approving, so it
+        // happens here too rather than only on the single-approve path.
+        if (nanny && booking.status === BOOKING_STATUS.PENDING_PAYMENT) {
+          const { expiresAt } = openNannyResponseWindow(booking, nanny._id, 'new_booking');
+          booking.status = BOOKING_STATUS.UPCOMING;
+          // eslint-disable-next-line no-await-in-loop
+          await booking.save();
+          // eslint-disable-next-line no-await-in-loop
+          await notifyUser(nanny, M.nannyBookingRequest(booking, family, expiresAt));
+          // eslint-disable-next-line no-await-in-loop
+          const { setNannyRequestState } = await import('../flows/familyBookingPayment.js');
+          // eslint-disable-next-line no-await-in-loop
+          await setNannyRequestState(nanny, booking);
+        }
+      }
+
+      approved.push({ id, reference: payment.reference, bookingNumber: booking?.bookingNumber });
+    } catch (err) {
+      console.error(`[payments] bulk approve failed for ${id}: ${err.message}`);
+      skipped.push({ id, reason: err.message });
+    }
+  }
+
+  res.json({ ok: true, approvedCount: approved.length, skippedCount: skipped.length, approved, skipped });
+}));
+
 /** Reject a transfer — the family is told why and can send a new screenshot. */
 router.post('/payments/:id/reject', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
   const payment = await Payment.findById(req.params.id);
@@ -818,7 +897,10 @@ router.post('/payments/:id/reject', requireRole('admin', 'super_admin'), wrap(as
 
   const family = await User.findById(payment.family);
   if (family) {
-    await notifyUser(family, M.paymentRejected(note));
+    await notifyUser(family, M.paymentRejected(note, {
+      reference: payment.reference,
+      bookingNumber: booking?.bookingNumber,
+    }));
     const session = await Session.findOne({ phone: family.phone });
     if (session) {
       session.state = 'FF_PAYMENT_REJECTED';

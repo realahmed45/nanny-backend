@@ -18,7 +18,7 @@ import { findReplacements } from '../services/matching.js';
 import { notifyUser } from '../services/notify.js';
 import { showBookingDetail, bookingActionMenu, menuText, MY_BOOKINGS_MENU } from './familyMenu.js';
 import { openChatWithNanny, setNannyRequestState } from './familyBookingPayment.js';
-import { prettyDate, timeRange, money, statusLabel } from '../utils/format.js';
+import { prettyDate, timeRange, money, statusLabel, nannyDisplayName } from '../utils/format.js';
 import config from '../config/index.js';
 import * as M from '../utils/messages.js';
 
@@ -296,7 +296,7 @@ on('FB_RESCHEDULE_CONFIRM', async (ctx) => {
     await setNannyRequestState(nanny, booking);
 
     return {
-      text: `✅ Your change request has been sent to ${nanny.fullName}.
+      text: `✅ Your change request has been sent to ${nannyDisplayName(nanny)}.
 
 She has *2 hours* to accept the changes. We'll let you know as soon as she responds.
 
@@ -425,7 +425,7 @@ async function sendChangeToNanny(ctx, booking, label) {
   await setNannyRequestState(nanny, booking);
 
   return {
-    text: `✅ ${label} sent to ${nanny.fullName}.
+    text: `✅ ${label} sent to ${nannyDisplayName(nanny)}.
 
 She has *2 hours* to accept. We'll notify you as soon as she responds.`,
     state: 'FAMILY_MAIN_MENU',
@@ -525,7 +525,7 @@ on('FB_REPLACEMENT_CONFIRM', async (ctx) => {
     return {
       text: `💰 *Additional payment required*
 
-${nanny.fullName} costs ${money(difference)} more than your original booking.
+${nannyDisplayName(nanny)} costs ${money(difference)} more than your original booking.
 
 Your booking will move to *Pending for Additional Payment* until this is paid.
 
@@ -550,7 +550,7 @@ Your booking will move to *Pending for Additional Payment* until this is paid.
   await setNannyRequestState(nanny, booking);
 
   return {
-    text: `✅ ${nanny.fullName} has been selected. Waiting for her confirmation.
+    text: `✅ ${nannyDisplayName(nanny)} has been selected. Waiting for her confirmation.
 
 We'll notify you as soon as she responds.`,
     state: 'FAMILY_MAIN_MENU',
@@ -709,7 +709,7 @@ async function startRating(ctx, booking) {
   return {
     text: `⭐ *Rate your nanny*
 
-How was your experience with ${nanny?.fullName || 'your nanny'}?
+How was your experience with ${nannyDisplayName(nanny)}?
 
 Reply with a rating from *1* to *5*.`,
     state: 'FB_RATING_STARS',
@@ -757,7 +757,7 @@ on('FB_RATING_REVIEW', async (ctx) => {
     return [
       { text: 'Thank you for your review. \u{2764}\u{FE0F}' },
       {
-        text: `Would you like to add *${nanny.fullName}* to your favourite nannies?\n\n1. Yes\n2. No`,
+        text: `Would you like to add *${nannyDisplayName(nanny)}* to your favourite nannies?\n\n1. Yes\n2. No`,
         state: 'FB_ADD_FAVOURITE',
       },
     ];
@@ -821,7 +821,7 @@ async function bookAgain(ctx, booking) {
   ctx.session.markModified('data');
 
   return {
-    text: `🔄 *Book ${nanny.fullName} again*\n\nWe've kept your previous details.\n\n${M.ASK_FREQUENCY}`,
+    text: `🔄 *Book ${nannyDisplayName(nanny)} again*\n\nWe've kept your previous details.\n\n${M.ASK_FREQUENCY}`,
     state: 'FF_FREQUENCY',
   };
 }
@@ -834,7 +834,7 @@ async function sendReceipt(ctx, booking) {
     '',
     `Booking ID# ${booking.bookingNumber}`,
     `Date: ${prettyDate(booking.startDate)}${booking.isMultiDay ? ` – ${prettyDate(booking.endDate)}` : ''}`,
-    nanny ? `Nanny: ${nanny.fullName}` : '',
+    nanny ? `Nanny: ${nannyDisplayName(nanny)}` : '',
     '',
     `Rate: ${money(booking.hourlyRate)}/hr`,
     `Hours per day: ${booking.hoursPerDay}`,

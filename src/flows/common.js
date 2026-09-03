@@ -3,6 +3,7 @@ import { User, Session, Otp } from '../models/index.js';
 import { USER_ROLE, NANNY_STATUS } from '../utils/constants.js';
 import { parseChoice, parseEmail, parseOtp, clean, lower } from '../utils/parse.js';
 import { sendVerificationCode } from '../providers/email.js';
+import { firstName } from '../utils/format.js';
 import * as M from '../utils/messages.js';
 
 /** Six-digit email verification code. */
@@ -83,7 +84,7 @@ on('START', async (ctx) => {
   if (existing) {
     const state = existing.role === USER_ROLE.NANNY ? 'NANNY_REG_RESUME' : 'FAMILY_REG_RESUME';
     return {
-      text: `👋 Welcome back ${existing.fullName || ''}! Let's finish setting up your account.`,
+      text: `👋 Welcome back ${firstName(existing.fullName) || ''}! Let's finish setting up your account.`,
       state,
       role: existing.role,
       user: existing._id,

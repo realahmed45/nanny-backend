@@ -22,12 +22,40 @@ on('NANNY_REG_OTP', makeOtpHandler({
     const firstName = (user.fullName || '').split(' ')[0];
     return [
       { text: `✅ Your account has been verified.\n\nWelcome to My Nanny, ${firstName}!\n\nLet's complete your nanny profile.` },
-      { text: M.NANNY_ASK_AGE, state: 'NR_AGE', user: user._id },
+      { text: M.NANNY_ASK_NICKNAME, state: 'NR_NICKNAME', user: user._id },
     ];
   },
 }));
 
-on('NANNY_REG_RESUME', async () => ({ text: M.NANNY_ASK_AGE, state: 'NR_AGE' }));
+on('NANNY_REG_RESUME', async (ctx) => {
+  // Resume at the first thing still missing, so nobody is asked twice.
+  const { User } = await import('../models/index.js');
+  const user = await User.findById(ctx.session.user);
+  return user?.nickname
+    ? { text: M.NANNY_ASK_AGE, state: 'NR_AGE' }
+    : { text: M.NANNY_ASK_NICKNAME, state: 'NR_NICKNAME' };
+});
+
+const nicknameHandler = async (ctx) => {
+  const nickname = clean(ctx.text);
+  if (nickname.length < 2) {
+    return 'Please give a name families can call you \u{2014} at least 2 characters.';
+  }
+  if (nickname.length > 30) {
+    return 'That is a little long. Please keep it under 30 characters.';
+  }
+
+  ctx.set('nickname', nickname);
+  const { User } = await import('../models/index.js');
+  await User.findByIdAndUpdate(ctx.session.user, { nickname });
+
+  return [
+    { text: `Lovely \u{2014} families will see you as *${nickname}*.` },
+    { text: M.NANNY_ASK_AGE, state: 'NR_AGE' },
+  ];
+};
+nicknameHandler.prompt = () => M.NANNY_ASK_NICKNAME;
+on('NR_NICKNAME', nicknameHandler);
 
 /* ------------------------------------------------------------------ *
  * Profile setup

@@ -8,7 +8,7 @@ import {
 import { PROFILE_MENU, PAYMENTS_MENU, SUPPORT_MENU_TEXT } from './familyMenu.js';
 import { uniqueLabel } from './familyFindNanny.js';
 import { listTickets } from './nannyProfileAvailability.js';
-import { money, prettyDate } from '../utils/format.js';
+import { money, prettyDate, nannyDisplayName } from '../utils/format.js';
 import * as M from '../utils/messages.js';
 
 const backToMenu = (text, menu, state) => [{ text }, { text: menu, state }];
@@ -59,11 +59,11 @@ async function showFavourites(ctx, user) {
   }
 
   const nannies = await User.find({ _id: { $in: ids } })
-    .select('fullName hourlyRate experienceYears ratingAverage ratingCount nannyStatus');
+    .select('fullName nickname hourlyRate experienceYears ratingAverage ratingCount nannyStatus');
 
   const rows = nannies.map((n, i) => {
     const stars = n.ratingCount ? `\u{2B50} ${n.ratingAverage.toFixed(1)}` : 'No ratings yet';
-    return `*${i + 1}. \u{1F469} ${n.fullName}*\n   ${stars} | ${money(n.hourlyRate)}/hr | ${n.experienceYears || 0} yrs exp.`;
+    return `*${i + 1}. \u{1F469} ${nannyDisplayName(n)}*\n   ${stars} | ${money(n.hourlyRate)}/hr | ${n.experienceYears || 0} yrs exp.`;
   }).join('\n\n');
 
   return {

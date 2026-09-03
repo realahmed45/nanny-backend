@@ -6,6 +6,7 @@ import { draftToBooking } from './familyFindNanny.js';
 import { createBooking } from '../services/booking.js';
 import { recordTransfer } from '../services/payments.js';
 import { notifyUser } from '../services/notify.js';
+import { nannyDisplayName, firstName } from '../utils/format.js';
 import * as M from '../utils/messages.js';
 
 /* ------------------------------------------------------------------ *
@@ -36,7 +37,7 @@ export async function showPreBookingSummary(ctx, nanny) {
   const preview = draftToBooking(ctx, { hourlyRate: nanny.hourlyRate });
   return [
     { text: M.bookingSummary(preview, { title: '*Booking Summary*', nanny }) },
-    { text: M.PAY_FIRST_NOTICE(nanny.fullName), state: 'FF_PAY_CONFIRM' },
+    { text: M.PAY_FIRST_NOTICE(nannyDisplayName(nanny)), state: 'FF_PAY_CONFIRM' },
   ];
 }
 
@@ -58,7 +59,7 @@ export async function openChatWithNanny(ctx, nanny, booking = null) {
   await thread.save();
 
   return {
-    text: M.CHAT_OPENED(nanny.fullName),
+    text: M.CHAT_OPENED(nannyDisplayName(nanny)),
     state: 'FF_CHATTING',
     activeChat: thread._id,
     data: { chatNannyId: String(nanny._id) },
@@ -94,19 +95,28 @@ const chattingHandler = async (ctx) => {
     return { text: M.FAMILY_MAIN_MENU, state: 'FAMILY_MAIN_MENU' };
   }
 
+  // Numbers are stripped before relaying: the whole point of the relay is
+  // that neither side gets the other's contact details.
+  const { redactContactDetails, CONTACT_BLOCKED_NOTICE } =
+    await import('../utils/contactFilter.js');
+  const safe = redactContactDetails(text);
+
   const family = await User.findById(ctx.session.user);
   thread.messages.push({
-    from: 'family', sender: family?._id, body: text, mediaUrl: ctx.mediaUrl,
+    from: 'family', sender: family?._id, body: safe.text, mediaUrl: ctx.mediaUrl,
   });
   thread.lastMessageAt = new Date();
   await thread.save();
 
   const nanny = await User.findById(thread.nanny);
   if (nanny) {
-    const label = family?.fullName ? `👨‍👩‍👧 ${family.fullName}` : '👨‍👩‍👧 Family';
-    await notifyUser(nanny, `${label}:\n${text}`);
+    const name = firstName(family?.fullName);
+    const label = name ? `👨‍👩‍👧 ${name}` : '👨‍👩‍👧 Family';
+    await notifyUser(nanny, `${label}:\n${safe.text}`);
   }
-  return null;  // no bot reply; the message was relayed
+
+  // Tell the sender what happened, or their message looks ignored.
+  return safe.redacted ? CONTACT_BLOCKED_NOTICE : null;
 };
 chattingHandler.allowCommands = true;
 on('FF_CHATTING', chattingHandler);
@@ -147,7 +157,7 @@ const payConfirmHandler = async (ctx) => {
   }
   if (!proceed) {
     const nanny = await User.findById(ctx.get('selectedNannyId'));
-    return M.PAY_FIRST_NOTICE(nanny?.fullName || 'this nanny');
+    return M.PAY_FIRST_NOTICE(nannyDisplayName(nanny));
   }
 
   const family = await User.findById(ctx.session.user);
@@ -164,7 +174,7 @@ const payConfirmHandler = async (ctx) => {
 };
 payConfirmHandler.prompt = async (ctx) => {
   const nanny = await User.findById(ctx.get('selectedNannyId'));
-  return M.PAY_FIRST_NOTICE(nanny?.fullName || 'this nanny');
+  return M.PAY_FIRST_NOTICE(nannyDisplayName(nanny));
 };
 on('FF_PAY_CONFIRM', payConfirmHandler);
 
@@ -175,7 +185,7 @@ on('FF_PAY_ABORT_CONFIRM', async (ctx) => {
     return { text: M.FAMILY_MAIN_MENU, state: 'FAMILY_MAIN_MENU', resetData: true, clearStack: true };
   }
   const nanny = await User.findById(ctx.get('selectedNannyId'));
-  return { text: M.PAY_FIRST_NOTICE(nanny?.fullName || 'this nanny'), state: 'FF_PAY_CONFIRM' };
+  return { text: M.PAY_FIRST_NOTICE(nannyDisplayName(nanny)), state: 'FF_PAY_CONFIRM' };
 });
 
 const idFrontHandler = async (ctx) => {

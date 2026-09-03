@@ -6,7 +6,7 @@ import {
 } from '../utils/constants.js';
 import { parseChoice, clean, lower } from '../utils/parse.js';
 import { startFindNanny } from './familyFindNanny.js';
-import { statusLabel, prettyDate, timeRange, money } from '../utils/format.js';
+import { statusLabel, prettyDate, timeRange, money, nannyDisplayName } from '../utils/format.js';
 import config from '../config/index.js';
 import * as M from '../utils/messages.js';
 
@@ -126,7 +126,7 @@ export async function renderBookingList(bookings, category) {
   const head = `You have *${bookings.length} ${CATEGORY_LABELS[category]} booking${bookings.length > 1 ? 's' : ''}.*\nReply with the booking number to view details.\n`;
   const rows = await Promise.all(bookings.map(async (b, i) => {
     const nanny = b.nanny ? await User.findById(b.nanny).select('fullName') : null;
-    const nannyLine = nanny ? `👩  ${nanny.fullName}` : '👩  Nanny Replacement Needed';
+    const nannyLine = nanny ? `👩  ${nannyDisplayName(nanny)}` : '👩  Nanny Replacement Needed';
     const dateLine = b.isMultiDay
       ? `📅  ${prettyDate(b.startDate)} – ${prettyDate(b.endDate)} (${(b.serviceDays || []).length} days)`
       : `📅  ${prettyDate(b.startDate)}`;

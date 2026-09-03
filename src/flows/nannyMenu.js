@@ -17,7 +17,7 @@ import { queuePayout, refundBooking, dayEarnings } from '../services/payments.js
 import { findReplacements } from '../services/matching.js';
 import { notifyUser } from '../services/notify.js';
 import { applyPendingChange } from './familyBookingActions.js';
-import { statusLabel, prettyDate, timeRange, money } from '../utils/format.js';
+import { statusLabel, prettyDate, timeRange, money, nannyDisplayName } from '../utils/format.js';
 import config from '../config/index.js';
 import * as M from '../utils/messages.js';
 
@@ -373,14 +373,19 @@ const nannyChatHandler = async (ctx) => {
   const thread = await ChatThread.findById(ctx.session.activeChat);
   if (!thread) return { text: M.NANNY_MAIN_MENU, state: 'NANNY_MAIN_MENU' };
 
+  // Same in this direction: a nanny cannot pass her number out either.
+  const { redactContactDetails, CONTACT_BLOCKED_NOTICE } =
+    await import('../utils/contactFilter.js');
+  const safe = redactContactDetails(text);
+
   const nanny = await User.findById(ctx.session.user);
-  thread.messages.push({ from: 'nanny', sender: nanny?._id, body: text, mediaUrl: ctx.mediaUrl });
+  thread.messages.push({ from: 'nanny', sender: nanny?._id, body: safe.text, mediaUrl: ctx.mediaUrl });
   thread.lastMessageAt = new Date();
   await thread.save();
 
   const family = await User.findById(thread.family);
   if (family) {
-    await notifyUser(family, `👩 ${nanny?.fullName || 'Nanny'}:\n${text}`);
+    await notifyUser(family, `👩 ${nannyDisplayName(nanny)}:\n${safe.text}`);
   }
   return null;
 };
