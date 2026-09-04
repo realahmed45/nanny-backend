@@ -8,6 +8,7 @@ import {
   parseChoice, parseMultiChoice, pickFrom, parseMoney, parseInteger,
   parseTime, parseMapUrl, parseWeekdays, clean,
 } from '../utils/parse.js';
+import { money } from '../utils/format.js';
 import * as M from '../utils/messages.js';
 
 /* ------------------------------------------------------------------ *
@@ -158,7 +159,7 @@ on('NR_SUBJECTS', subjectsHandler);
 
 const rateHandler = async (ctx) => {
   const rate = parseMoney(ctx.text);
-  if (rate === null || rate <= 0) return '❌ Please enter your hourly rate, for example *$25*.';
+  if (rate === null || rate <= 0) return `❌ Please enter your hourly rate, for example *${money(150000)}*.`;
   ctx.set('hourlyRate', rate);
   return { text: M.NANNY_ASK_CPR, state: 'NR_CPR' };
 };

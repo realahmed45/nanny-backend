@@ -1258,7 +1258,7 @@ router.post('/bookings/:id/cancel', wrap(async (req, res) => {
 Booking #${booking.bookingNumber} has been cancelled.
 ${req.body?.reason ? `\nReason: ${req.body.reason}` : ''}
 
-💰 A full refund of *$${breakdown.totalRefund}* for all unused services is being processed.`);
+💰 A full refund of *${money(breakdown.totalRefund)}* for all unused services is being processed.`);
 
   if (nannyId) {
     const nanny = await User.findById(nannyId);
@@ -1294,7 +1294,7 @@ router.post('/bookings/:id/assign-nanny', wrap(async (req, res) => {
 
   await notifyUser(family, `👩 *Nanny Assigned*
 
-${nanny.fullName} has been assigned to Booking #${booking.bookingNumber}.${requiresPayment ? `\n\n💰 An additional payment of $${difference} is required. Open *My Bookings* to pay.` : ''}`);
+${nanny.fullName} has been assigned to Booking #${booking.bookingNumber}.${requiresPayment ? `\n\n💰 An additional payment of ${money(difference)} is required. Open *My Bookings* to pay.` : ''}`);
 
   res.json({ ok: true, booking, difference, requiresPayment });
 }));

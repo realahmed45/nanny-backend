@@ -119,7 +119,7 @@ export function parseEmail(text) {
   return EMAIL_RE.test(t) ? t.toLowerCase() : null;
 }
 
-/** Money input: "$25", "25 USD", "25.50" -> 25 / 25.5 */
+/** Money input: "Rp 150000", "150.000", "150000 IDR" -> 150000 */
 export function parseMoney(text) {
   const t = clean(text).replace(/[^0-9.]/g, '');
   if (!t) return null;

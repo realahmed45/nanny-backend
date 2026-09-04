@@ -2,9 +2,14 @@ import config from '../config/index.js';
 import dayjs from 'dayjs';
 import { DURATION_OPTIONS } from './constants.js';
 
+/** Symbols people actually recognise, where the bare code is not it. */
+const SYMBOLS = { IDR: 'Rp' };
+
 export const money = (n, currency = config.currency) => {
-  // IDR is written as a prefix with no decimals, e.g. Rp 90.000.
-  const sym = currency === 'USD' ? '$' : currency === 'IDR' ? 'Rp ' : `${currency} `;
+  // The platform charges in rupiah, written as a prefix with no decimals.
+  // Any other currency falls back to its code rather than a symbol — a
+  // guessed symbol on an unconfigured currency is worse than a plain code.
+  const sym = `${SYMBOLS[currency] || currency} `;
   const v = Number(n || 0);
   return `${sym}${v % 1 === 0 ? v.toLocaleString('en-US') : v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };

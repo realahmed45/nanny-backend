@@ -152,7 +152,7 @@ on('NP_MENU', async (ctx) => {
 
 on('NP_SET_RATE', async (ctx) => {
   const rate = parseMoney(ctx.text);
-  if (rate === null || rate <= 0) return '❌ Please enter your hourly rate, for example *$30*.';
+  if (rate === null || rate <= 0) return `❌ Please enter your hourly rate, for example *${money(150000)}*.`;
   const user = await User.findById(ctx.session.user);
   user.hourlyRate = rate;
   await user.save();
