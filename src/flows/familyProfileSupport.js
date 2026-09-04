@@ -502,35 +502,81 @@ on('FP_DOC_UPLOAD', async (ctx) => {
  * My Payments
  * ------------------------------------------------------------------ */
 
+/**
+ * How many payments are shown at once.
+ *
+ * The recent ones are what people are checking on; older entries are a
+ * *NEXT* away rather than a wall of text on a phone screen.
+ */
+const PAYMENT_PAGE_SIZE = 4;
+
+const PAYMENT_STATUSES = [
+  PAYMENT_STATUS.COMPLETED, PAYMENT_STATUS.IN_PROCESS,
+  PAYMENT_STATUS.REFUND_IN_PROCESS, PAYMENT_STATUS.REFUNDED, PAYMENT_STATUS.FAILED,
+];
+
+/** Render one page of a payment category, newest first. */
+async function renderPaymentPage(familyId, status, page = 0) {
+  const query = { family: familyId, status };
+  const total = await Payment.countDocuments(query);
+  if (!total) return null;
+
+  const skip = page * PAYMENT_PAGE_SIZE;
+  const payments = await Payment.find(query)
+    .populate('booking', 'bookingNumber startDate')
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(PAYMENT_PAGE_SIZE);
+
+  // The total covers the whole category, not just this page, which is what
+  // someone checking "how much have I paid" actually wants to know.
+  const all = await Payment.find(query).select('amount');
+  const sum = all.reduce((s, p) => s + (p.amount || 0), 0);
+
+  const rows = payments.map((p, i) => {
+    const kind = { booking: 'Booking payment', additional: 'Additional payment', refund: 'Refund', penalty: 'Penalty' }[p.kind] || p.kind;
+    return `${skip + i + 1}. ${kind} — *${money(p.amount)}*\n   Booking #${p.booking?.bookingNumber || '—'}\n   ${prettyDate(p.createdAt)}${p.reference ? `\n   Ref: ${p.reference}` : ''}`;
+  });
+
+  const shown = skip + payments.length;
+  const more = shown < total
+    ? `\n\n_Showing ${skip + 1}-${shown} of ${total}._\nType *NEXT* for older payments.`
+    : '';
+
+  return {
+    text: `💳 *${status.replace(/_/g, ' ').toUpperCase()}*\n\n${rows.join('\n\n')}${more}\n\n*Total: ${money(sum)}*`,
+    hasMore: shown < total,
+    total,
+  };
+}
+
 on('FPAY_MENU', async (ctx) => {
+  // NEXT continues the category already open, rather than picking a new one.
+  if (ctx.command === 'NEXT') {
+    const status = ctx.get('paymentStatus');
+    if (!status) return PAYMENTS_MENU;
+    const page = (ctx.get('paymentPage') || 0) + 1;
+    const next = await renderPaymentPage(ctx.session.user, status, page);
+    if (!next) {
+      return backToMenu("That's the end of the list.", PAYMENTS_MENU, 'FPAY_MENU');
+    }
+    ctx.set('paymentPage', page);
+    return backToMenu(next.text, PAYMENTS_MENU, 'FPAY_MENU');
+  }
+
   const choice = parseChoice(ctx.text, 5);
   if (!choice) return PAYMENTS_MENU;
 
-  const statuses = [
-    PAYMENT_STATUS.COMPLETED, PAYMENT_STATUS.IN_PROCESS,
-    PAYMENT_STATUS.REFUND_IN_PROCESS, PAYMENT_STATUS.REFUNDED, PAYMENT_STATUS.FAILED,
-  ];
-  const status = statuses[choice - 1];
+  const status = PAYMENT_STATUSES[choice - 1];
+  const first = await renderPaymentPage(ctx.session.user, status, 0);
 
-  const payments = await Payment.find({ family: ctx.session.user, status })
-    .populate('booking', 'bookingNumber startDate')
-    .sort({ createdAt: -1 })
-    .limit(20);
-
-  if (!payments.length) {
+  if (!first) {
     return backToMenu('You have no payments in this category.', PAYMENTS_MENU, 'FPAY_MENU');
   }
 
-  const total = payments.reduce((s, p) => s + (p.amount || 0), 0);
-  const rows = payments.map((p, i) => {
-    const kind = { booking: 'Booking payment', additional: 'Additional payment', refund: 'Refund', penalty: 'Penalty' }[p.kind] || p.kind;
-    return `${i + 1}. ${kind} — *${money(p.amount)}*\n   Booking #${p.booking?.bookingNumber || '—'}\n   ${prettyDate(p.createdAt)}${p.reference ? `\n   Ref: ${p.reference}` : ''}`;
-  });
-
-  return backToMenu(
-    `💳 *${status.replace(/_/g, ' ').toUpperCase()}*\n\n${rows.join('\n\n')}\n\n*Total: ${money(total)}*`,
-    PAYMENTS_MENU, 'FPAY_MENU'
-  );
+  ctx.set('paymentStatus', status);
+  ctx.set('paymentPage', 0);
+  return backToMenu(first.text, PAYMENTS_MENU, 'FPAY_MENU');
 });
 
 /* ------------------------------------------------------------------ *

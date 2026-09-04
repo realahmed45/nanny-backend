@@ -213,10 +213,42 @@ on('NR_MAP', mapHandler);
 const photoHandler = async (ctx) => {
   if (!ctx.mediaUrl) return `📎 Please attach your profile photo.`;
   ctx.set('profilePhotoUrl', ctx.mediaUrl);
-  return { text: M.NANNY_ASK_DAYS, state: 'NR_DAYS' };
+  return { text: M.NANNY_ASK_VIDEO, state: 'NR_VIDEO' };
 };
 photoHandler.prompt = () => M.NANNY_ASK_PHOTO;
 on('NR_PHOTO', photoHandler);
+
+/**
+ * Her presentation video.
+ *
+ * Skippable, and a wrong attachment is explained rather than silently
+ * accepted: a photo saved as a video would show families a still frame where
+ * they expected someone talking.
+ */
+const videoHandler = async (ctx) => {
+  if (ctx.command === 'SKIP' || ctx.command === 'NONE' || /^skip$/i.test(String(ctx.text || '').trim())) {
+    return { text: M.NANNY_ASK_DAYS, state: 'NR_DAYS' };
+  }
+
+  if (!ctx.mediaUrl) return M.NANNY_ASK_VIDEO;
+
+  // The provider reports the media type; anything plainly not a video is
+  // explained rather than saved as a broken profile.
+  const type = String(ctx.mediaType || '').toLowerCase();
+  if (type && !type.includes('video')) {
+    return M.NANNY_VIDEO_WRONG_TYPE;
+  }
+
+  ctx.set('introVideoUrl', ctx.mediaUrl);
+  ctx.set('introVideoMediaId', ctx.mediaId);
+
+  return [
+    { text: M.NANNY_VIDEO_SAVED },
+    { text: M.NANNY_ASK_DAYS, state: 'NR_DAYS' },
+  ];
+};
+videoHandler.prompt = () => M.NANNY_ASK_VIDEO;
+on('NR_VIDEO', videoHandler);
 
 const daysHandler = async (ctx) => {
   const days = parseWeekdays(ctx.text);
@@ -255,6 +287,12 @@ const availHoursHandler = async (ctx) => {
   user.residingMapUrl = ctx.get('residingMapUrl');
   user.profilePhotoUrl = ctx.get('profilePhotoUrl');
   user.documents = ctx.get('documents', []);
+
+  // Held back from families until someone has watched it.
+  const videoUrl = ctx.get('introVideoUrl');
+  if (videoUrl) {
+    user.videos = [{ url: videoUrl, title: 'Introduction', approved: false }];
+  }
   user.availability = {
     days: ctx.get('availableDays', []),
     startTime: ctx.get('availStart'),

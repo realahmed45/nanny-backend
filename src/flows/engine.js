@@ -43,13 +43,15 @@ export const goto = (state, text, extra = {}) => ({ text, state, ...extra });
 export const stay = (text, extra = {}) => ({ text, ...extra });
 
 /** Build the context object handed to every handler. */
-async function buildContext({ phone, text, mediaUrl, mediaId, session }) {
+async function buildContext({ phone, text, mediaUrl, mediaId, mediaType, session }) {
   const user = session.user ? await User.findById(session.user) : null;
   return {
     phone,
     text: String(text ?? ''),
     mediaUrl,
     mediaId,
+    // Handlers that accept an attachment need to know what kind it is.
+    mediaType,
     session,
     user,
     data: session.data || {},
@@ -218,8 +220,36 @@ export async function handleMessage({ phone: rawPhone, text = '', mediaUrl, medi
   }
 
   const ctx = await buildContext({
-    phone, text: effectiveText, mediaUrl: effectiveMedia, mediaId, session,
+    phone, text: effectiveText, mediaUrl: effectiveMedia, mediaId, mediaType, session,
   });
+
+  // Wires 2 and 3 of the referral engine, in order and on every message.
+  //
+  // Both are passive: they record and return, never reply and never alter
+  // where the conversation goes. Wrapped because an attribution failure must
+  // never break somebody's chat — a lost credit is recoverable, a dead bot
+  // is not.
+  //
+  // They run here rather than inside a handler because a brand new person
+  // arriving through a link is answered by the START state and returns early;
+  // a call further down the flow would never be reached on that path, and
+  // they would never be credited.
+  try {
+    const { recordInboundOpen } = await import('../services/shareLink.js');
+    // Wire 2: the message may carry a code. Records the click, or adopts the
+    // redirect row this same tap already wrote.
+    await recordInboundOpen(phone, effectiveText);
+
+    // Wire 3 — OR4's moment: they wrote to us, so a referrer can be resolved.
+    // Only for someone we know; an unregistered visitor is credited by the
+    // same call once their account exists.
+    if (ctx.user) {
+      const { creditOnInteraction } = await import('../services/referralAttribution.js');
+      await creditOnInteraction(ctx.user, { phone });
+    }
+  } catch (err) {
+    console.error('[referral] attribution skipped:', err.message);
+  }
 
   let result;
   try {
@@ -262,12 +292,14 @@ async function applyResult(session, result, ctx) {
       if (node.noPush) session.state = node.state;
       else session.push(node.state);
     }
-    if (node.data) {
-      session.data = { ...(session.data || {}), ...node.data };
-      session.markModified('data');
-    }
+    // The reset comes first, so a node that clears the draft can still seed
+    // the new one — carrying a recommended nanny into a fresh search, say.
     if (node.resetData) {
       session.data = {};
+      session.markModified('data');
+    }
+    if (node.data) {
+      session.data = { ...(session.data || {}), ...node.data };
       session.markModified('data');
     }
     if (node.clearStack) session.stack = [];

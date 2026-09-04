@@ -5,6 +5,7 @@ import {
   PAYMENT_STATUS, CANCELLED_BY, WEEKDAYS,
 } from '../utils/constants.js';
 import { computeBookingAmount, computeCancellationRefund, round2 } from './policy.js';
+import { describeDay } from './calendar.js';
 import config from '../config/index.js';
 
 /** Random 4-char service code, e.g. "A123", as used in the script. */
@@ -19,11 +20,18 @@ export function generateServiceCode() {
  * Single-day  -> exactly one day.
  * Multi-day   -> every date between start and end that falls on a repeat day
  *                (all days, when no repeat days are given).
+ *
+ * Closed days — Nyepi above all — are left out rather than scheduled and
+ * cancelled later, and days carrying a surcharge are priced individually, so
+ * a booking that spans one is charged correctly instead of at a flat rate.
+ * The calendar is passed in so this stays synchronous for its other callers.
  */
-export function buildServiceDays({ startDate, endDate, startTime, hoursPerDay, repeatDays = [], hourlyRate }) {
+export function buildServiceDays({
+  startDate, endDate, startTime, hoursPerDay, repeatDays = [], hourlyRate, calendar,
+}) {
   const days = [];
   const [hh, mm] = String(startTime || '09:00').split(':').map(Number);
-  const dayAmount = round2((hourlyRate || 0) * (hoursPerDay || 0));
+  const baseAmount = round2((hourlyRate || 0) * (hoursPerDay || 0));
 
   const from = dayjs(startDate);
   const to = endDate ? dayjs(endDate) : from;
@@ -33,13 +41,20 @@ export function buildServiceDays({ startDate, endDate, startTime, hoursPerDay, r
     const weekday = WEEKDAYS[(d.day() + 6) % 7]; // dayjs: 0=Sunday -> our array starts Monday
     if (useRepeat && !repeatDays.includes(weekday)) continue;
 
+    const date = d.format('YYYY-MM-DD');
+    const special = calendar ? describeDay(date, calendar) : null;
+    // Nobody works a closed day, so it is never scheduled or charged for.
+    if (special?.closed) continue;
+
+    const multiplier = special?.multiplier || 1;
     const startAt = d.hour(hh).minute(mm).second(0).millisecond(0);
     days.push({
-      date: d.format('YYYY-MM-DD'),
+      date,
       startAt: startAt.toDate(),
       endAt: startAt.add(hoursPerDay || 0, 'hour').toDate(),
       hours: hoursPerDay,
-      amount: dayAmount,
+      amount: multiplier === 1 ? baseAmount : round2(baseAmount * multiplier),
+      ...(multiplier === 1 ? {} : { rateMultiplier: multiplier, rateLabel: special.label }),
       status: SERVICE_DAY_STATUS.SCHEDULED,
       arrivalOtp: generateServiceCode(),
       endOtp: generateServiceCode(),
@@ -50,13 +65,26 @@ export function buildServiceDays({ startDate, endDate, startTime, hoursPerDay, r
 
 /** Create a booking in DRAFT from the data a family assembled in the chat. */
 export async function createBooking({ family, nanny, draft }) {
-  const hourlyRate = nanny?.hourlyRate ?? draft.hourlyRate ?? 0;
-  const serviceDays = buildServiceDays({ ...draft, hourlyRate });
-  const totalAmount = computeBookingAmount({
-    hourlyRate,
-    hoursPerDay: draft.hoursPerDay,
-    days: serviceDays.length,
+  // Price comes from the platform, not the nanny: every family pays the same
+  // for the same number of children, and a family who has referred someone
+  // pays the discounted rate. A nanny's own hourlyRate is what she is paid.
+  const { hourlyRateFor } = await import('./pricing.js');
+  const pricing = await hourlyRateFor({
+    user: family,
+    children: (draft.children || []).length || 1,
   });
+
+  const hourlyRate = pricing.hourlyRate;
+
+  // Surcharged and closed days are decided here, so the total below reflects
+  // the days that will actually be worked.
+  const { getCalendar } = await import('./calendar.js');
+  const calendar = await getCalendar().catch(() => null);
+  const serviceDays = buildServiceDays({ ...draft, hourlyRate, calendar });
+
+  // Summed from the days rather than rate x hours x count, because a day
+  // carrying a Nyepi-eve surcharge does not cost the same as a plain one.
+  const totalAmount = round2(serviceDays.reduce((sum, d) => sum + (d.amount || 0), 0));
 
   const bookingNumber = String(await nextSequence('booking', 12344));
 
@@ -87,6 +115,9 @@ export async function createBooking({ family, nanny, draft }) {
     agentCallRequested: !!draft.agentCallRequested,
     hourlyRate,
     totalAmount,
+    // Kept so support can explain a price months later without recomputing it.
+    standardHourlyRate: pricing.standardRate,
+    referralDiscountApplied: pricing.discounted,
     paymentStatus: PAYMENT_STATUS.IN_PROCESS,
   });
   return booking;

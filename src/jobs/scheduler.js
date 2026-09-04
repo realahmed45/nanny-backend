@@ -241,6 +241,44 @@ ${payout.isFinalForBooking ? '\n✅ This completes the payment for that booking.
   return released;
 }
 
+/**
+ * Wire 5 — the referral window sweep.
+ *
+ * A 30-day window can lapse while nothing at all is happening: they clicked,
+ * they replied, and then they never booked. No message arrives, no payment is
+ * verified, so nothing else in the system would ever notice. Without this
+ * every referral figure quietly overstates what is still live.
+ *
+ * Read-only apart from two state flips, and it never touches money.
+ */
+export async function processReferralWindows() {
+  const { expireStale } = await import('../services/referralAttribution.js');
+  const { expireLinks } = await import('../services/shareLink.js');
+
+  const [attributions, links] = await Promise.all([
+    expireStale(),
+    expireLinks(),
+  ]);
+
+  if (attributions || links) {
+    console.log(`[referral] expired ${attributions} attribution(s), ${links} link(s)`);
+  }
+  return { attributions, links };
+}
+
+/**
+ * The abuse sweep (OR9). Slower than the expiry pass on purpose — the
+ * detectors aggregate over the whole click stream, and nothing they find
+ * needs acting on within the hour.
+ */
+export async function processReferralAbuse() {
+  const { runAbuseSweep } = await import('../services/linkAbuseDetector.js');
+  const results = await runAbuseSweep();
+  const raised = Object.values(results).reduce((s, n) => s + (n || 0), 0);
+  if (raised) console.log('[referral] abuse sweep raised', raised, 'alert(s)');
+  return results;
+}
+
 /* ------------------------------------------------------------------ *
  * Cron wiring
  * ------------------------------------------------------------------ */
@@ -261,7 +299,15 @@ export function startScheduler() {
   // Mondays at 09:00: release nanny payouts.
   tasks.push(cron.schedule('0 9 * * 1', () => guard('payouts', processPayouts)));
 
-  console.log('[scheduler] started (5 jobs)');
+  // Hourly: expire lapsed referral windows and dead links, so reports stop
+  // counting claims that can no longer be earned.
+  tasks.push(cron.schedule('0 * * * *', () => guard('referralWindows', processReferralWindows)));
+
+  // Twice a day: look for referral patterns worth a human review. Nothing
+  // here blocks anyone — it raises an alert and a person decides.
+  tasks.push(cron.schedule('0 3,15 * * *', () => guard('referralAbuse', processReferralAbuse)));
+
+  console.log('[scheduler] started (7 jobs)');
   return tasks;
 }
 

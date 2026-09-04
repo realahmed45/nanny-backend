@@ -62,10 +62,110 @@ export async function restartHandler() {
   return { text: M.ROLE_PICKER, state: 'ROLE_PICK', noPush: true };
 }
 
+/**
+ * Credit whoever referred this person.
+ *
+ * A referral link opens WhatsApp with "nanny ABC123" prefilled, so the code
+ * arrives on the very first message. Attribution has to happen here: by the
+ * time they finish registering the original text is long gone, and without it
+ * nobody ever qualifies for the discount the referral promised.
+ *
+ * Stored on the session so it survives until the account is actually created.
+ */
+async function captureReferralCode(ctx) {
+  const words = clean(ctx.text).toUpperCase().split(/\s+/).filter(Boolean);
+
+  // A favourite-nanny link carries "N<id>", so the chat can open on the nanny
+  // who was actually recommended rather than a cold search.
+  const recommended = words.find((w) => /^N[A-F\d]{24}$/i.test(w));
+  if (recommended) ctx.set('recommendedNannyId', recommended.slice(1).toLowerCase());
+
+  // Anything that is not the trigger word itself could be a code.
+  const candidate = words.find((w) => w !== 'NANNY' && /^[A-Z]{2,}\d{2,}$/.test(w));
+  if (!candidate) return;
+
+  const { User } = await import('../models/index.js');
+  const referrer = await User.findOne({ referralCode: candidate }).select('_id referralCode');
+  if (!referrer) return;
+
+  // Nobody refers themselves.
+  const existing = await User.findOne({ phone: ctx.phone }).select('_id');
+  if (existing && String(existing._id) === String(referrer._id)) return;
+
+  ctx.set('referredByCode', candidate);
+  ctx.set('referredById', String(referrer._id));
+
+  // Close the loop on the click, so the funnel can show conversions.
+  try {
+    const { ReferralClick } = await import('../models/index.js');
+    await ReferralClick.findOneAndUpdate(
+      { code: candidate, convertedTo: null },
+      { convertedAt: new Date() },
+      { sort: { createdAt: -1 } },
+    );
+  } catch {
+    // Tracking must never block a signup.
+  }
+}
+
+/**
+ * Apply a captured referral once the account exists.
+ *
+ * The referrer earns the discount, so their counters move — not the new
+ * user's. The window starts at the first referral and is extended by later
+ * ones rather than restarted, which is what makes stacking meaningful.
+ */
+export async function applyReferral(ctx, newUser) {
+  if (!newUser) return;
+
+  // The attribution engine owns this when they arrived through a share link:
+  // it applies the full rule set — the 30-day window, one-referrer-ever, the
+  // click record — where the block below only knows how to add one.
+  //
+  // Running both would count the same referral twice, so the engine goes
+  // first and the older road is skipped whenever it took the claim.
+  try {
+    const { creditOnInteraction } = await import('../services/referralAttribution.js');
+    const result = await creditOnInteraction(newUser, { phone: ctx.phone });
+    if (result.changed) {
+      ctx.set('referredById', null);
+      ctx.set('referredByCode', null);
+      return;
+    }
+  } catch (err) {
+    console.error('[referral] engine could not attribute:', err.message);
+  }
+
+  const referrerId = ctx.get('referredById');
+  if (!referrerId) return;
+
+  const { User } = await import('../models/index.js');
+
+  // Only ever attributed once.
+  if (newUser.referredBy) return;
+
+  newUser.referredBy = referrerId;
+  await newUser.save();
+
+  const referrer = await User.findById(referrerId);
+  if (!referrer) return;
+
+  referrer.referralCount = (referrer.referralCount || 0) + 1;
+  if (!referrer.firstReferralAt) referrer.firstReferralAt = new Date();
+  referrer.referralDiscountCancelled = false;
+  await referrer.save();
+
+  ctx.set('referredById', null);
+  ctx.set('referredByCode', null);
+}
+
 /** Landing state: greet, route returning users, ask new ones who they are. */
 on('START', async (ctx) => {
   // Anything other than the trigger word gets a nudge, not a menu.
   if (!isStartWord(ctx.text)) return M.START_HINT;
+
+  // A referral link prefills the code, so it is here or nowhere.
+  await captureReferralCode(ctx).catch(() => {});
 
   const existing = await User.findOne({ phone: ctx.phone });
 
@@ -224,6 +324,12 @@ export function makeOtpHandler({ role, onVerified }) {
     ctx.session.user = user._id;
     ctx.session.role = role;
     ctx.user = user;
+
+    // The account now exists, so a referral captured on the first message
+    // can finally be credited. Never fatal: a signup must not fail over it.
+    await applyReferral(ctx, user).catch((err) => {
+      console.error('[referral] could not attribute:', err.message);
+    });
 
     return onVerified(ctx, user);
   };

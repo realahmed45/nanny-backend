@@ -64,6 +64,11 @@ const askLanguages = () => [
 export async function startFindNanny(ctx) {
   const user = ctx.user || (await User.findById(ctx.session.user));
 
+  // Someone who arrived on a "share this nanny" link came for that nanny, so
+  // the recommendation is carried across the reset below and shown first.
+  const recommended = ctx.get('recommendedNannyId');
+  const carry = recommended ? { preferredNannyId: recommended } : {};
+
   // Offer saved addresses when the family has any.
   if (user?.addresses?.length) {
     const list = user.addresses
@@ -73,9 +78,15 @@ export async function startFindNanny(ctx) {
       text: `${M.FIND_NANNY_INTRO}\n\nWhere do you need childcare?\n\n${list}\n${user.addresses.length + 1}. Use a new address`,
       state: 'FF_PICK_SAVED_ADDRESS',
       resetData: true,
+      data: carry,
     };
   }
-  return { text: `${M.FIND_NANNY_INTRO}\n\n${M.ASK_LOCATION}`, state: 'FF_LOCATION', resetData: true };
+  return {
+    text: `${M.FIND_NANNY_INTRO}\n\n${M.ASK_LOCATION}`,
+    state: 'FF_LOCATION',
+    resetData: true,
+    data: carry,
+  };
 }
 
 const pickSavedAddress = async (ctx) => {
@@ -186,7 +197,7 @@ on('FF_FREQUENCY', frequencyHandler);
  *
  * Returns an error string, or null when the date is fine.
  */
-function startDateError(date) {
+async function startDateError(date) {
   const day = dayjs(date);
   if (day.isBefore(dayjs().startOf('day'))) {
     return 'That date is in the past. Please choose a future date.';
@@ -195,6 +206,19 @@ function startDateError(date) {
   if (day.isAfter(limit)) {
     return `Bookings can only start within the next ${config.booking.maxStartMonths} months (up to *${limit.format('D MMMM YYYY')}*).\n\nPlease choose an earlier date.`;
   }
+
+  // Nyepi and other closed days are refused here rather than at booking time,
+  // so nobody plans a day of care we were never going to be able to staff.
+  try {
+    const { checkDateBookable } = await import('../services/calendar.js');
+    const check = await checkDateBookable(date);
+    if (!check.ok) {
+      return `\u{1F6AB} *${check.label || 'Unavailable'}* \u2014 ${check.reason}\n\nPlease choose another date.`;
+    }
+  } catch {
+    // A calendar lookup failure must not block an otherwise valid booking.
+  }
+
   return null;
 }
 
@@ -242,7 +266,7 @@ const startDateHandler = async (ctx) => {
 
   const date = parseDate(ctx.text);
   if (!date) return M.ASK_START_DATE;
-  const problem = startDateError(date);
+  const problem = await startDateError(date);
   if (problem) return problem;
   ctx.set('startDate', date);
 
@@ -256,7 +280,7 @@ on('FF_START_DATE', startDateHandler);
 const startDateCustomHandler = async (ctx) => {
   const date = parseDate(ctx.text);
   if (!date) return `❌ I couldn't read that date. Try a format like *12 August* or *2026-08-12*.`;
-  const problem = startDateError(date);
+  const problem = await startDateError(date);
   if (problem) return problem;
   ctx.set('startDate', date);
 
@@ -329,6 +353,9 @@ const repeatDaysHandler = async (ctx) => {
   }
 
   return [
+    // Confirm what we understood, so a typed answer like "monday, tuesday and
+    // wed" is visibly registered rather than silently assumed.
+    { text: M.repeatDaysConfirmed(days, preview.length) },
     { text: M.IMPORTANT_FAMILY_INFO },
     { text: M.ASK_START_TIME, state: 'FF_START_TIME' },
   ];

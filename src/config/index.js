@@ -73,6 +73,9 @@ export const config = {
     // Referral links are read aloud and retyped, so they can point at a
     // short domain instead of the long hosting URL.
     linkBase: process.env.REFERRAL_LINK_BASE || '',
+    // The number a referral link opens a chat with. Without it the landing
+    // page can only ask people to find us themselves, which loses most of them.
+    whatsappNumber: (process.env.WHATSAPP_NUMBER || '').replace(/\D/g, ''),
     standardRate: process.env.REFERRAL_STANDARD_RATE || '120k',
     discountedRate: process.env.REFERRAL_DISCOUNTED_RATE || '90k',
   },

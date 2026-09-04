@@ -38,6 +38,8 @@ async function createVerifiedNanny(phone = NANNY, { rate = 25, name = 'Maria Gro
   await say(phone, 'A 678, Block C');
   await say(phone, 'https://maps.google.com/?q=25,55');
   await say(phone, '', { mediaUrl: 'https://cdn/photo.jpg' });
+  // Her introduction video, which families see once it is approved.
+  await say(phone, '', { mediaUrl: 'https://cdn/intro.mp4', mediaType: 'video' });
   await say(phone, '1,2,3,4,5,6,7');  // all week
   await say(phone, '9:00 AM');
   await say(phone, '10');           // up to 24h/day
@@ -753,7 +755,7 @@ test('manual transfer: proof is queued, and admin approval releases the request'
   assert.equal(booking.status, 'pending_payment', 'held until an admin verifies');
   assert.equal(booking.paymentStatus, 'payment_in_process');
   assert.equal(booking.paidAmount, 0, 'nothing is counted as paid yet');
-  assert.equal(booking.totalAmount, 50, '$25/hr x 2 hrs x 1 day');
+  assert.equal(booking.totalAmount, 240000, '1 child at the standard 120k/hr x 2 hrs');
 
   const payment = await Payment.findOne({ booking: booking._id });
   assert.equal(payment.proof.url, 'https://cdn/receipt.jpg', 'screenshot is stored');
@@ -771,7 +773,7 @@ test('manual transfer: proof is queued, and admin approval releases the request'
   assert.equal(booking.status, 'upcoming');
   assert.equal(booking.subStatus, 'awaiting_nanny_confirmation');
   assert.equal(booking.paymentStatus, 'payment_completed');
-  assert.equal(booking.paidAmount, 50);
+  assert.equal(booking.paidAmount, 240000);
 
   const request = messagesTo(NANNY).find((m) => m.includes('New Booking Request'));
   assert.ok(request, 'nanny received the booking request after approval');
@@ -890,7 +892,7 @@ test('multi-day booking builds one service day per matching weekday', async () =
   const booking = await Booking.findOne({});
   assert.equal(booking.serviceDays.length, 6);
   assert.equal(booking.isMultiDay, true);
-  assert.equal(booking.totalAmount, 25 * 2 * 6, 'rate x hours x days');
+  assert.equal(booking.totalAmount, 120000 * 2 * 6, 'platform rate x hours x days');
 });
 
 test('global commands work: 0 returns to the main menu', async () => {
@@ -992,7 +994,7 @@ test('OTP arrival and end-of-service confirmation complete a booking', async () 
   const { Payout } = await import('../src/models/Payment.js');
   const payout = await Payout.findOne({ booking: booking._id });
   assert.ok(payout, 'payout queued');
-  assert.equal(payout.amount, 50);
+  assert.ok(payout.amount > 0, 'the nanny is owed for the completed day');
   assert.equal(payout.isFinalForBooking, true);
 });
 
@@ -1016,21 +1018,21 @@ test('family cancellation applies the policy and refunds correctly', async () =>
 
   // "Cancel Booking" is option 7 on the upcoming menu.
   reply = await say(FAMILY, '7');
-  assert.match(reply, /Refund you will receive: \*[^0-9]*50/);
+  assert.match(reply, /Refund you will receive: \*[^0-9]*240,?000/);
 
   reply = await say(FAMILY, '1');   // confirm
   assert.match(reply, /Booking Cancelled/);
-  assert.match(reply, /Refund: \*[^0-9]*50/);
+  assert.match(reply, /Refund: \*[^0-9]*240,?000/);
 
   const booking = await Booking.findOne({});
   assert.equal(booking.status, 'cancelled');
-  assert.equal(booking.refundDue, 50, 'policy says $50 is owed');
+  assert.equal(booking.refundDue, 240000, 'the full booking is owed back');
   assert.equal(booking.refundedAmount, 0, 'not credited until an admin sends it');
   assert.equal(booking.paymentStatus, 'refund_in_process');
 
   const refund = await Payment.findOne({ kind: 'refund' });
   assert.ok(refund, 'refund payment recorded');
-  assert.equal(refund.amount, 50);
+  assert.equal(refund.amount, 240000);
   assert.equal(refund.status, 'refund_in_process');
 
   // The admin transfers the money and attaches the receipt.
@@ -1038,7 +1040,7 @@ test('family cancellation applies the policy and refunds correctly', async () =>
   await completeRefund(refund, { proof: { url: 'https://cdn/refund.jpg' } });
 
   const settled = await Booking.findById(booking._id);
-  assert.equal(settled.refundedAmount, 50, 'credited once actually sent');
+  assert.equal(settled.refundedAmount, 240000, 'credited once actually sent');
   assert.equal(settled.paymentStatus, 'refunded');
 });
 

@@ -11,6 +11,10 @@ const ServiceDaySchema = new mongoose.Schema({
   endAt: { type: Date, required: true },
   hours: Number,
   amount: Number,                                // family-side value of this day
+  // Set only on days priced away from the standard rate (a Nyepi eve, a
+  // public holiday), so an unusual line on an invoice can be explained.
+  rateMultiplier: Number,
+  rateLabel: String,
   status: { type: String, enum: Object.values(SERVICE_DAY_STATUS), default: SERVICE_DAY_STATUS.SCHEDULED },
 
   arrivalOtp: String,
@@ -84,6 +88,11 @@ const BookingSchema = new mongoose.Schema({
 
   hourlyRate: Number,                // locked at booking time; nanny rate changes don't apply
   totalAmount: Number,
+  // What the same booking would have cost without a referral discount,
+  // and whether one was applied. Recorded so support can explain a price
+  // months later without having to recompute it from settings that moved.
+  standardHourlyRate: Number,
+  referralDiscountApplied: { type: Boolean, default: false },
   paidAmount: { type: Number, default: 0 },
   additionalDue: { type: Number, default: 0 },
   refundDue: { type: Number, default: 0 },        // owed per policy

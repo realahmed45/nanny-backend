@@ -118,13 +118,23 @@ const CATEGORY_LABELS = {
   cancelled: 'cancelled', pending_payment: 'pending payment',
 };
 
+/**
+ * How many bookings are listed at once.
+ *
+ * A long list is unreadable on a phone, and the ones people want are almost
+ * always at the top, so the rest are a *NEXT* away rather than scrolled past.
+ */
+export const BOOKING_PAGE_SIZE = 3;
+
 /** One-line-per-booking list, as in the script. */
-export async function renderBookingList(bookings, category) {
-  if (!bookings.length) {
+export async function renderBookingList(bookings, category, { startIndex = 0, total } = {}) {
+  const count = total ?? bookings.length;
+  if (!count) {
     return `You have no ${CATEGORY_LABELS[category]} bookings.\n\nType *0* to return to the Main Menu, or *Back* for My Bookings.`;
   }
-  const head = `You have *${bookings.length} ${CATEGORY_LABELS[category]} booking${bookings.length > 1 ? 's' : ''}.*\nReply with the booking number to view details.\n`;
-  const rows = await Promise.all(bookings.map(async (b, i) => {
+  const head = `You have *${count} ${CATEGORY_LABELS[category]} booking${count > 1 ? 's' : ''}.*\nReply with the booking number to view details.\n`;
+  const rows = await Promise.all(bookings.map(async (b, i0) => {
+    const i = startIndex + i0;
     const nanny = b.nanny ? await User.findById(b.nanny).select('fullName') : null;
     const nannyLine = nanny ? `👩  ${nannyDisplayName(nanny)}` : '👩  Nanny Replacement Needed';
     const dateLine = b.isMultiDay
@@ -132,7 +142,12 @@ export async function renderBookingList(bookings, category) {
       : `📅  ${prettyDate(b.startDate)}`;
     return `*${i + 1}. Booking ID #${b.bookingNumber}*\n\n${nannyLine}\n${dateLine}\n⏰  ${timeRange(b.startTime, b.hoursPerDay)}\nStatus: ${statusLabel(b)}`;
   }));
-  return head + '\n' + rows.join('\n\n');
+
+  const shown = startIndex + bookings.length;
+  const more = shown < count
+    ? `\n\n_Showing ${startIndex + 1}-${shown} of ${count}._\nType *NEXT* to see more.`
+    : '';
+  return head + '\n' + rows.join('\n\n') + more;
 }
 
 const bookingsMenuHandler = async (ctx) => {
@@ -143,22 +158,58 @@ const bookingsMenuHandler = async (ctx) => {
   const category = categories[choice - 1];
 
   const bookings = await Booking.find(categoryQuery(ctx.session.user, category)).sort({ startDate: 1 });
-  const text = await renderBookingList(bookings, category);
+  const text = await renderBookingList(
+    bookings.slice(0, BOOKING_PAGE_SIZE),
+    category,
+    { startIndex: 0, total: bookings.length },
+  );
 
   return {
     text,
     state: 'FB_BOOKING_LIST',
-    listing: { kind: 'bookings', ids: bookings.map((b) => String(b._id)), page: 0, pageSize: 50 },
+    listing: {
+      kind: 'bookings',
+      ids: bookings.map((b) => String(b._id)),
+      page: 0,
+      pageSize: BOOKING_PAGE_SIZE,
+      category,
+    },
     data: { bookingCategory: category },
   };
 };
 bookingsMenuHandler.prompt = () => MY_BOOKINGS_MENU;
 on('FB_BOOKINGS_MENU', bookingsMenuHandler);
 
+/** One page of the booking list, using the ids already resolved. */
+async function renderBookingPage(ctx) {
+  const listing = ctx.session.listing;
+  const ids = listing?.ids || [];
+  const start = listing.page * listing.pageSize;
+  const pageIds = ids.slice(start, start + listing.pageSize);
+  const found = await Booking.find({ _id: { $in: pageIds } });
+  // Keep the order the list was built in.
+  found.sort((a, b) => pageIds.indexOf(String(a._id)) - pageIds.indexOf(String(b._id)));
+  return renderBookingList(found, listing.category || ctx.get('bookingCategory'), {
+    startIndex: start,
+    total: ids.length,
+  });
+}
+
 const bookingListHandler = async (ctx) => {
   const listing = ctx.session.listing;
   const ids = listing?.ids || [];
   if (!ids.length) return { text: MY_BOOKINGS_MENU, state: 'FB_BOOKINGS_MENU' };
+
+  if (ctx.command === 'NEXT') {
+    const maxPage = Math.ceil(ids.length / listing.pageSize) - 1;
+    if (listing.page >= maxPage) {
+      return `That's the end of the list.\n\n${await renderBookingPage(ctx)}`;
+    }
+    listing.page += 1;
+    ctx.session.listing = listing;
+    ctx.session.markModified('listing');
+    return renderBookingPage(ctx);
+  }
 
   // Accept either the row number or the booking ID typed directly.
   let bookingId = null;
@@ -322,10 +373,66 @@ export async function showReferral(ctx) {
     user.referralCode = makeReferralCode(user.fullName);
     await user.save();
   }
-  // A short path is easier to read out over the phone or retype from a
-  // screenshot than a long one with the code repeated in it.
-  const link = `${config.referral.linkBase || config.publicBaseUrl}/r/${user.referralCode}`;
   const { standardRate, discountedRate } = config.referral;
+
+  /**
+   * Get the live link for something, minting one only if needed.
+   *
+   * A link carries a 30-day deadline, so minting a fresh one every time the
+   * menu is opened would quietly reset the clock and leave a trail of dead
+   * codes in circulation. Reusing the live one means the link someone was
+   * given last week still means what it said.
+   */
+  const { createShareLink } = await import('../services/shareLink.js');
+  const { ShareLink } = await import('../models/index.js');
+
+  const liveLink = async (kind, nanny = null) => {
+    const query = { sharer: user._id, kind, status: 'active', expiresAt: { $gt: new Date() } };
+    if (nanny) query.nanny = nanny._id;
+    else query.nanny = { $exists: false };
+
+    const existing = await ShareLink.findOne(query).sort({ createdAt: -1 });
+    return existing || createShareLink({ sharer: user, kind, nanny });
+  };
+
+  const general = await liveLink('general');
+  // Falls back to the permanent code if PUBLIC_BASE_URL is unset — without a
+  // base there is no tracked URL to hand out at all.
+  const link = general.trackedUrl
+    || `${config.referral.linkBase || config.publicBaseUrl}/r/${general.linkId}`;
+
+  // A recommendation lands better when it names the nanny the family
+  // actually liked, so each favourite gets its own link. The sharer rides
+  // along in the code, so the credit still comes back here.
+  const favourites = await User.find({ _id: { $in: user.favouriteNannies || [] } })
+    .select('nickname fullName')
+    .limit(5);
+
+  const favouriteEntries = [];
+  for (const nanny of favourites) {
+    // eslint-disable-next-line no-await-in-loop
+    const nannyLink = await liveLink('nanny', nanny);
+    favouriteEntries.push({
+      nanny,
+      url: nannyLink.trackedUrl
+        || `${config.referral.linkBase || config.publicBaseUrl}/r/${nannyLink.linkId}`,
+    });
+  }
+
+  const favouriteLines = favouriteEntries.length
+    ? `\n\n\u{2B50} *Share a favourite nanny*\nRecommend one of your nannies directly:\n\n${
+      favouriteEntries.map(({ nanny, url }) =>
+        `\u{1F469} *${nannyDisplayName(nanny)}*\n${url}`).join('\n\n')
+    }`
+    : '';
+
+  // OR5, said out loud. A deadline nobody is told about is a deadline that
+  // only ever surprises people.
+  const days = Math.max(
+    0,
+    Math.ceil((new Date(general.expiresAt) - Date.now()) / 86400000),
+  );
+  const expiryLine = `\n\n\u{23F3} This link is valid for *${days} more day${days === 1 ? '' : 's'}*.`;
 
   return {
     text: `\u{1F381} *Refer a Friend*
@@ -334,7 +441,7 @@ Share My Nanny with your friends and earn rewards!
 
 Your link: ${link}
 
-You pay only *${discountedRate}* instead of *${standardRate}* as a thank you for your referral.
+You pay only *${discountedRate}* instead of *${standardRate}* as a thank you for your referral.${expiryLine}${favouriteLines}
 
 Type *0* to return to the Main Menu.`,
     state: 'FAMILY_MAIN_MENU',

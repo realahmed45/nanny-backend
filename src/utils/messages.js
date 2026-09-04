@@ -127,6 +127,16 @@ export const startDateConfirmed = (date) =>
 export const endDateConfirmed = (date) =>
   `\u{1F4C5} End date: *${prettyDate(date)}*`;
 
+/**
+ * Echo the repeat days back.
+ *
+ * Someone typing "monday, tuesday and wed" has no way of knowing whether we
+ * understood it, and the day count makes a wrong answer obvious immediately
+ * rather than at the payment screen.
+ */
+export const repeatDaysConfirmed = (days, dayCount) =>
+  `\u{1F501} Repeating on *${weekdayList(days)}*${dayCount ? ` \u2014 *${dayCount}* day${dayCount > 1 ? 's' : ''} in total` : ''}`;
+
 export const ASK_END_DATE =
   'When would you like the booking to end?\n\n📅 Type a weekday like *Friday*, or a date like *26 September*.';
 export const ASK_REPEAT_DAYS = `Which days should the booking repeat on?\n\n${numbered(WEEKDAYS)}\n8. All days of the week\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
@@ -495,6 +505,27 @@ export const NANNY_ASK_ID_BACK = 'Please upload your National Identity card docu
 export const NANNY_ASK_ADDRESS = 'Please provide your current residing address.';
 export const NANNY_ASK_MAP = 'Please attach a google map location of your current residing address.\nType *None* if google map location is unavailable';
 export const NANNY_ASK_PHOTO = 'Please upload your *profile photo*.';
+/**
+ * A short self-introduction video.
+ *
+ * Families are choosing who to leave a child with, and thirty seconds of
+ * someone speaking says more than any list of skills. Optional, because
+ * requiring it would block signups from anyone on a poor connection.
+ */
+export const NANNY_ASK_VIDEO = `\u{1F3A5} *Introduce yourself on video* (optional)
+
+Record a short video (up to about 1 minute) saying hello, your name, your experience, and what you enjoy about caring for children.
+
+Families see this on your profile, and nannies with a video get chosen more often.
+
+\u{1F4CE} Send the video now, or type *Skip* to do this later.`;
+
+export const NANNY_VIDEO_SAVED = `\u{2705} Got it \u2014 your video has been saved and will show on your profile once our team has checked it.`;
+
+export const NANNY_VIDEO_WRONG_TYPE = `\u{274C} That does not look like a video. Please record and send a short video, or type *Skip*.`;
+
+export const NANNY_VIDEO_TOO_LONG = `\u{26A0}\u{FE0F} That video is quite long. Please send one under about 2 minutes, or type *Skip*.`;
+
 export const NANNY_ASK_DAYS = `Which days are you available in the week?\nYou can later change it from My Availability section\n\n${numbered(WEEKDAYS)}\n8. All days of the week\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
 export const NANNY_ASK_AVAIL_START = 'What time are you available to start? 00:00 AM/PM';
 export const NANNY_ASK_AVAIL_HOURS = `How long can you provide a nanny service in a day?\n\n${durationMenu()}`;

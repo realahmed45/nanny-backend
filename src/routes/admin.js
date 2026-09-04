@@ -6,10 +6,15 @@ import {
 } from '../models/index.js';
 import { Payment, Payout } from '../models/Payment.js';
 import {
+  AuditLog, Note, ReferralClick, ShareLink, ShareLinkClick, LinkAbuseAlert,
+} from '../models/index.js';
+import {
   USER_ROLE, NANNY_STATUS, BOOKING_STATUS, PAYMENT_STATUS, PAYOUT_STATUS,
   TICKET_STATUS, CANCELLED_BY, SERVICE_DAY_STATUS, BOOKING_SUBSTATUS,
 } from '../utils/constants.js';
 import { signToken, requireAuth, requireRole } from '../middleware/auth.js';
+import { auditMutations } from '../middleware/audit.js';
+import { recordAudit } from '../services/audit.js';
 import { cancelBooking, markNannyCancelled, openNannyResponseWindow } from '../services/booking.js';
 import {
   refundBooking, releaseDuePayouts, queuePayout,
@@ -20,6 +25,11 @@ import { notifyUser, notifyPhone } from '../services/notify.js';
 import { money } from '../utils/format.js';
 import * as M from '../utils/messages.js';
 import config from '../config/index.js';
+import {
+  DEFAULT_PRICING as PRICING_DEFAULTS,
+  DEFAULT_REFERRAL_DISCOUNT as DISCOUNT_DEFAULTS,
+} from '../services/pricing.js';
+import { CALENDAR_DEFAULTS, ISO_DATE, getCalendar, daysInRange } from '../services/calendar.js';
 
 const router = express.Router();
 
@@ -43,6 +53,13 @@ router.post('/auth/login', wrap(async (req, res) => {
   admin.lastLoginAt = new Date();
   await admin.save();
 
+  // Recorded here rather than by the middleware, which cannot tell a
+  // successful sign-in from a rejected one.
+  await recordAudit(
+    { admin, ip: req.ip, get: (h) => req.get(h) },
+    { action: 'auth.login', targetType: 'admin', target: admin._id, targetLabel: admin.email },
+  );
+
   res.json({
     token: signToken(admin),
     admin: { id: admin._id, email: admin.email, name: admin.name, role: admin.role },
@@ -60,6 +77,9 @@ router.get('/auth/me', requireAuth, (req, res) => {
 
 // Everything below requires an authenticated admin.
 router.use(requireAuth);
+// Everything past this point is an authenticated admin action, and every
+// one that changes state is recorded.
+router.use(auditMutations);
 
 /* ------------------------------------------------------------------ *
  * Dashboard overview
@@ -364,6 +384,349 @@ router.get('/referrals', wrap(async (req, res) => {
   });
 }));
 
+/**
+ * Everything about one person's referrals.
+ *
+ * Both directions in one payload: who they referred and what came of each,
+ * and who referred them. Answering "is this discount earned?" otherwise
+ * means three separate lookups.
+ */
+router.get('/referrals/:id', wrap(async (req, res) => {
+  const user = await User.findById(req.params.id)
+    .populate('referredBy', 'fullName role referralCode phone email createdAt');
+  if (!user) return res.status(404).json({ error: 'Not found' });
+
+  const invited = await User.find({ referredBy: user._id })
+    .select('fullName role phone email createdAt emailVerified nannyStatus referralCode')
+    .sort({ createdAt: -1 });
+
+  // What each referral actually turned into, since a signup that never books
+  // is not the same as a customer.
+  const detail = await Promise.all(invited.map(async (u) => {
+    const isNanny = u.role === USER_ROLE.NANNY;
+    const query = { [isNanny ? 'nanny' : 'family']: u._id, status: { $ne: BOOKING_STATUS.DRAFT } };
+    const [bookings, firstBooking, spendRows] = await Promise.all([
+      Booking.countDocuments(query),
+      Booking.findOne(query).sort({ createdAt: 1 }).select('bookingNumber createdAt totalAmount'),
+      Booking.find({ ...query, status: BOOKING_STATUS.COMPLETED }).select('totalAmount'),
+    ]);
+
+    const totalSpent = spendRows.reduce((s, b) => s + (b.totalAmount || 0), 0);
+    const verified = isNanny ? u.nannyStatus === NANNY_STATUS.VERIFIED : Boolean(u.emailVerified);
+
+    return {
+      _id: String(u._id),
+      name: u.fullName,
+      role: u.role,
+      phone: u.phone,
+      email: u.email || null,
+      joinedAt: u.createdAt,
+      verified,
+      bookings,
+      firstBookingAt: firstBooking?.createdAt || null,
+      firstBookingNumber: firstBooking?.bookingNumber || null,
+      totalSpent,
+      status: bookings > 0 ? 'successful' : verified ? 'pending' : 'invited',
+    };
+  }));
+
+  // Clicks on this person's link, including the ones that went nowhere.
+  const clicks = await ReferralClick.find({ code: user.referralCode })
+    .sort({ createdAt: -1 })
+    .limit(100)
+    .select('createdAt convertedAt convertedTo userAgent ip');
+
+  const { discountStatus } = await import('../services/pricing.js');
+  const { getSettings } = await import('../services/settings.js');
+  const settings = await getSettings();
+
+  res.json({
+    user: {
+      _id: String(user._id),
+      name: user.fullName,
+      role: user.role,
+      phone: user.phone,
+      email: user.email || null,
+      referralCode: user.referralCode,
+      referralCount: user.referralCount || 0,
+      firstReferralAt: user.firstReferralAt || null,
+      discountCancelled: !!user.referralDiscountCancelled,
+    },
+    // Who brought them in, so the chain can be walked both ways.
+    referredBy: user.referredBy ? {
+      _id: String(user.referredBy._id),
+      name: user.referredBy.fullName,
+      role: user.referredBy.role,
+      referralCode: user.referredBy.referralCode,
+      phone: user.referredBy.phone,
+      joinedAt: user.referredBy.createdAt,
+    } : null,
+    referrals: detail,
+    clicks: clicks.map((c) => ({
+      at: c.createdAt,
+      converted: !!c.convertedAt,
+      convertedAt: c.convertedAt,
+      device: /iPhone|iPad/i.test(c.userAgent || '') ? 'iOS'
+        : /Android/i.test(c.userAgent || '') ? 'Android'
+        : /Macintosh|Windows/i.test(c.userAgent || '') ? 'Desktop' : 'Unknown',
+      ip: c.ip,
+    })),
+    summary: {
+      referred: detail.length,
+      successful: detail.filter((d) => d.status === 'successful').length,
+      pending: detail.filter((d) => d.status === 'pending').length,
+      revenue: detail.reduce((s, d) => s + d.totalSpent, 0),
+      clicks: clicks.length,
+      clicksConverted: clicks.filter((c) => c.convertedAt).length,
+      discount: discountStatus(user, settings.referralDiscount),
+    },
+  });
+}));
+
+/* ------------------------------------------------------------------ *
+ * Activity log — who did what
+ * ------------------------------------------------------------------ */
+
+router.get('/audit', wrap(async (req, res) => {
+  const { admin, action, targetType, target, search, page = 1, limit = 50 } = req.query;
+  const query = {};
+  if (admin) query.admin = admin;
+  if (action) query.action = action;
+  if (targetType) query.targetType = targetType;
+  if (target) query.target = target;
+  if (search) {
+    const re = new RegExp(escapeRe(search), 'i');
+    query.$or = [{ adminName: re }, { adminEmail: re }, { targetLabel: re }, { action: re }];
+  }
+
+  const result = await paginate(AuditLog, query, { page, limit });
+
+  // The filter dropdowns need to know what values actually occur.
+  const [actions, admins] = await Promise.all([
+    AuditLog.distinct('action'),
+    AuditLog.aggregate([
+      { $group: { _id: '$admin', name: { $first: '$adminName' }, email: { $first: '$adminEmail' } } },
+    ]),
+  ]);
+
+  res.json({
+    ...result,
+    filters: {
+      actions: actions.sort(),
+      admins: admins.filter((a) => a._id).map((a) => ({
+        _id: String(a._id), name: a.name, email: a.email,
+      })),
+    },
+  });
+}));
+
+/* ------------------------------------------------------------------ *
+ * Notes — what a person decided, as opposed to what the system did
+ * ------------------------------------------------------------------ */
+
+const NOTE_TARGETS = new Set(['booking', 'family', 'nanny']);
+
+router.get('/notes/:targetType/:target', wrap(async (req, res) => {
+  const { targetType, target } = req.params;
+  if (!NOTE_TARGETS.has(targetType)) return res.status(400).json({ error: 'Unknown note target' });
+
+  const items = await Note.find({ targetType, target }).sort({ createdAt: -1 });
+  res.json({ items });
+}));
+
+router.post('/notes/:targetType/:target', wrap(async (req, res) => {
+  const { targetType, target } = req.params;
+  if (!NOTE_TARGETS.has(targetType)) return res.status(400).json({ error: 'Unknown note target' });
+
+  const body = String(req.body?.body || '').trim();
+  if (!body) return res.status(400).json({ error: 'A note cannot be empty' });
+
+  const attachments = (Array.isArray(req.body?.attachments) ? req.body.attachments : [])
+    .filter((a) => a && typeof a.url === 'string' && a.url.trim())
+    .slice(0, 10)
+    .map((a) => ({
+      url: String(a.url).trim(),
+      name: String(a.name || '').slice(0, 200),
+      kind: ['image', 'pdf', 'document', 'other'].includes(a.kind) ? a.kind : 'other',
+      mimeType: String(a.mimeType || '').slice(0, 100),
+      sizeBytes: Number(a.sizeBytes) || undefined,
+    }));
+
+  const note = await Note.create({
+    targetType,
+    target,
+    body,
+    attachments,
+    author: req.admin?.id,
+    authorName: req.admin?.name || req.admin?.email,
+  });
+
+  res.locals.auditLabel = `${targetType} note`;
+  res.status(201).json({ ok: true, note });
+}));
+
+router.patch('/notes/:id', wrap(async (req, res) => {
+  const note = await Note.findById(req.params.id);
+  if (!note) return res.status(404).json({ error: 'Not found' });
+
+  const body = String(req.body?.body || '').trim();
+  if (!body) return res.status(400).json({ error: 'A note cannot be empty' });
+
+  res.locals.auditBefore = { body: note.body };
+  note.body = body;
+  note.editedAt = new Date();
+  note.editedBy = req.admin?.id;
+  note.editedByName = req.admin?.name || req.admin?.email;
+  await note.save();
+
+  res.json({ ok: true, note });
+}));
+
+router.delete('/notes/:id', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const note = await Note.findById(req.params.id);
+  if (!note) return res.status(404).json({ error: 'Not found' });
+  res.locals.auditBefore = { body: note.body, targetType: note.targetType };
+  await note.deleteOne();
+  res.json({ ok: true });
+}));
+
+/* ------------------------------------------------------------------ *
+ * Referral engine — click stream, links and abuse alerts
+ * ------------------------------------------------------------------ */
+
+/**
+ * The click stream.
+ *
+ * The only place that shows someone who tapped a link and walked away, which
+ * is why a blank skipReason means "this one won" and never "no idea".
+ */
+router.get('/referral-links/clicks', wrap(async (req, res) => {
+  const { linkId, phone, skipReason, sharer, page = 1, limit = 50 } = req.query;
+  const query = {};
+  if (linkId) query.linkId = linkId;
+  if (phone) query.clickerPhone = String(phone).replace(/\D/g, '');
+  if (skipReason !== undefined && skipReason !== '') query.skipReason = skipReason;
+  if (sharer) query.sharer = sharer;
+
+  const result = await paginate(ShareLinkClick, query, { page, limit }, {
+    populate: [{ path: 'sharer', select: 'fullName referralCode phone' }],
+  });
+
+  // What each outcome means, counted — a funnel rather than a list.
+  const outcomes = await ShareLinkClick.aggregate([
+    { $group: { _id: '$skipReason', n: { $sum: 1 } } },
+  ]);
+
+  res.json({
+    ...result,
+    outcomes: Object.fromEntries(outcomes.map((o) => [o._id || 'won', o.n])),
+  });
+}));
+
+/** Links, with what each one actually did. */
+router.get('/referral-links', wrap(async (req, res) => {
+  const { status, sharer, page = 1, limit = 25 } = req.query;
+  const query = {};
+  if (status) query.status = status;
+  if (sharer) query.sharer = sharer;
+
+  const result = await paginate(ShareLink, query, { page, limit }, {
+    populate: [
+      { path: 'sharer', select: 'fullName referralCode phone' },
+      { path: 'nanny', select: 'nickname fullName' },
+    ],
+  });
+
+  result.items = await Promise.all(result.items.map(async (l) => {
+    const doc = l.toObject ? l.toObject() : l;
+    const [clicks, replied] = await Promise.all([
+      ShareLinkClick.countDocuments({ linkId: doc.linkId }),
+      ShareLinkClick.countDocuments({ linkId: doc.linkId, becameInteraction: true }),
+    ]);
+    return {
+      ...doc,
+      clicks,
+      replied,
+      conversionCount: (doc.conversions || []).length,
+      live: doc.status === 'active' && new Date(doc.expiresAt) > new Date(),
+      daysLeft: Math.max(0, Math.ceil((new Date(doc.expiresAt) - Date.now()) / 86400000)),
+    };
+  }));
+
+  res.json(result);
+}));
+
+/** Revoke a link. The clicks it already earned are untouched. */
+router.post('/referral-links/:id/revoke', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const link = await ShareLink.findById(req.params.id);
+  if (!link) return res.status(404).json({ error: 'Link not found' });
+
+  res.locals.auditBefore = { status: link.status };
+  link.status = 'revoked';
+  await link.save();
+
+  res.locals.auditLabel = link.linkId;
+  res.json({ ok: true, link });
+}));
+
+/**
+ * Abuse alerts.
+ *
+ * Not optional while credit can be taken: last-click-wins means a claim can
+ * be sniped, and because credit is never split there is no way to compensate
+ * the robbed referrer afterwards. This list is the only door that catches it.
+ */
+router.get('/referral-alerts', wrap(async (req, res) => {
+  const { status = 'open', kind, page = 1, limit = 50 } = req.query;
+  const query = {};
+  if (status && status !== 'all') query.status = status;
+  if (kind) query.kind = kind;
+
+  const result = await paginate(LinkAbuseAlert, query, { page, limit }, {
+    populate: [{ path: 'sharer', select: 'fullName referralCode phone' }],
+  });
+
+  const [open, byKind] = await Promise.all([
+    LinkAbuseAlert.countDocuments({ status: 'open' }),
+    LinkAbuseAlert.aggregate([
+      { $match: { status: 'open' } },
+      { $group: { _id: '$kind', n: { $sum: 1 } } },
+    ]),
+  ]);
+
+  res.json({
+    ...result,
+    summary: { open, byKind: Object.fromEntries(byKind.map((k) => [k._id, k.n])) },
+  });
+}));
+
+router.patch('/referral-alerts/:id', wrap(async (req, res) => {
+  const alert = await LinkAbuseAlert.findById(req.params.id);
+  if (!alert) return res.status(404).json({ error: 'Alert not found' });
+
+  const status = req.body?.status;
+  if (!['open', 'reviewed', 'dismissed'].includes(status)) {
+    return res.status(400).json({ error: 'status must be open, reviewed or dismissed' });
+  }
+
+  res.locals.auditBefore = { status: alert.status };
+  alert.status = status;
+  alert.reviewNote = String(req.body?.note || '').slice(0, 500);
+  alert.reviewedBy = req.admin?.id;
+  alert.reviewedAt = new Date();
+  await alert.save();
+
+  res.locals.auditLabel = `${alert.kind} · ${alert.subject}`;
+  res.json({ ok: true, alert });
+}));
+
+/** Run the detectors now, rather than waiting for the twice-daily sweep. */
+router.post('/referral-alerts/sweep', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const { runAbuseSweep } = await import('../services/linkAbuseDetector.js');
+  const results = await runAbuseSweep();
+  res.json({ ok: true, results });
+}));
+
 /* ------------------------------------------------------------------ *
  * Nannies
  * ------------------------------------------------------------------ */
@@ -410,16 +773,125 @@ router.get('/nannies/:id', wrap(async (req, res) => {
   const nanny = await User.findOne({ _id: req.params.id, role: USER_ROLE.NANNY });
   if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
 
-  const [bookings, payouts, rating] = await Promise.all([
+  const [bookings, payouts, rating, earned, worked, notes] = await Promise.all([
     Booking.find({ nanny: nanny._id }).sort({ createdAt: -1 }).limit(20),
     Payout.find({ nanny: nanny._id }).sort({ createdAt: -1 }).limit(20),
     Booking.aggregate([
       { $match: { nanny: nanny._id, 'rating.stars': { $exists: true } } },
       { $group: { _id: null, avg: { $avg: '$rating.stars' }, count: { $sum: 1 } } },
     ]),
+    // What she has actually been paid, as opposed to what is still owed.
+    Payout.aggregate([
+      { $match: { nanny: nanny._id } },
+      { $group: {
+        _id: '$status',
+        total: { $sum: '$amount' },
+      } },
+    ]),
+    // Hours are counted from completed service days, so a booking that was
+    // cancelled halfway does not inflate the total.
+    Booking.aggregate([
+      { $match: { nanny: nanny._id } },
+      { $unwind: '$serviceDays' },
+      { $match: { 'serviceDays.status': SERVICE_DAY_STATUS.COMPLETED } },
+      { $group: {
+        _id: null,
+        hours: { $sum: '$serviceDays.hours' },
+        days: { $sum: 1 },
+      } },
+    ]),
+    Note.find({ targetType: 'nanny', target: nanny._id }).sort({ createdAt: -1 }),
   ]);
 
-  res.json({ nanny, bookings, payouts, rating: rating[0] || { avg: 0, count: 0 } });
+  const byStatus = Object.fromEntries(earned.map((e) => [e._id, e.total]));
+  const paid = (byStatus[PAYOUT_STATUS.COMPLETED] || 0) + (byStatus[PAYOUT_STATUS.FINAL_DONE] || 0);
+  const pendingPayout = (byStatus[PAYOUT_STATUS.PENDING] || 0) + (byStatus[PAYOUT_STATUS.PROCESSING] || 0);
+
+  res.json({
+    nanny,
+    bookings,
+    payouts,
+    rating: rating[0] || { avg: 0, count: 0 },
+    notes,
+    stats: {
+      totalEarned: paid,
+      pendingPayout,
+      lifetimeEarnings: paid + pendingPayout,
+      hoursWorked: worked[0]?.hours || 0,
+      daysWorked: worked[0]?.days || 0,
+      bookingsTotal: await Booking.countDocuments({ nanny: nanny._id }),
+      bookingsCompleted: await Booking.countDocuments({
+        nanny: nanny._id, status: BOOKING_STATUS.COMPLETED,
+      }),
+    },
+  });
+}));
+
+/* ------------------------------------------------------------------ *
+ * Nanny presentation videos
+ * ------------------------------------------------------------------ */
+
+router.post('/nannies/:id/videos', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const nanny = await User.findOne({ _id: req.params.id, role: USER_ROLE.NANNY });
+  if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
+
+  const url = String(req.body?.url || '').trim();
+  if (!/^https?:\/\//i.test(url)) {
+    return res.status(400).json({ error: 'A video needs a valid http(s) URL' });
+  }
+
+  nanny.videos = nanny.videos || [];
+  if (nanny.videos.length >= 5) {
+    return res.status(400).json({ error: 'A nanny can have at most 5 videos' });
+  }
+
+  nanny.videos.push({
+    url,
+    title: String(req.body?.title || '').slice(0, 120),
+    thumbnailUrl: String(req.body?.thumbnailUrl || '').trim() || undefined,
+    durationSeconds: Number(req.body?.durationSeconds) || undefined,
+    // An admin adding it has seen it, so it goes live straight away.
+    approved: true,
+    approvedAt: new Date(),
+  });
+  await nanny.save();
+
+  res.locals.auditLabel = nanny.nickname || nanny.fullName;
+  res.status(201).json({ ok: true, videos: nanny.videos });
+}));
+
+router.patch('/nannies/:id/videos/:videoId', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const nanny = await User.findOne({ _id: req.params.id, role: USER_ROLE.NANNY });
+  if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
+
+  const video = (nanny.videos || []).id(req.params.videoId);
+  if (!video) return res.status(404).json({ error: 'Video not found' });
+
+  res.locals.auditBefore = { approved: video.approved, title: video.title };
+  if (req.body?.title !== undefined) video.title = String(req.body.title).slice(0, 120);
+  if (req.body?.approved !== undefined) {
+    video.approved = !!req.body.approved;
+    video.approvedAt = video.approved ? new Date() : undefined;
+  }
+  await nanny.save();
+
+  res.locals.auditLabel = nanny.nickname || nanny.fullName;
+  res.json({ ok: true, videos: nanny.videos });
+}));
+
+router.delete('/nannies/:id/videos/:videoId', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const nanny = await User.findOne({ _id: req.params.id, role: USER_ROLE.NANNY });
+  if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
+
+  const video = (nanny.videos || []).id(req.params.videoId);
+  if (!video) return res.status(404).json({ error: 'Video not found' });
+
+  res.locals.auditBefore = { url: video.url, title: video.title };
+  video.deleteOne();
+  await nanny.save();
+
+  res.locals.auditLabel = nanny.nickname || nanny.fullName;
+  res.json({ ok: true, videos: nanny.videos });
 }));
 
 /** Approve a nanny and let her know over WhatsApp. */
@@ -539,11 +1011,52 @@ router.get('/families/:id', wrap(async (req, res) => {
   const family = await User.findOne({ _id: req.params.id, role: USER_ROLE.FAMILY });
   if (!family) return res.status(404).json({ error: 'Family not found' });
 
-  const [bookings, payments] = await Promise.all([
-    Booking.find({ family: family._id }).populate('nanny', 'fullName').sort({ createdAt: -1 }).limit(20),
+  const [bookings, payments, spend, hours, notes, referredBy, referredCount] = await Promise.all([
+    Booking.find({ family: family._id }).populate('nanny', 'fullName nickname').sort({ createdAt: -1 }).limit(20),
     Payment.find({ family: family._id }).sort({ createdAt: -1 }).limit(20),
+    // Money actually taken, which is what "total spent" has to mean — a
+    // pending transfer is not spend, and a refund gives it back.
+    Payment.aggregate([
+      { $match: { family: family._id } },
+      { $group: { _id: '$status', total: { $sum: '$amount' }, n: { $sum: 1 } } },
+    ]),
+    Booking.aggregate([
+      { $match: { family: family._id } },
+      { $unwind: '$serviceDays' },
+      { $match: { 'serviceDays.status': SERVICE_DAY_STATUS.COMPLETED } },
+      { $group: { _id: null, hours: { $sum: '$serviceDays.hours' }, days: { $sum: 1 } } },
+    ]),
+    Note.find({ targetType: 'family', target: family._id }).sort({ createdAt: -1 }),
+    family.referredBy
+      ? User.findById(family.referredBy).select('fullName role referralCode phone')
+      : null,
+    User.countDocuments({ referredBy: family._id }),
   ]);
-  res.json({ family, bookings, payments });
+
+  const byStatus = Object.fromEntries(spend.map((s) => [s._id, s.total]));
+  const paid = byStatus[PAYMENT_STATUS.COMPLETED] || 0;
+  const refunded = byStatus[PAYMENT_STATUS.REFUNDED] || 0;
+
+  res.json({
+    family,
+    bookings,
+    payments,
+    notes,
+    referredBy,
+    stats: {
+      totalSpent: paid - refunded,
+      totalPaid: paid,
+      totalRefunded: refunded,
+      pendingPayment: byStatus[PAYMENT_STATUS.IN_PROCESS] || 0,
+      hoursBooked: hours[0]?.hours || 0,
+      daysBooked: hours[0]?.days || 0,
+      bookingsTotal: await Booking.countDocuments({ family: family._id }),
+      bookingsCompleted: await Booking.countDocuments({
+        family: family._id, status: BOOKING_STATUS.COMPLETED,
+      }),
+      referralsMade: referredCount,
+    },
+  });
 }));
 
 router.post('/families/:id/verify-id', wrap(async (req, res) => {
@@ -577,10 +1090,34 @@ router.get('/bookings', wrap(async (req, res) => {
   }
   if (search) query.bookingNumber = new RegExp(escapeRe(search), 'i');
 
-  res.json(await paginate(Booking, query, req.query, {
+  const result = await paginate(Booking, query, req.query, {
     sort: { createdAt: -1 },
-    populate: [{ path: 'family', select: 'fullName phone email' }, { path: 'nanny', select: 'fullName phone' }],
-  }));
+    populate: [
+      { path: 'family', select: 'fullName phone email' },
+      { path: 'nanny', select: 'fullName nickname phone' },
+    ],
+  });
+
+  // "When does this one next need a nanny on site?" is the question the list
+  // is scanned for, and it is not the start date once a booking is running.
+  const now = new Date();
+  result.items = result.items.map((b) => {
+    const doc = b.toObject ? b.toObject() : b;
+    const upcoming = (doc.serviceDays || [])
+      .filter((d) => d.status === SERVICE_DAY_STATUS.SCHEDULED && new Date(d.startAt) >= now)
+      .sort((x, y) => new Date(x.startAt) - new Date(y.startAt))[0];
+
+    return {
+      ...doc,
+      bookedAt: doc.createdAt,
+      nextServiceAt: upcoming?.startAt || null,
+      nextServiceDate: upcoming?.date || null,
+      remainingDays: (doc.serviceDays || [])
+        .filter((d) => d.status === SERVICE_DAY_STATUS.SCHEDULED).length,
+    };
+  });
+
+  res.json(result);
 }));
 
 router.get('/bookings/:id', wrap(async (req, res) => {
@@ -589,12 +1126,37 @@ router.get('/bookings/:id', wrap(async (req, res) => {
     .populate('nanny', 'fullName phone hourlyRate ratingAverage');
   if (!booking) return res.status(404).json({ error: 'Booking not found' });
 
-  const [payments, payouts, thread] = await Promise.all([
+  const [payments, payouts, thread, notes, history] = await Promise.all([
     Payment.find({ booking: booking._id }).sort({ createdAt: -1 }),
     Payout.find({ booking: booking._id }).sort({ createdAt: -1 }),
     ChatThread.findOne({ booking: booking._id }),
+    Note.find({ targetType: 'booking', target: booking._id }).sort({ createdAt: -1 }),
+    // What the system did to this booking, next to what people wrote about it.
+    AuditLog.find({ target: booking._id }).sort({ createdAt: -1 }).limit(50),
   ]);
-  res.json({ booking, payments, payouts, chat: thread });
+
+  const now = new Date();
+  const upcoming = (booking.serviceDays || [])
+    .filter((d) => d.status === SERVICE_DAY_STATUS.SCHEDULED && new Date(d.startAt) >= now)
+    .sort((x, y) => new Date(x.startAt) - new Date(y.startAt))[0];
+
+  res.json({
+    booking,
+    payments,
+    payouts,
+    chat: thread,
+    notes,
+    history,
+    timing: {
+      bookedAt: booking.createdAt,
+      nextServiceAt: upcoming?.startAt || null,
+      nextServiceDate: upcoming?.date || null,
+      remainingDays: (booking.serviceDays || [])
+        .filter((d) => d.status === SERVICE_DAY_STATUS.SCHEDULED).length,
+      completedDays: (booking.serviceDays || [])
+        .filter((d) => d.status === SERVICE_DAY_STATUS.COMPLETED).length,
+    },
+  });
 }));
 
 /** Preview what a cancellation would refund, without performing it. */
@@ -1278,6 +1840,12 @@ router.get('/settings', wrap(async (req, res) => {
     emailProvider: config.resend.apiKey ? 'Resend' : config.smtp.host ? 'SMTP' : null,
     bank: config.bank,
     bankConfigured: !!(config.bank.accountNumber || config.bank.iban),
+
+    // Editable on the Pricing page. Defaults are sent when nothing has been
+    // saved yet, so the form always opens on the rates actually in use.
+    pricing: { ...PRICING_DEFAULTS, ...(runtime.pricing || {}) },
+    referralDiscount: { ...DISCOUNT_DEFAULTS, ...(runtime.referralDiscount || {}) },
+    calendar: { ...CALENDAR_DEFAULTS, ...(runtime.calendar || {}) },
   });
 }));
 
@@ -1288,7 +1856,112 @@ router.get('/settings', wrap(async (req, res) => {
  * operator needs to change while the bot is running, where waiting on a
  * redeploy would mean leaving customers stuck.
  */
-const RUNTIME_SETTINGS = new Set(['voiceTranscription']);
+const RUNTIME_SETTINGS = new Set([
+  'voiceTranscription',
+  'pricing',
+  'referralDiscount',
+  'calendar',
+]);
+
+/**
+ * Validate what the dashboard sends before it reaches live pricing.
+ *
+ * A typo in a rate field would otherwise quote every family the wrong price
+ * until someone noticed, so bad input is rejected rather than coerced.
+ * Returns a cleaned value, or throws with a message meant for the operator.
+ */
+function validateSetting(key, value) {
+  if (key === 'voiceTranscription') return !!value;
+
+  if (key === 'pricing') {
+    const out = { standard: {}, referred: {} };
+    for (const tier of ['standard', 'referred']) {
+      const table = value?.[tier];
+      if (!table || typeof table !== 'object') throw new Error(`pricing.${tier} is required`);
+      for (const [children, rate] of Object.entries(table)) {
+        const n = Number(children);
+        const amount = Number(rate);
+        if (!Number.isInteger(n) || n < 1 || n > 10) {
+          throw new Error(`pricing.${tier}: "${children}" is not a child count between 1 and 10`);
+        }
+        if (!Number.isFinite(amount) || amount < 0) {
+          throw new Error(`pricing.${tier}.${children} must be a positive amount`);
+        }
+        out[tier][n] = amount;
+      }
+      if (!Object.keys(out[tier]).length) throw new Error(`pricing.${tier} needs at least one rate`);
+    }
+    // A referred rate above the standard one is backwards, and would quietly
+    // charge people more for having referred a friend.
+    for (const children of Object.keys(out.referred)) {
+      const std = out.standard[children];
+      if (std !== undefined && out.referred[children] > std) {
+        throw new Error(`The referred rate for ${children} child(ren) is higher than the standard rate`);
+      }
+    }
+    const share = Number(value?.extraChildShare);
+    out.extraChildShare = Number.isFinite(share) && share >= 0 ? share : 0.35;
+    return out;
+  }
+
+  if (key === 'referralDiscount') {
+    const days = Number(value?.validityDays);
+    if (!Number.isFinite(days) || days < 0 || days > 3650) {
+      throw new Error('referralDiscount.validityDays must be between 0 and 3650');
+    }
+    return {
+      validityDays: Math.round(days),
+      neverExpires: !!value?.neverExpires,
+      stackReferrals: !!value?.stackReferrals,
+    };
+  }
+
+  if (key === 'calendar') {
+    const days = Array.isArray(value?.specialDays) ? value.specialDays : [];
+    const specialDays = days.map((d) => {
+      const date = String(d?.date || '').trim();
+      if (!ISO_DATE.test(date)) {
+        throw new Error(`calendar: "${date || '(blank)'}" is not a YYYY-MM-DD date`);
+      }
+      const multiplier = Number(d?.multiplier);
+      if (!Number.isFinite(multiplier) || multiplier < 0 || multiplier > 10) {
+        throw new Error(`calendar: the multiplier for ${date} must be between 0 and 10`);
+      }
+      return {
+        date,
+        label: String(d?.label || '').slice(0, 80),
+        multiplier,
+        closed: !!d?.closed,
+      };
+    });
+
+    // One entry per date, last write wins, so the list cannot hold two
+    // contradictory surcharges for the same day.
+    const byDate = new Map(specialDays.map((d) => [d.date, d]));
+
+    const nyepi = value?.nyepi || {};
+    const nyepiDates = (Array.isArray(nyepi.dates) ? nyepi.dates : [])
+      .map((d) => String(d || '').trim())
+      .filter((d) => ISO_DATE.test(d));
+
+    return {
+      specialDays: [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date)),
+      nyepi: {
+        enabled: nyepi.enabled !== false,
+        dates: [...new Set(nyepiDates)].sort(),
+        blockBookings: nyepi.blockBookings !== false,
+        eveDate: ISO_DATE.test(String(nyepi.eveDate || '')) ? nyepi.eveDate : null,
+        dayAfterMultiplier: Number.isFinite(Number(nyepi.dayAfterMultiplier))
+          ? Number(nyepi.dayAfterMultiplier) : 1,
+        eveMultiplier: Number.isFinite(Number(nyepi.eveMultiplier))
+          ? Number(nyepi.eveMultiplier) : 1,
+        notice: String(nyepi.notice || '').slice(0, 500),
+      },
+    };
+  }
+
+  return value;
+}
 
 router.patch('/settings', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
   const { setSetting, getSettings } = await import('../services/settings.js');
@@ -1302,7 +1975,16 @@ router.patch('/settings', requireRole('admin', 'super_admin'), wrap(async (req, 
     });
   }
 
-  for (const [key, value] of updates) {
+  // Validate everything before writing anything, so a bad field cannot leave
+  // half the settings applied.
+  let cleaned;
+  try {
+    cleaned = updates.map(([key, value]) => [key, validateSetting(key, value)]);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  for (const [key, value] of cleaned) {
     // eslint-disable-next-line no-await-in-loop
     await setSetting(key, value, req.admin?.id);
   }

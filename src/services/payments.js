@@ -85,6 +85,37 @@ export async function approveTransfer(payment, { adminId = null, note = '' } = {
     await booking.save();
   }
 
+  // Wire 4 of the referral engine — OR10.
+  //
+  // Here rather than at booking creation, because a booking is created unpaid
+  // and verified by a person later. Freezing on creation would settle
+  // attribution on bookings that were never paid, and could be used to lock a
+  // rival's referral out of a claim it had legitimately won.
+  //
+  // Safe to run more than once: this function returns early on an already
+  // approved payment, and the conversion is keyed on the booking anyway.
+  if (booking) {
+    try {
+      const { User } = await import('../models/index.js');
+      const family = await User.findById(booking.family);
+      if (family) {
+        const { resolveOnBooking } = await import('./referralAttribution.js');
+        const result = await resolveOnBooking(family, booking);
+
+        // OR3's cost, surfaced before anyone has to ask: a referrer swapped
+        // just before this booking means someone lost a claim they earned,
+        // and split credit is not an option here.
+        if (result.changed) {
+          const { checkCreditSniping } = await import('./linkAbuseDetector.js');
+          await checkCreditSniping(family, booking).catch(() => {});
+        }
+      }
+    } catch (err) {
+      // Attribution must never block a verified payment.
+      console.error('[referral] could not settle attribution:', err.message);
+    }
+  }
+
   return { success: true, payment, booking };
 }
 
