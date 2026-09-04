@@ -280,16 +280,25 @@ router.get('/calendar', wrap(async (req, res) => {
   const start = dayjs(`${month}-01`).startOf('month');
   const end = start.endOf('month');
 
-  const bookings = await Booking.find({
+  // One route serves both the platform calendar and a single person's own,
+  // because the two answer the same question at different scopes and would
+  // otherwise drift apart in what counts as an event.
+  const { family, nanny } = req.query;
+
+  const query = {
     status: { $ne: BOOKING_STATUS.DRAFT },
     startDate: { $lte: end.format('YYYY-MM-DD') },
     $or: [
       { endDate: { $gte: start.format('YYYY-MM-DD') } },
       { endDate: null, startDate: { $gte: start.format('YYYY-MM-DD') } },
     ],
-  })
+  };
+  if (family) query.family = family;
+  if (nanny) query.nanny = nanny;
+
+  const bookings = await Booking.find(query)
     .populate('family', 'fullName')
-    .populate('nanny', 'fullName');
+    .populate('nanny', 'fullName nickname');
 
   // One event per service day so multi-day bookings appear on each date.
   const events = [];
@@ -307,31 +316,84 @@ router.get('/calendar', wrap(async (req, res) => {
       ? 'replacement_needed' : b.status;
 
     const days = b.serviceDays?.length
-      ? b.serviceDays.map((d) => dayjs(d.startAt).format('YYYY-MM-DD'))
-      : [b.startDate];
+      ? b.serviceDays.map((d) => ({
+        date: dayjs(d.startAt).format('YYYY-MM-DD'),
+        time: dayjs(d.startAt).format('HH:mm'),
+        endTime: d.endAt ? dayjs(d.endAt).format('HH:mm') : null,
+        hours: d.hours,
+        // A day of a running booking has its own state: one can be
+        // completed while the booking as a whole is still ongoing.
+        dayStatus: d.status,
+        amount: d.amount,
+        rateLabel: d.rateLabel,
+      }))
+      : [{ date: b.startDate, time: b.startTime, hours: b.hoursPerDay, amount: b.totalAmount }];
 
-    for (const date of days) {
-      if (date < start.format('YYYY-MM-DD') || date > end.format('YYYY-MM-DD')) continue;
+    for (const day of days) {
+      if (day.date < start.format('YYYY-MM-DD') || day.date > end.format('YYYY-MM-DD')) continue;
       events.push({
-        date, label, status, bookingId: String(b._id), bookingNumber: b.bookingNumber,
-        family: b.family?.fullName, nanny: b.nanny?.fullName,
+        date: day.date,
+        label,
+        status,
+        dayStatus: day.dayStatus,
+        time: day.time,
+        endTime: day.endTime,
+        hours: day.hours,
+        amount: day.amount,
+        rateLabel: day.rateLabel,
+        bookingId: String(b._id),
+        bookingNumber: b.bookingNumber,
+        family: b.family?.fullName,
+        familyId: b.family ? String(b.family._id) : null,
+        // Families never see a nanny's legal name, and neither should a
+        // screen that might be turned towards one.
+        nanny: b.nanny ? (b.nanny.nickname || b.nanny.fullName) : null,
+        nannyId: b.nanny ? String(b.nanny._id) : null,
+        address: b.address?.addressLine,
+        isEmergency: !!b.isEmergency,
       });
     }
   }
 
   // Nanny blocked dates within the month.
-  const nannies = await User.find({
-    role: USER_ROLE.NANNY, 'availability.blockedDates': { $exists: true, $ne: [] },
-  }).select('fullName availability.blockedDates');
+  // A family has no blocked dates of their own, so this is skipped entirely
+  // when one is being asked about.
+  if (!family) {
+    const blockedQuery = {
+      role: USER_ROLE.NANNY, 'availability.blockedDates': { $exists: true, $ne: [] },
+    };
+    if (nanny) blockedQuery._id = nanny;
 
-  for (const n of nannies) {
-    for (const date of n.availability?.blockedDates || []) {
-      if (date < start.format('YYYY-MM-DD') || date > end.format('YYYY-MM-DD')) continue;
-      events.push({ date, label: `${n.fullName} — Blocked`, status: 'blocked', nanny: n.fullName });
+    const nannies = await User.find(blockedQuery)
+      .select('fullName nickname availability.blockedDates');
+
+    for (const n of nannies) {
+      const name = n.nickname || n.fullName;
+      for (const date of n.availability?.blockedDates || []) {
+        if (date < start.format('YYYY-MM-DD') || date > end.format('YYYY-MM-DD')) continue;
+        events.push({
+          date,
+          label: `${name} — Unavailable`,
+          status: 'blocked',
+          nanny: name,
+          nannyId: String(n._id),
+        });
+      }
     }
   }
 
-  res.json({ month, events });
+  // A month's worth of totals, so the calendar can say what it adds up to
+  // without the caller recomputing it from the events.
+  const worked = events.filter((e) => e.status !== 'blocked');
+  const summary = {
+    days: new Set(worked.map((e) => e.date)).size,
+    events: worked.length,
+    hours: worked.reduce((s, e) => s + (e.hours || 0), 0),
+    value: worked.reduce((s, e) => s + (e.amount || 0), 0),
+    bookings: new Set(worked.map((e) => e.bookingId)).size,
+  };
+
+  res.json({ month, events, summary });
 }));
 
 /* ------------------------------------------------------------------ *
