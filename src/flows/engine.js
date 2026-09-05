@@ -45,6 +45,19 @@ export const stay = (text, extra = {}) => ({ text, ...extra });
 /** Build the context object handed to every handler. */
 async function buildContext({ phone, text, mediaUrl, mediaId, mediaType, session }) {
   const user = session.user ? await User.findById(session.user) : null;
+
+  // Every inbound message is proof of life, and this is the one place they all
+  // pass through. Written unawaited and at most once a minute: an admin screen
+  // reads it to the minute, and a message must not wait on a bookkeeping write.
+  if (user) {
+    const now = Date.now();
+    const seen = user.lastSeenAt ? user.lastSeenAt.getTime() : 0;
+    if (now - seen > 60_000) {
+      User.updateOne({ _id: user._id }, { $set: { lastSeenAt: new Date(now) } })
+        .catch(() => {});
+    }
+  }
+
   return {
     phone,
     text: String(text ?? ''),
