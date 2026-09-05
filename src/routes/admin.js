@@ -593,12 +593,50 @@ router.get('/audit', wrap(async (req, res) => {
 
 const NOTE_TARGETS = new Set(['booking', 'family', 'nanny']);
 
+/**
+ * Notes for one view, with everything that view should see.
+ *
+ * A person's profile shows every note about them — general ones and ones tied
+ * to any of their bookings — so nothing is hidden inside a booking nobody
+ * reopens. A booking shows the whole conversation about the people on it, with
+ * the notes actually about that booking marked, so a note written elsewhere
+ * still surfaces where it is relevant instead of being lost.
+ *
+ * `relevant` is what the UI marks; it is computed here so both views agree.
+ */
+async function notesForView(targetType, target) {
+  if (targetType !== 'booking') {
+    const items = await Note.find({ targetType, target }).sort({ createdAt: -1 }).lean();
+    return items.map((n) => ({ ...n, relevant: true }));
+  }
+
+  const booking = await Booking.findById(target).select('family nanny bookingNumber');
+  if (!booking) return [];
+
+  // Everything written on this booking, plus every note about the people on
+  // it — theirs is the history that explains it.
+  const people = [booking.family, booking.nanny].filter(Boolean);
+  const items = await Note.find({
+    $or: [
+      { targetType: 'booking', target },
+      { bookingRef: target },
+      ...(people.length ? [{ targetType: { $in: ['family', 'nanny'] }, target: { $in: people } }] : []),
+    ],
+  }).sort({ createdAt: -1 }).lean();
+
+  return items.map((n) => ({
+    ...n,
+    // About this booking: written on it, or explicitly linked to it.
+    relevant: (n.targetType === 'booking' && String(n.target) === String(target))
+      || String(n.bookingRef || '') === String(target),
+  }));
+}
+
 router.get('/notes/:targetType/:target', wrap(async (req, res) => {
   const { targetType, target } = req.params;
   if (!NOTE_TARGETS.has(targetType)) return res.status(400).json({ error: 'Unknown note target' });
 
-  const items = await Note.find({ targetType, target }).sort({ createdAt: -1 });
-  res.json({ items });
+  res.json({ items: await notesForView(targetType, target) });
 }));
 
 router.post('/notes/:targetType/:target', wrap(async (req, res) => {
@@ -619,9 +657,30 @@ router.post('/notes/:targetType/:target', wrap(async (req, res) => {
       sizeBytes: Number(a.sizeBytes) || undefined,
     }));
 
+  // A note on a person is general unless it names one of their bookings. One
+  // written on a booking is always about that booking, so it links to itself
+  // and both views agree.
+  let bookingRef = null;
+  let bookingNumber = null;
+  if (targetType === 'booking') {
+    const own = await Booking.findById(target).select('bookingNumber');
+    bookingRef = target;
+    bookingNumber = own?.bookingNumber || null;
+  } else if (req.body?.bookingRef) {
+    const linked = await Booking.findById(req.body.bookingRef).select('bookingNumber family nanny');
+    if (!linked) return res.status(400).json({ error: 'That booking does not exist' });
+    // A note must not point at a booking this person had nothing to do with.
+    const theirs = [linked.family, linked.nanny].filter(Boolean).map(String).includes(String(target));
+    if (!theirs) return res.status(400).json({ error: 'That booking does not belong to this person' });
+    bookingRef = linked._id;
+    bookingNumber = linked.bookingNumber;
+  }
+
   const note = await Note.create({
     targetType,
     target,
+    bookingRef,
+    bookingNumber,
     body,
     attachments,
     author: req.admin?.id,
@@ -639,8 +698,27 @@ router.patch('/notes/:id', wrap(async (req, res) => {
   const body = String(req.body?.body || '').trim();
   if (!body) return res.status(400).json({ error: 'A note cannot be empty' });
 
-  res.locals.auditBefore = { body: note.body };
+  res.locals.auditBefore = { body: note.body, bookingRef: note.bookingRef };
   note.body = body;
+
+  // Re-filing a note is an edit like any other: a note put under the wrong
+  // booking is worse than an unlinked one, so it has to be correctable.
+  // A note written on a booking stays with it — that link is not a choice.
+  if (note.targetType !== 'booking' && 'bookingRef' in (req.body || {})) {
+    if (!req.body.bookingRef) {
+      note.bookingRef = null;
+      note.bookingNumber = null;
+    } else {
+      const linked = await Booking.findById(req.body.bookingRef).select('bookingNumber family nanny');
+      if (!linked) return res.status(400).json({ error: 'That booking does not exist' });
+      const theirs = [linked.family, linked.nanny].filter(Boolean)
+        .map(String).includes(String(note.target));
+      if (!theirs) return res.status(400).json({ error: 'That booking does not belong to this person' });
+      note.bookingRef = linked._id;
+      note.bookingNumber = linked.bookingNumber;
+    }
+  }
+
   note.editedAt = new Date();
   note.editedBy = req.admin?.id;
   note.editedByName = req.admin?.name || req.admin?.email;
@@ -867,7 +945,7 @@ router.get('/nannies/:id', wrap(async (req, res) => {
         days: { $sum: 1 },
       } },
     ]),
-    Note.find({ targetType: 'nanny', target: nanny._id }).sort({ createdAt: -1 }),
+    notesForView('nanny', nanny._id),
   ]);
 
   const byStatus = Object.fromEntries(earned.map((e) => [e._id, e.total]));
@@ -1093,7 +1171,7 @@ router.get('/families/:id', wrap(async (req, res) => {
       { $match: { 'serviceDays.status': SERVICE_DAY_STATUS.COMPLETED } },
       { $group: { _id: null, hours: { $sum: '$serviceDays.hours' }, days: { $sum: 1 } } },
     ]),
-    Note.find({ targetType: 'family', target: family._id }).sort({ createdAt: -1 }),
+    notesForView('family', family._id),
     family.referredBy
       ? User.findById(family.referredBy).select('fullName role referralCode phone')
       : null,
@@ -1123,6 +1201,78 @@ router.get('/families/:id', wrap(async (req, res) => {
       }),
       referralsMade: referredCount,
     },
+  });
+}));
+
+/**
+ * Both sides of one person's referral tree.
+ *
+ * `inbound` is who introduced them, `outbound` is everyone they introduced.
+ * Referrals run between families and nannies alike, so this serves any user
+ * rather than living under one role's routes.
+ *
+ * `referralAttribution` is authoritative — it knows whether a claim is still
+ * takeable, and carries the date the credit was actually made. The legacy
+ * `referredBy` is only a fallback for records written before the engine.
+ */
+router.get('/users/:id/referrals', wrap(async (req, res) => {
+  const user = await User.findById(req.params.id)
+    .select('fullName role referralCode referredBy referralAttribution referralEarnings createdAt');
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const att = user.referralAttribution || {};
+  const inboundId = att.referrer || user.referredBy || null;
+
+  const [inboundUser, outbound] = await Promise.all([
+    inboundId
+      ? User.findById(inboundId).select('fullName role referralCode phone blocked createdAt')
+      : null,
+    // Everyone claiming this person as referrer, by either record.
+    User.find({
+      $or: [
+        { 'referralAttribution.referrer': user._id },
+        { referredBy: user._id },
+      ],
+    })
+      .select('fullName role referralCode phone blocked createdAt referralAttribution')
+      .sort({ createdAt: -1 })
+      .limit(200),
+  ]);
+
+  res.json({
+    inbound: inboundUser
+      ? {
+        _id: String(inboundUser._id),
+        fullName: inboundUser.fullName,
+        role: inboundUser.role,
+        referralCode: inboundUser.referralCode,
+        phone: inboundUser.phone,
+        blocked: inboundUser.blocked,
+        // When the credit was made, then the click. Records written before the
+        // attribution engine have neither, so this person's own signup date
+        // stands in — the referral cannot predate it.
+        referredAt: att.creditedAt || att.clickedAt || user.createdAt || null,
+        // Says so plainly, rather than passing off a signup date as exact.
+        approximate: !(att.creditedAt || att.clickedAt),
+        status: att.status || 'credited',
+      }
+      : null,
+    outbound: outbound.map((u) => {
+      const a = u.referralAttribution || {};
+      const mine = a.referrer && String(a.referrer) === String(user._id);
+      return {
+        _id: String(u._id),
+        fullName: u.fullName,
+        role: u.role,
+        referralCode: u.referralCode,
+        phone: u.phone,
+        blocked: u.blocked,
+        referredAt: (mine && (a.creditedAt || a.clickedAt)) || u.createdAt || null,
+        approximate: !(mine && (a.creditedAt || a.clickedAt)),
+        status: mine ? (a.status || 'credited') : 'credited',
+      };
+    }),
+    earnings: user.referralEarnings || 0,
   });
 }));
 
@@ -1197,7 +1347,7 @@ router.get('/bookings/:id', wrap(async (req, res) => {
     Payment.find({ booking: booking._id }).sort({ createdAt: -1 }),
     Payout.find({ booking: booking._id }).sort({ createdAt: -1 }),
     ChatThread.findOne({ booking: booking._id }),
-    Note.find({ targetType: 'booking', target: booking._id }).sort({ createdAt: -1 }),
+    notesForView('booking', booking._id),
     // What the system did to this booking, next to what people wrote about it.
     AuditLog.find({ target: booking._id }).sort({ createdAt: -1 }).limit(50),
   ]);

@@ -25,6 +25,19 @@ const NoteSchema = new mongoose.Schema({
   targetType: { type: String, required: true, index: true },  // booking | family | nanny
   target: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
 
+  /**
+   * A note about a person is either general or about one of their bookings.
+   *
+   * Held here rather than by retargeting the note at the booking, so it stays
+   * on the person's profile either way: "she cancelled twice on #12391" belongs
+   * in her history, not only inside a booking nobody will reopen. A note
+   * written on the booking itself sets this to its own booking, so both views
+   * agree about what a note is attached to.
+   */
+  bookingRef: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking', index: true },
+  /** Denormalised so a note can name its booking without a second lookup. */
+  bookingNumber: String,
+
   body: { type: String, required: true },
   attachments: [AttachmentSchema],
 
