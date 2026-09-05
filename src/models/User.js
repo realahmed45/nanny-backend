@@ -137,6 +137,22 @@ const UserSchema = new mongoose.Schema({
     approved: { type: Boolean, default: false },
     approvedAt: Date,
   }],
+
+  /**
+   * Photos of her at work — with a family, on the job.
+   *
+   * Kept alongside the videos rather than folded into them: a nanny sends
+   * these as she goes, and a family scanning a profile reads a strip of
+   * photos differently from a video it has to sit through. Same approval
+   * gate, for the same reason — these show other people's children.
+   */
+  photos: [{
+    url: { type: String, required: true },
+    caption: String,
+    uploadedAt: { type: Date, default: Date.now },
+    approved: { type: Boolean, default: false },
+    approvedAt: Date,
+  }],
   age: Number,
   experienceYears: Number,
   languages: [RatedItemSchema],

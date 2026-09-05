@@ -632,6 +632,60 @@ async function notesForView(targetType, target) {
   }));
 }
 
+/**
+ * Every note, newest first — the one place to read what the team has been
+ * saying without opening profiles one at a time.
+ *
+ * Notes name their target by id only, so the people and bookings behind them
+ * are resolved here in two queries rather than one per note.
+ */
+router.get('/notes', wrap(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(100, Number(req.query.limit) || 25);
+
+  const filter = {};
+  if (NOTE_TARGETS.has(req.query.targetType)) filter.targetType = req.query.targetType;
+  if (req.query.search) {
+    filter.body = { $regex: String(req.query.search).slice(0, 100), $options: 'i' };
+  }
+
+  const [items, total] = await Promise.all([
+    Note.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+    Note.countDocuments(filter),
+  ]);
+
+  // Name the people and bookings these notes are about, so a reader knows
+  // whose note it is without following it.
+  const personIds = items.filter((n) => n.targetType !== 'booking').map((n) => n.target);
+  const bookingIds = [
+    ...items.filter((n) => n.targetType === 'booking').map((n) => n.target),
+    ...items.map((n) => n.bookingRef).filter(Boolean),
+  ];
+
+  const [people, bookings] = await Promise.all([
+    personIds.length
+      ? User.find({ _id: { $in: personIds } }).select('fullName nickname phone role').lean()
+      : [],
+    bookingIds.length
+      ? Booking.find({ _id: { $in: bookingIds } }).select('bookingNumber startDate status').lean()
+      : [],
+  ]);
+
+  const personById = new Map(people.map((p) => [String(p._id), p]));
+  const bookingById = new Map(bookings.map((b) => [String(b._id), b]));
+
+  res.json({
+    items: items.map((n) => ({
+      ...n,
+      person: n.targetType !== 'booking' ? personById.get(String(n.target)) || null : null,
+      booking: bookingById.get(String(n.targetType === 'booking' ? n.target : n.bookingRef)) || null,
+    })),
+    total,
+    page,
+    pages: Math.ceil(total / limit),
+  });
+}));
+
 router.get('/notes/:targetType/:target', wrap(async (req, res) => {
   const { targetType, target } = req.params;
   if (!NOTE_TARGETS.has(targetType)) return res.status(400).json({ error: 'Unknown note target' });
@@ -691,9 +745,25 @@ router.post('/notes/:targetType/:target', wrap(async (req, res) => {
   res.status(201).json({ ok: true, note });
 }));
 
+/**
+ * How long a note stays editable.
+ *
+ * A note is a record of what someone decided, and others act on it. Fixing a
+ * typo or a wrong booking soon after writing is honest; rewriting a note a day
+ * later, after events have moved on, destroys its value as evidence. Three
+ * hours covers the former and not the latter.
+ */
+const NOTE_EDIT_WINDOW_MS = 3 * 60 * 60 * 1000;
+
 router.patch('/notes/:id', wrap(async (req, res) => {
   const note = await Note.findById(req.params.id);
   if (!note) return res.status(404).json({ error: 'Not found' });
+
+  if (Date.now() - note.createdAt.getTime() > NOTE_EDIT_WINDOW_MS) {
+    return res.status(403).json({
+      error: 'This note is more than 3 hours old and can no longer be edited. Add a new note instead.',
+    });
+  }
 
   const body = String(req.body?.body || '').trim();
   if (!body) return res.status(400).json({ error: 'A note cannot be empty' });
@@ -1037,6 +1107,75 @@ router.delete('/nannies/:id/videos/:videoId', requireRole('admin', 'super_admin'
 
   res.locals.auditLabel = nanny.nickname || nanny.fullName;
   res.json({ ok: true, videos: nanny.videos });
+}));
+
+/* ------------------------------------------------------------------ *
+ * Nanny photos
+ *
+ * Kept separate from the videos above because they arrive differently: a
+ * nanny sends these as she works, so there are more of them and they are
+ * approved in batches rather than watched one at a time.
+ * ------------------------------------------------------------------ */
+
+router.post('/nannies/:id/photos', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const nanny = await User.findOne({ _id: req.params.id, role: USER_ROLE.NANNY });
+  if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
+
+  const url = String(req.body?.url || '').trim();
+  if (!/^https?:\/\//i.test(url)) {
+    return res.status(400).json({ error: 'A photo needs a valid http(s) URL' });
+  }
+
+  nanny.photos = nanny.photos || [];
+  if (nanny.photos.length >= 30) {
+    return res.status(400).json({ error: 'A nanny can have at most 30 photos' });
+  }
+
+  nanny.photos.push({
+    url,
+    caption: String(req.body?.caption || '').slice(0, 200),
+    // An admin adding it has seen it, so it goes live straight away.
+    approved: true,
+    approvedAt: new Date(),
+  });
+  await nanny.save();
+
+  res.locals.auditLabel = nanny.nickname || nanny.fullName;
+  res.status(201).json({ ok: true, photos: nanny.photos });
+}));
+
+router.patch('/nannies/:id/photos/:photoId', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const nanny = await User.findOne({ _id: req.params.id, role: USER_ROLE.NANNY });
+  if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
+
+  const photo = (nanny.photos || []).id(req.params.photoId);
+  if (!photo) return res.status(404).json({ error: 'Photo not found' });
+
+  res.locals.auditBefore = { approved: photo.approved, caption: photo.caption };
+  if (req.body?.caption !== undefined) photo.caption = String(req.body.caption).slice(0, 200);
+  if (req.body?.approved !== undefined) {
+    photo.approved = !!req.body.approved;
+    photo.approvedAt = photo.approved ? new Date() : undefined;
+  }
+  await nanny.save();
+
+  res.locals.auditLabel = nanny.nickname || nanny.fullName;
+  res.json({ ok: true, photos: nanny.photos });
+}));
+
+router.delete('/nannies/:id/photos/:photoId', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const nanny = await User.findOne({ _id: req.params.id, role: USER_ROLE.NANNY });
+  if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
+
+  const photo = (nanny.photos || []).id(req.params.photoId);
+  if (!photo) return res.status(404).json({ error: 'Photo not found' });
+
+  res.locals.auditBefore = { url: photo.url, caption: photo.caption };
+  photo.deleteOne();
+  await nanny.save();
+
+  res.locals.auditLabel = nanny.nickname || nanny.fullName;
+  res.json({ ok: true, photos: nanny.photos });
 }));
 
 /** Approve a nanny and let her know over WhatsApp. */

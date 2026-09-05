@@ -512,15 +512,25 @@ export const NANNY_ASK_PHOTO = 'Please upload your *profile photo*.';
  * someone speaking says more than any list of skills. Optional, because
  * requiring it would block signups from anyone on a poor connection.
  */
-export const NANNY_ASK_VIDEO = `\u{1F3A5} *Introduce yourself on video* (optional)
+export const NANNY_ASK_VIDEO = `\u{1F3A5} *Add a video and photos* (optional)
+
+Add a video and photos showing you with the family or when you are working.
 
 Record a short video (up to about 1 minute) saying hello, your name, your experience, and what you enjoy about caring for children.
 
-Families see this on your profile, and nannies with a video get chosen more often.
+Families see these on your profile, and nannies with a video get chosen more often.
 
-\u{1F4CE} Send the video now, or type *Skip* to do this later.`;
+\u{1F4F8} Keep adding videos and pictures from time to time — send them any time and we will add them to your profile.
 
-export const NANNY_VIDEO_SAVED = `\u{2705} Got it \u2014 your video has been saved and will show on your profile once our team has checked it.`;
+\u{1F4CE} Send a video or photo now, or type *Skip* to do this later.`;
+
+export const NANNY_VIDEO_SAVED = `\u{2705} Got it \u2014 your video has been saved and will show on your profile once our team has checked it.
+
+Send another photo or video, or type *Done* to carry on.`;
+
+export const NANNY_PHOTO_SAVED = `\u{2705} Photo saved \u2014 it will show on your profile once our team has checked it.
+
+Send another photo or video, or type *Done* to carry on.`;
 
 export const NANNY_VIDEO_WRONG_TYPE = `\u{274C} That does not look like a video. Please record and send a short video, or type *Skip*.`;
 

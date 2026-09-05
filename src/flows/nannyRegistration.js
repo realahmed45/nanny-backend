@@ -227,26 +227,34 @@ on('NR_PHOTO', photoHandler);
  * they expected someone talking.
  */
 const videoHandler = async (ctx) => {
-  if (ctx.command === 'SKIP' || ctx.command === 'NONE' || /^skip$/i.test(String(ctx.text || '').trim())) {
+  // "Done" and "Skip" both move on: she may have sent several already, or
+  // none at all, and either way this is how she leaves.
+  if (ctx.command === 'SKIP' || ctx.command === 'NONE'
+      || /^(skip|done)$/i.test(String(ctx.text || '').trim())) {
     return { text: M.NANNY_ASK_DAYS, state: 'NR_DAYS' };
   }
 
   if (!ctx.mediaUrl) return M.NANNY_ASK_VIDEO;
 
-  // The provider reports the media type; anything plainly not a video is
+  // We ask for a video and photos, so both are accepted; anything else is
   // explained rather than saved as a broken profile.
   const type = String(ctx.mediaType || '').toLowerCase();
-  if (type && !type.includes('video')) {
+  const isImage = type.includes('image');
+  if (type && !type.includes('video') && !isImage) {
     return M.NANNY_VIDEO_WRONG_TYPE;
+  }
+
+  // She may send several before moving on, so collect rather than replace and
+  // stay put until she says she is done.
+  if (isImage) {
+    ctx.set('introPhotoUrls', [...ctx.get('introPhotoUrls', []), ctx.mediaUrl].slice(0, 10));
+    return M.NANNY_PHOTO_SAVED;
   }
 
   ctx.set('introVideoUrl', ctx.mediaUrl);
   ctx.set('introVideoMediaId', ctx.mediaId);
 
-  return [
-    { text: M.NANNY_VIDEO_SAVED },
-    { text: M.NANNY_ASK_DAYS, state: 'NR_DAYS' },
-  ];
+  return M.NANNY_VIDEO_SAVED;
 };
 videoHandler.prompt = () => M.NANNY_ASK_VIDEO;
 on('NR_VIDEO', videoHandler);
@@ -293,6 +301,11 @@ const availHoursHandler = async (ctx) => {
   const videoUrl = ctx.get('introVideoUrl');
   if (videoUrl) {
     user.videos = [{ url: videoUrl, title: 'Introduction', approved: false }];
+  }
+  // Same gate as the video: these show other people's children.
+  const photoUrls = ctx.get('introPhotoUrls', []);
+  if (photoUrls.length) {
+    user.photos = photoUrls.map((url) => ({ url, approved: false }));
   }
   user.availability = {
     days: ctx.get('availableDays', []),
