@@ -604,10 +604,36 @@ const NOTE_TARGETS = new Set(['booking', 'family', 'nanny']);
  *
  * `relevant` is what the UI marks; it is computed here so both views agree.
  */
+/**
+ * Fill in the booking number every note should show.
+ *
+ * It is denormalised at write time, but notes written before that field
+ * existed have none, and a note written on a booking never stored its own.
+ * The number is how a note is identified on screen, so it is resolved here
+ * rather than letting the UI fall back to a truncated id.
+ */
+async function withBookingNumbers(items) {
+  const missing = items
+    .filter((n) => !n.bookingNumber)
+    .map((n) => (n.targetType === 'booking' ? n.target : n.bookingRef))
+    .filter(Boolean);
+  if (!missing.length) return items;
+
+  const bookings = await Booking.find({ _id: { $in: missing } })
+    .select('bookingNumber').lean();
+  const numberById = new Map(bookings.map((b) => [String(b._id), b.bookingNumber]));
+
+  return items.map((n) => {
+    if (n.bookingNumber) return n;
+    const id = n.targetType === 'booking' ? n.target : n.bookingRef;
+    return id ? { ...n, bookingNumber: numberById.get(String(id)) || null } : n;
+  });
+}
+
 async function notesForView(targetType, target) {
   if (targetType !== 'booking') {
     const items = await Note.find({ targetType, target }).sort({ createdAt: -1 }).lean();
-    return items.map((n) => ({ ...n, relevant: true }));
+    return (await withBookingNumbers(items)).map((n) => ({ ...n, relevant: true }));
   }
 
   const booking = await Booking.findById(target).select('family nanny bookingNumber');
@@ -624,7 +650,7 @@ async function notesForView(targetType, target) {
     ],
   }).sort({ createdAt: -1 }).lean();
 
-  return items.map((n) => ({
+  return (await withBookingNumbers(items)).map((n) => ({
     ...n,
     // About this booking: written on it, or explicitly linked to it.
     relevant: (n.targetType === 'booking' && String(n.target) === String(target))
