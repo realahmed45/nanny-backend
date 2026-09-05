@@ -343,6 +343,11 @@ router.get('/calendar', wrap(async (req, res) => {
         rateLabel: day.rateLabel,
         bookingId: String(b._id),
         bookingNumber: b.bookingNumber,
+        // The span of the whole booking, so a day of a long booking can say
+        // when the engagement itself ends rather than just when that day does.
+        startDate: b.startDate,
+        endDate: b.endDate,
+        totalDays: b.serviceDays?.length || 1,
         family: b.family?.fullName,
         familyId: b.family ? String(b.family._id) : null,
         // Families never see a nanny's legal name, and neither should a

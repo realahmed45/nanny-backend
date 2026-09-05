@@ -89,7 +89,17 @@ export const config = {
     instructions: process.env.BANK_INSTRUCTIONS || '',
   },
 
-  currency: process.env.CURRENCY || 'IDR',
+  // The platform prices, charges, and pays out in rupiah, and every amount
+  // stored is a rupiah figure. A CURRENCY of anything else does not convert
+  // those numbers — it just relabels them, so "USD 16,220,000" is a price
+  // wrong by a factor of about fifteen thousand. The env var can only pick a
+  // currency the code actually supports; anything else is ignored with a warning.
+  currency: (() => {
+    const want = (process.env.CURRENCY || 'IDR').trim().toUpperCase();
+    if (want === 'IDR') return 'IDR';
+    console.warn(`[config] CURRENCY=${want} ignored — amounts are stored in rupiah; using IDR.`);
+    return 'IDR';
+  })(),
   transportFee: {
     min: int(process.env.TRANSPORT_FEE_MIN, 50000),
     max: int(process.env.TRANSPORT_FEE_MAX, 100000),

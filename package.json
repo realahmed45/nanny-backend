@@ -8,7 +8,7 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "seed": "node src/scripts/seed.js",
-    "test": "node --test test/policy.test.js test/parse.test.js test/referral.test.js test/conversation.test.js"
+    "test": "node --test test/policy.test.js test/parse.test.js test/referral.test.js test/conversation.test.js test/money.test.js"
   },
   "dependencies": {
     "axios": "^1.7.9",

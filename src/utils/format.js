@@ -7,9 +7,10 @@ const SYMBOLS = { IDR: 'Rp' };
 
 export const money = (n, currency = config.currency) => {
   // The platform charges in rupiah, written as a prefix with no decimals.
-  // Any other currency falls back to its code rather than a symbol — a
-  // guessed symbol on an unconfigured currency is worse than a plain code.
-  const sym = `${SYMBOLS[currency] || currency} `;
+  // Every amount stored is a rupiah figure, so an unknown currency code would
+  // relabel prices rather than convert them — and these strings go out to
+  // families and nannies on WhatsApp, where a wrong unit is a wrong quote.
+  const sym = `${SYMBOLS[currency] || SYMBOLS.IDR} `;
   const v = Number(n || 0);
   return `${sym}${v % 1 === 0 ? v.toLocaleString('en-US') : v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
