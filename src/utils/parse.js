@@ -12,6 +12,24 @@ export function lower(text = '') {
   return clean(text).toLowerCase();
 }
 
+/**
+ * The one word that wakes the bot up.
+ *
+ * Matched case-insensitively and ignoring surrounding punctuation, because
+ * phones capitalise the first letter of a message automatically and people
+ * add greetings around it. A referral link prefills "nanny ABC123", so the
+ * word arrives on its own on the first message from a link too.
+ */
+export const START_WORD = 'nanny';
+
+export const isStartWord = (text) =>
+  clean(text)
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, '')   // drop punctuation, keep word breaks
+    .split(/\s+/)
+    .filter(Boolean)
+    .includes(START_WORD);
+
 /** Detect a global command (SKIP / 0 / NEXT / BYE / CANCEL / BACK / NONE). */
 export function detectCommand(text) {
   const t = lower(text);

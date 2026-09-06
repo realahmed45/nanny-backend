@@ -1,6 +1,6 @@
 import { Session, User, MessageLog } from '../models/index.js';
 import { sendText, normalizePhone } from '../providers/ultramsg.js';
-import { detectCommand } from '../utils/parse.js';
+import { detectCommand, isStartWord } from '../utils/parse.js';
 import { USER_ROLE } from '../utils/constants.js';
 import * as M from '../utils/messages.js';
 
@@ -199,6 +199,21 @@ export async function handleMessage({ phone: rawPhone, text = '', mediaUrl, medi
   if (!session) session = await Session.create({ phone, state: 'START' });
 
   session.lastMessageAt = new Date();
+
+  // Nothing but the trigger word wakes a conversation that has not started.
+  //
+  // This sits ahead of everything else on purpose. Global commands used to run
+  // before the START handler got a look, so a stranger typing "0" or "restart"
+  // was answered with a menu without ever saying the word; and a voice note
+  // would have been transcribed — a paid call — just to be ignored. The message
+  // is still logged so the dashboard shows that someone tried.
+  if (session.state === 'START' && !isStartWord(text)) {
+    await MessageLog.create({
+      direction: 'in', phone, body: text, mediaUrl, state: session.state, role: session.role,
+    }).catch(() => {});
+    await session.save();
+    return [];
+  }
 
   const voice = await resolveVoiceNote({ text, mediaUrl, mediaType });
 

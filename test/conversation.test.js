@@ -562,11 +562,19 @@ test('time is understood however it is written', async () => {
 });
 
 test('only the word "nanny" starts the bot', async () => {
-  // Anything else gets a nudge rather than the menu, so a stray message
-  // never drops someone into registration half-way.
-  for (const text of ['hi', 'hello', 'Hi there', 'nannies', '1']) {
+  const { Session } = await import('../src/models/index.js');
+
+  // Anything else is ignored outright: no reply, no change of state. That
+  // includes the global commands, which used to run before the trigger check
+  // and let a stranger typing "0" land in a main menu without ever saying
+  // the word.
+  const strays = ['hi', 'hello', 'Hi there', 'nannies', '1',
+    '0', 'back', 'restart', 'start over', 'return back'];
+  for (const text of strays) {
     const reply = await say(FAMILY, text);
-    assert.match(reply, /send:\s*\*nanny\*/i, `"${text}" should only get the hint`);
+    assert.equal(reply, '', `"${text}" should get no reply at all`);
+    const session = await Session.findOne({ phone: FAMILY });
+    assert.equal(session.state, 'START', `"${text}" should leave the session untouched`);
   }
 
   // Phones capitalise the first letter, so casing must not matter.
@@ -576,6 +584,36 @@ test('only the word "nanny" starts the bot', async () => {
     assert.match(reply, /Welcome to \*My Nanny\*/, `"${text}" should start the bot`);
     assert.match(reply, /I'm a Family/);
   }
+});
+
+test('the video step keeps every video and photo a nanny sends', async () => {
+  const { Session } = await import('../src/models/index.js');
+
+  // Drop straight into the step: the twenty questions before it are covered
+  // by createVerifiedNanny and are not what is under test here.
+  await Session.create({ phone: NANNY, state: 'NR_VIDEO', role: 'nanny' });
+
+  // Two videos and a photo, the way Ahmed sent them — the first video used
+  // to be overwritten by the second.
+  await say(NANNY, '', { mediaUrl: 'https://cdn/v1.mp4', mediaType: 'video' });
+  await say(NANNY, '', { mediaUrl: 'https://cdn/v2.mp4', mediaType: 'video' });
+  let reply = await say(NANNY, '', { mediaUrl: 'https://cdn/p1.jpg', mediaType: 'image' });
+  assert.match(reply, /Photo saved/);
+
+  let session = await Session.findOne({ phone: NANNY });
+  assert.equal(session.state, 'NR_VIDEO', 'stays on the step until she says Done');
+  assert.deepEqual(session.data.introVideoUrls, ['https://cdn/v1.mp4', 'https://cdn/v2.mp4']);
+  assert.deepEqual(session.data.introPhotoUrls, ['https://cdn/p1.jpg']);
+
+  // Anything that is neither is refused without losing what was collected.
+  reply = await say(NANNY, '', { mediaUrl: 'https://cdn/x.pdf', mediaType: 'document' });
+  assert.match(reply, /does not look like a video/);
+
+  reply = await say(NANNY, 'Done');
+  assert.match(reply, /Which days are you available/);
+  session = await Session.findOne({ phone: NANNY });
+  assert.equal(session.state, 'NR_DAYS');
+  assert.equal(session.data.introVideoUrls.length, 2, 'nothing lost on the way out');
 });
 
 test('family registration collects name, email and verifies OTP', async () => {

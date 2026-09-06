@@ -42,12 +42,6 @@ export const NANNY_MAIN_MENU = `What would you like to do?
 export const OTP_SEND_FAILED =
   '\u{26A0}\u{FE0F} We could not send the email just now. Our team has been alerted.\n\nIf you do not receive a code, type *Resend* to try again, or *0* to return to the Main Menu.';
 
-export const START_HINT = `\u{1F44B} Welcome to *My Nanny*!
-
-To get started, just send:
-
-*nanny*`;
-
 export const ROLE_PICKER = `👋 Welcome to *My Nanny*
 
 Are you looking for childcare, or do you want to work as a nanny?

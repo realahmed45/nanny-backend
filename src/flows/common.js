@@ -1,7 +1,7 @@
 import { on, mainMenuFor, mainMenuState } from './engine.js';
 import { User, Session, Otp } from '../models/index.js';
 import { USER_ROLE, NANNY_STATUS } from '../utils/constants.js';
-import { parseChoice, parseEmail, parseOtp, clean, lower } from '../utils/parse.js';
+import { parseChoice, parseEmail, parseOtp, clean, lower, isStartWord } from '../utils/parse.js';
 import { sendVerificationCode } from '../providers/email.js';
 import { firstName } from '../utils/format.js';
 import * as M from '../utils/messages.js';
@@ -36,21 +36,6 @@ export async function issueOtp(phone, email) {
     return { code, delivered: false, error: err.message };
   }
 }
-
-/**
- * The word that wakes the bot up. Matched case-insensitively and ignoring
- * surrounding punctuation, because phones capitalise the first letter of a
- * message automatically and people add greetings around it.
- */
-const START_WORD = 'nanny';
-
-const isStartWord = (text) =>
-  clean(text)
-    .toLowerCase()
-    .replace(/[^a-z\s]/g, '')   // drop punctuation, keep word breaks
-    .split(/\s+/)
-    .filter(Boolean)
-    .includes(START_WORD);
 
 /**
  * "Return back": drop straight to the role picker.
@@ -161,8 +146,10 @@ export async function applyReferral(ctx, newUser) {
 
 /** Landing state: greet, route returning users, ask new ones who they are. */
 on('START', async (ctx) => {
-  // Anything other than the trigger word gets a nudge, not a menu.
-  if (!isStartWord(ctx.text)) return M.START_HINT;
+  // The engine already stays silent to anything but the trigger word before
+  // it reaches here; this covers the fallback path where an unknown state is
+  // routed to START. Silent too — a stray message must not wake the bot.
+  if (!isStartWord(ctx.text)) return null;
 
   // A referral link prefills the code, so it is here or nowhere.
   await captureReferralCode(ctx).catch(() => {});
