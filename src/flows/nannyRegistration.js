@@ -244,15 +244,14 @@ const videoHandler = async (ctx) => {
     return M.NANNY_VIDEO_WRONG_TYPE;
   }
 
-  // She may send several before moving on, so collect rather than replace and
-  // stay put until she says she is done.
+  // She may send several before moving on, so both kinds collect rather than
+  // replace, and the step stays put until she says she is done.
   if (isImage) {
     ctx.set('introPhotoUrls', [...ctx.get('introPhotoUrls', []), ctx.mediaUrl].slice(0, 10));
     return M.NANNY_PHOTO_SAVED;
   }
 
-  ctx.set('introVideoUrl', ctx.mediaUrl);
-  ctx.set('introVideoMediaId', ctx.mediaId);
+  ctx.set('introVideoUrls', [...ctx.get('introVideoUrls', []), ctx.mediaUrl].slice(0, 5));
 
   return M.NANNY_VIDEO_SAVED;
 };
@@ -297,10 +296,17 @@ const availHoursHandler = async (ctx) => {
   user.profilePhotoUrl = ctx.get('profilePhotoUrl');
   user.documents = ctx.get('documents', []);
 
-  // Held back from families until someone has watched it.
-  const videoUrl = ctx.get('introVideoUrl');
-  if (videoUrl) {
-    user.videos = [{ url: videoUrl, title: 'Introduction', approved: false }];
+  // Held back from families until someone has watched them. `introVideoUrl`
+  // is the older single-video key, still read so a registration already in
+  // progress when this shipped does not lose what she sent.
+  const legacy = ctx.get('introVideoUrl');
+  const videoUrls = ctx.get('introVideoUrls', legacy ? [legacy] : []);
+  if (videoUrls.length) {
+    user.videos = videoUrls.map((url, i) => ({
+      url,
+      title: i === 0 ? 'Introduction' : `Video ${i + 1}`,
+      approved: false,
+    }));
   }
   // Same gate as the video: these show other people's children.
   const photoUrls = ctx.get('introPhotoUrls', []);
