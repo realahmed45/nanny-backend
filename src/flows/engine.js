@@ -2,6 +2,7 @@ import { Session, User, MessageLog } from '../models/index.js';
 import { sendText, normalizePhone } from '../providers/ultramsg.js';
 import { detectCommand, isStartWord } from '../utils/parse.js';
 import { USER_ROLE } from '../utils/constants.js';
+import config from '../config/index.js';
 import * as M from '../utils/messages.js';
 
 /**
@@ -191,12 +192,69 @@ async function resolveVoiceNote({ text, mediaUrl, mediaType }) {
   return { text: transcript, notice: null, transcribed: true };
 }
 
+/**
+ * How long a half-finished conversation survives silence.
+ *
+ * Long enough that a real pause — a busy week, a holiday — is never
+ * interrupted, short enough that nobody is dropped back into a form they
+ * abandoned a season ago.
+ */
+const STALE_AFTER_MS = config.staleSessionDays * 86400000;
+
+/**
+ * Conversations that must not be reset, however long the silence.
+ *
+ * START is already the clean slate, and the two menus are where a reset would
+ * land anyway — resetting them would only wipe a role we would have to work
+ * out again. The rest are states holding something a person is owed: a chat
+ * they are mid-way through, a payment we are waiting on, a booking parked for
+ * an agent to call about. Silence there means we owe them a follow-up, not
+ * that the thread is dead.
+ */
+const NEVER_STALE = new Set([
+  'START',
+  'FAMILY_MAIN_MENU',
+  'NANNY_MAIN_MENU',
+  'FAMILY_CHATTING',
+  'NANNY_CHATTING',
+  'FF_AWAITING_AGENT',
+  'FF_AGENT_ONE_NANNY',
+  'FF_AGENT_TWO_NANNIES',
+]);
+
+function isStale(session) {
+  if (!session.lastMessageAt) return false;
+  if (NEVER_STALE.has(session.state)) return false;
+  // A chat is live regardless of which state the session claims to be in.
+  if (session.activeChat) return false;
+  return Date.now() - new Date(session.lastMessageAt).getTime() > STALE_AFTER_MS;
+}
+
 export async function handleMessage({ phone: rawPhone, text = '', mediaUrl, mediaId, mediaType }) {
   const phone = normalizePhone(rawPhone);
   if (!phone) return [];
 
   let session = await Session.findOne({ phone });
   if (!session) session = await Session.create({ phone, state: 'START' });
+
+  // A conversation abandoned months ago is not a conversation any more.
+  //
+  // The bot remembers exactly where someone stopped, which is right for a
+  // pause of hours and wrong for one of months: a nanny who quit halfway
+  // through registration in March and comes back in September was being asked
+  // for her hourly rate with no idea why, and "nanny" did not help because
+  // the conversation was technically still running.
+  //
+  // Resetting to START does not lose anything. Whatever she had already
+  // finished is on her account; the START handler routes her by that — to her
+  // menu if she is registered, or back into registration if she is not, both
+  // with a greeting. Only the half-typed draft goes, and after this long it
+  // was never going to be completed anyway.
+  if (isStale(session)) {
+    session.reset('START');
+    session.role = undefined;
+    session.user = undefined;
+  }
 
   session.lastMessageAt = new Date();
 

@@ -858,6 +858,107 @@ test('only ticked media reaches a family, and the profile is capped', async () =
   assert.equal(capped.filter((m) => m.kind === 'photo').length, MAX_FEATURED_PHOTOS);
 });
 
+test('a conversation abandoned months ago starts cleanly', async () => {
+  const { Session, User } = await import('../src/models/index.js');
+
+  // Half-way through nanny registration, silent since March.
+  const nanny = await User.create({
+    phone: NANNY, role: 'nanny', fullName: 'Maria Grook', registrationComplete: false,
+  });
+  await Session.create({
+    phone: NANNY,
+    state: 'NR_RATE',
+    role: 'nanny',
+    user: nanny._id,
+    data: { age: 24, experienceYears: 5 },
+    stack: ['NR_AGE', 'NR_EXPERIENCE'],
+    lastMessageAt: dayjs().subtract(90, 'day').toDate(),
+  });
+
+  // The word now behaves the way anyone would expect it to.
+  const reply = await say(NANNY, 'nanny');
+  assert.match(reply, /Welcome back Maria/i);
+  assert.doesNotMatch(reply, /hourly rate/i, 'not dropped back into a form from March');
+
+  const session = await Session.findOne({ phone: NANNY });
+  assert.equal(session.state, 'NANNY_REG_RESUME');
+  assert.deepEqual(session.data, {}, 'the abandoned draft is gone');
+  assert.deepEqual(session.stack, []);
+});
+
+test('a stale session still answers only to the trigger word', async () => {
+  const { Session, User } = await import('../src/models/index.js');
+  await User.create({ phone: FAMILY, role: 'family', fullName: 'Sarah', registrationComplete: false });
+  await Session.create({
+    phone: FAMILY, state: 'FF_START_TIME', role: 'family',
+    lastMessageAt: dayjs().subtract(60, 'day').toDate(),
+  });
+
+  // Resetting drops it to START, where the usual rule applies.
+  const reply = await say(FAMILY, 'hello');
+  assert.equal(reply, '', 'a stray word wakes nothing, even on return');
+
+  const session = await Session.findOne({ phone: FAMILY });
+  assert.equal(session.state, 'START');
+});
+
+test('a recent pause is left alone', async () => {
+  const { Session, User } = await import('../src/models/index.js');
+  const nanny = await User.create({
+    phone: NANNY, role: 'nanny', fullName: 'Maria Grook', registrationComplete: false,
+  });
+  await Session.create({
+    phone: NANNY, state: 'NR_RATE', role: 'nanny', user: nanny._id,
+    data: { age: 24 },
+    lastMessageAt: dayjs().subtract(3, 'day').toDate(),
+  });
+
+  // Three days is a busy week, not an abandoned conversation.
+  const reply = await say(NANNY, '$25');
+  assert.doesNotMatch(reply, /Welcome back/i);
+
+  const session = await Session.findOne({ phone: NANNY });
+  assert.equal(session.data.age, 24, 'her answers are still there');
+  assert.notEqual(session.state, 'START');
+});
+
+test('an open chat is never reset out from under someone', async () => {
+  const { Session, User, ChatThread } = await import('../src/models/index.js');
+
+  const family = await User.create({ phone: FAMILY, role: 'family', fullName: 'Sarah', registrationComplete: true });
+  const nanny = await User.create({ phone: NANNY, role: 'nanny', fullName: 'Maria', registrationComplete: true });
+  const thread = await ChatThread.create({ family: family._id, nanny: nanny._id });
+
+  await Session.create({
+    phone: FAMILY, state: 'FAMILY_CHATTING', role: 'family', user: family._id,
+    activeChat: thread._id,
+    lastMessageAt: dayjs().subtract(120, 'day').toDate(),
+  });
+
+  await say(FAMILY, 'are you still there?');
+
+  const session = await Session.findOne({ phone: FAMILY });
+  assert.equal(session.state, 'FAMILY_CHATTING', 'the conversation is still owed a reply');
+  assert.ok(session.activeChat, 'and the thread survives');
+});
+
+test('a booking waiting on an agent is not thrown away', async () => {
+  const { Session, User } = await import('../src/models/index.js');
+  const family = await User.create({ phone: FAMILY, role: 'family', fullName: 'Sarah', registrationComplete: true });
+  await Session.create({
+    phone: FAMILY, state: 'FF_AWAITING_AGENT', role: 'family', user: family._id,
+    data: { needsAgentReview: true, hoursPerDay: 24 },
+    lastMessageAt: dayjs().subtract(45, 'day').toDate(),
+  });
+
+  const reply = await say(FAMILY, 'any news?');
+  assert.match(reply, /Pending for Payment/, 'we owe them a call, so the request stands');
+
+  const session = await Session.findOne({ phone: FAMILY });
+  assert.equal(session.state, 'FF_AWAITING_AGENT');
+  assert.equal(session.data.needsAgentReview, true);
+});
+
 test('family registration collects name, email and verifies OTP', async () => {
   const { User } = await import('../src/models/index.js');
 

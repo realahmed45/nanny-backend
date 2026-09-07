@@ -116,6 +116,13 @@ export const config = {
    */
   emergencySurcharge: int(process.env.EMERGENCY_SURCHARGE, 50000),
 
+  /**
+   * How many days of silence before a half-finished conversation is dropped
+   * and the next message starts cleanly. Long enough not to interrupt a real
+   * pause, short enough that nobody resumes a form from last season.
+   */
+  staleSessionDays: int(process.env.STALE_SESSION_DAYS, 30),
+
   brand: {
     name: process.env.BRAND_NAME || 'Nanny in Paradise',
     // Must be a public URL — mail clients cannot read files from our disk.
