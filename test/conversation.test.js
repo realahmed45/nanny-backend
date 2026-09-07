@@ -817,6 +817,47 @@ test('the agent decision moves the family on to picking nannies', async () => {
   assert.equal(session.state, 'FAMILY_MAIN_MENU');
 });
 
+test('only ticked media reaches a family, and the profile is capped', async () => {
+  const { User } = await import('../src/models/index.js');
+  const { nannyProfile, featuredMedia } = await import('../src/utils/messages.js');
+  const { MAX_FEATURED_VIDEOS, MAX_FEATURED_PHOTOS } = await import('../src/utils/constants.js');
+
+  const nanny = await User.create({
+    phone: NANNY, role: 'nanny', fullName: 'Maria Grook', nickname: 'Maria',
+    videos: [
+      { url: 'https://cdn/v-shown.mp4', approved: true, featured: true },
+      { url: 'https://cdn/v-approved-only.mp4', approved: true, featured: false },
+      { url: 'https://cdn/v-unapproved.mp4', approved: false, featured: false },
+    ],
+    photos: [
+      { url: 'https://cdn/p-shown.jpg', approved: true, featured: true },
+      { url: 'https://cdn/p-approved-only.jpg', approved: true, featured: false },
+    ],
+  });
+
+  const shown = featuredMedia(nanny).map((m) => m.url);
+  assert.deepEqual(shown, ['https://cdn/v-shown.mp4', 'https://cdn/p-shown.jpg']);
+
+  // Approval alone is not permission to display — that is the whole point.
+  const profile = nannyProfile(nanny);
+  assert.match(profile, /v-shown\.mp4/);
+  assert.doesNotMatch(profile, /v-approved-only/, 'approved but unticked stays private');
+  assert.doesNotMatch(profile, /v-unapproved/);
+  assert.doesNotMatch(profile, /p-approved-only/);
+
+  // A record carrying more than the cap still renders a sensible profile.
+  nanny.videos = Array.from({ length: 5 }, (_, i) => ({
+    url: `https://cdn/many-${i}.mp4`, approved: true, featured: true,
+  }));
+  nanny.photos = Array.from({ length: 12 }, (_, i) => ({
+    url: `https://cdn/many-${i}.jpg`, approved: true, featured: true,
+  }));
+
+  const capped = featuredMedia(nanny);
+  assert.equal(capped.filter((m) => m.kind === 'video').length, MAX_FEATURED_VIDEOS);
+  assert.equal(capped.filter((m) => m.kind === 'photo').length, MAX_FEATURED_PHOTOS);
+});
+
 test('family registration collects name, email and verifies OTP', async () => {
   const { User } = await import('../src/models/index.js');
 

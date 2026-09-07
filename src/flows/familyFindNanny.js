@@ -13,6 +13,7 @@ import {
 import { findNannies } from '../services/matching.js';
 import { buildServiceDays } from '../services/booking.js';
 import { computeBookingAmount } from '../services/policy.js';
+import { emergencySurcharge } from '../services/settings.js';
 import * as M from '../utils/messages.js';
 
 const ORDINALS = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth'];
@@ -237,7 +238,12 @@ function afterStartDate(ctx, { confirm = true } = {}) {
   }
   return [
     ...steps,
-    { text: M.importantFamilyInfo({ isEmergency: ctx.get('isEmergency') }) },
+    {
+      text: M.importantFamilyInfo({
+        isEmergency: ctx.get('isEmergency'),
+        surcharge: ctx.get('emergencySurcharge'),
+      }),
+    },
     { text: M.ASK_START_TIME, state: 'FF_START_TIME' },
   ];
 }
@@ -311,6 +317,11 @@ const emergencyHandler = async (ctx) => {
     const steps = afterStartDate(ctx);
     return Array.isArray(steps) ? steps : [steps];
   }
+
+  // Read once and carried on the draft, so every later message quotes the
+  // same figure even if an admin edits the rate mid-conversation — and so the
+  // synchronous message builders do not have to reach for settings.
+  ctx.set('emergencySurcharge', await emergencySurcharge());
 
   // Record the callback immediately, before another question is asked. The
   // promise of a call in 15 minutes has to survive the family abandoning the
@@ -392,7 +403,12 @@ const repeatDaysHandler = async (ctx) => {
     // Confirm what we understood, so a typed answer like "monday, tuesday and
     // wed" is visibly registered rather than silently assumed.
     { text: M.repeatDaysConfirmed(days, preview.length) },
-    { text: M.importantFamilyInfo({ isEmergency: ctx.get('isEmergency') }) },
+    {
+      text: M.importantFamilyInfo({
+        isEmergency: ctx.get('isEmergency'),
+        surcharge: ctx.get('emergencySurcharge'),
+      }),
+    },
     { text: M.ASK_START_TIME, state: 'FF_START_TIME' },
   ];
 };
@@ -767,7 +783,7 @@ export function draftToBooking(ctx, { hourlyRate = null } = {}) {
     otherInstructions: d.otherInstructions,
     agentCallRequested: !!d.agentCallRequested,
     isEmergency: !!d.isEmergency,
-    emergencySurcharge: d.isEmergency ? config.emergencySurcharge : 0,
+    emergencySurcharge: d.isEmergency ? (d.emergencySurcharge ?? config.emergencySurcharge) : 0,
     isLiveIn: !!d.isLiveIn,
     needsAgentReview: !!d.needsAgentReview,
     nanniesNeeded: d.nanniesNeeded || 1,

@@ -16,7 +16,26 @@ export const DEFAULTS = {
   // Set in the dashboard; see services/pricing.js for the shape.
   pricing: null,
   referralDiscount: null,
+  socialDiscount: null,
+  // What an emergency adds to the transport fee. null means "use the
+  // configured default" — see emergencySurcharge() below.
+  emergency: null,
 };
+
+/**
+ * The emergency surcharge in force right now.
+ *
+ * Editable in the Pricing tab, falling back to the environment default when
+ * nobody has set one. Zero is a real value, so the check is for null rather
+ * than falsiness — otherwise turning the surcharge off would silently restore
+ * the default.
+ */
+export async function emergencySurcharge() {
+  const { default: config } = await import('../config/index.js');
+  const settings = await getSettings();
+  const set = settings.emergency?.surcharge;
+  return set === undefined || set === null ? config.emergencySurcharge : Number(set);
+}
 
 let cache = null;
 let cachedAt = 0;
@@ -54,4 +73,6 @@ export async function setSetting(key, value, adminId = null) {
   return value;
 }
 
-export default { getSettings, getSetting, setSetting, invalidateSettings, DEFAULTS };
+export default {
+  getSettings, getSetting, setSetting, invalidateSettings, emergencySurcharge, DEFAULTS,
+};

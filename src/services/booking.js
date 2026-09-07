@@ -7,6 +7,7 @@ import {
 import { computeBookingAmount, computeCancellationRefund, round2 } from './policy.js';
 import { describeDay } from './calendar.js';
 import config from '../config/index.js';
+import { emergencySurcharge } from './settings.js';
 
 /** Random 4-char service code, e.g. "A123", as used in the script. */
 export function generateServiceCode() {
@@ -112,7 +113,7 @@ export async function createBooking({ family, nanny, draft }) {
     children: draft.children || [],
     isEmergency: !!draft.isEmergency,
     // Locked in at booking time so a later rate change cannot rewrite it.
-    emergencySurcharge: draft.isEmergency ? config.emergencySurcharge : 0,
+    emergencySurcharge: draft.isEmergency ? await emergencySurcharge() : 0,
     isLiveIn: !!draft.isLiveIn,
     needsAgentReview: !!draft.needsAgentReview,
     nanniesNeeded: draft.nanniesNeeded || 1,

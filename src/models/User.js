@@ -121,11 +121,22 @@ const UserSchema = new mongoose.Schema({
   nickname: String,
 
   /**
-   * Short presentation videos, shown on her profile.
+   * Short presentation videos.
    *
    * A family choosing someone to leave their child with learns more from
-   * thirty seconds of video than from any list of skills, so this is part of
-   * the profile rather than an attachment on it.
+   * thirty seconds of video than from any list of skills.
+   *
+   * Two separate gates, and the distinction matters:
+   *
+   *   approved — someone watched it and it is not objectionable. A safety
+   *              check, nothing more. It does not put the video anywhere.
+   *   featured — chosen to appear on her public profile. This is an editorial
+   *              decision about what represents her best.
+   *
+   * The archive is unlimited; the profile is not. Only featured media is ever
+   * shown to a family, capped by MAX_FEATURED_VIDEOS / MAX_FEATURED_PHOTOS —
+   * a family scrolling forty photos is not choosing a nanny, they are
+   * abandoning the chat.
    */
   videos: [{
     url: { type: String, required: true },
@@ -136,6 +147,9 @@ const UserSchema = new mongoose.Schema({
     // Nothing reaches families until someone has actually watched it.
     approved: { type: Boolean, default: false },
     approvedAt: Date,
+    // Picked for the public profile. Never true without approved.
+    featured: { type: Boolean, default: false },
+    featuredAt: Date,
   }],
 
   /**
@@ -143,8 +157,8 @@ const UserSchema = new mongoose.Schema({
    *
    * Kept alongside the videos rather than folded into them: a nanny sends
    * these as she goes, and a family scanning a profile reads a strip of
-   * photos differently from a video it has to sit through. Same approval
-   * gate, for the same reason — these show other people's children.
+   * photos differently from a video it has to sit through. Same two gates,
+   * for the same reasons — these show other people's children.
    */
   photos: [{
     url: { type: String, required: true },
@@ -152,6 +166,8 @@ const UserSchema = new mongoose.Schema({
     uploadedAt: { type: Date, default: Date.now },
     approved: { type: Boolean, default: false },
     approvedAt: Date,
+    featured: { type: Boolean, default: false },
+    featuredAt: Date,
   }],
   age: Number,
   experienceYears: Number,

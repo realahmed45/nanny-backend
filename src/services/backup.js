@@ -96,6 +96,7 @@ export async function buildBackupWorkbook() {
     { header: 'Videos', key: 'videos', width: 8 },
     { header: 'Photos', key: 'photos', width: 8 },
     { header: 'Approved media', key: 'approved', width: 15 },
+    { header: 'On profile', key: 'featured', width: 11 },
     { header: 'Last active', key: 'lastSeen', width: 18, style: { numFmt: 'yyyy-mm-dd hh:mm' } },
   ], nannies.map((n) => ({
     id: str(n._id),
@@ -112,6 +113,7 @@ export async function buildBackupWorkbook() {
     videos: (n.videos || []).length,
     photos: (n.photos || []).length,
     approved: [...(n.videos || []), ...(n.photos || [])].filter((m) => m.approved).length,
+    featured: [...(n.videos || []), ...(n.photos || [])].filter((m) => m.approved && m.featured).length,
     lastSeen: day(n.lastSeenAt),
   })));
 

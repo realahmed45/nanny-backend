@@ -21,6 +21,17 @@ export const CPR_REQUIREMENT = {
   EITHER: 'either',
 };
 
+/**
+ * How much of a nanny's media reaches her public profile.
+ *
+ * The archive behind it is unlimited — she keeps sending over months, and we
+ * keep all of it. These cap only what a family sees, because a profile is a
+ * pitch, not a gallery: two videos and six photos is enough to judge someone
+ * and few enough to actually look at.
+ */
+export const MAX_FEATURED_VIDEOS = 2;
+export const MAX_FEATURED_PHOTOS = 6;
+
 export const USER_ROLE = { FAMILY: 'family', NANNY: 'nanny' };
 
 export const NANNY_STATUS = {

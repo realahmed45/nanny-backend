@@ -11,6 +11,7 @@ import {
 import {
   USER_ROLE, NANNY_STATUS, BOOKING_STATUS, PAYMENT_STATUS, PAYOUT_STATUS,
   TICKET_STATUS, CANCELLED_BY, SERVICE_DAY_STATUS, BOOKING_SUBSTATUS,
+  MAX_FEATURED_VIDEOS, MAX_FEATURED_PHOTOS,
 } from '../utils/constants.js';
 import { signToken, requireAuth, requireRole } from '../middleware/auth.js';
 import { auditMutations } from '../middleware/audit.js';
@@ -28,6 +29,7 @@ import config from '../config/index.js';
 import {
   DEFAULT_PRICING as PRICING_DEFAULTS,
   DEFAULT_REFERRAL_DISCOUNT as DISCOUNT_DEFAULTS,
+  DEFAULT_SOCIAL_DISCOUNT as SOCIAL_DEFAULTS,
 } from '../services/pricing.js';
 import { CALENDAR_DEFAULTS, ISO_DATE, getCalendar, daysInRange } from '../services/calendar.js';
 
@@ -1081,19 +1083,19 @@ router.post('/nannies/:id/videos', requireRole('admin', 'super_admin'), wrap(asy
     return res.status(400).json({ error: 'A video needs a valid http(s) URL' });
   }
 
+  // The archive is unlimited: she keeps sending over months and we keep it
+  // all. Only the profile is capped, and that is the `featured` flag's job.
   nanny.videos = nanny.videos || [];
-  if (nanny.videos.length >= 5) {
-    return res.status(400).json({ error: 'A nanny can have at most 5 videos' });
-  }
-
   nanny.videos.push({
     url,
     title: String(req.body?.title || '').slice(0, 120),
     thumbnailUrl: String(req.body?.thumbnailUrl || '').trim() || undefined,
     durationSeconds: Number(req.body?.durationSeconds) || undefined,
-    // An admin adding it has seen it, so it goes live straight away.
+    // An admin adding it has seen it, so the safety check is already done.
+    // Showing it on the profile is a separate decision, made deliberately.
     approved: true,
     approvedAt: new Date(),
+    featured: false,
   });
   await nanny.save();
 
@@ -1108,11 +1110,34 @@ router.patch('/nannies/:id/videos/:videoId', requireRole('admin', 'super_admin')
   const video = (nanny.videos || []).id(req.params.videoId);
   if (!video) return res.status(404).json({ error: 'Video not found' });
 
-  res.locals.auditBefore = { approved: video.approved, title: video.title };
+  res.locals.auditBefore = {
+    approved: video.approved, featured: video.featured, title: video.title,
+  };
   if (req.body?.title !== undefined) video.title = String(req.body.title).slice(0, 120);
+
   if (req.body?.approved !== undefined) {
     video.approved = !!req.body.approved;
     video.approvedAt = video.approved ? new Date() : undefined;
+    // Un-approving must pull it off the profile too, or a video judged
+    // unsuitable would keep showing.
+    if (!video.approved) { video.featured = false; video.featuredAt = undefined; }
+  }
+
+  if (req.body?.featured !== undefined) {
+    const want = !!req.body.featured;
+    if (want && !video.approved) {
+      return res.status(409).json({ error: 'Approve the video before showing it on the profile' });
+    }
+    if (want && !video.featured) {
+      const shown = (nanny.videos || []).filter((v) => v.featured && v.approved).length;
+      if (shown >= MAX_FEATURED_VIDEOS) {
+        return res.status(409).json({
+          error: `Only ${MAX_FEATURED_VIDEOS} videos can show on a profile. Uncheck another first.`,
+        });
+      }
+    }
+    video.featured = want;
+    video.featuredAt = want ? new Date() : undefined;
   }
   await nanny.save();
 
@@ -1152,17 +1177,16 @@ router.post('/nannies/:id/photos', requireRole('admin', 'super_admin'), wrap(asy
     return res.status(400).json({ error: 'A photo needs a valid http(s) URL' });
   }
 
+  // Unlimited, like the videos — the cap belongs to the profile, not the
+  // archive.
   nanny.photos = nanny.photos || [];
-  if (nanny.photos.length >= 30) {
-    return res.status(400).json({ error: 'A nanny can have at most 30 photos' });
-  }
-
   nanny.photos.push({
     url,
     caption: String(req.body?.caption || '').slice(0, 200),
-    // An admin adding it has seen it, so it goes live straight away.
+    // Seen by the admin adding it; showing it is still a separate decision.
     approved: true,
     approvedAt: new Date(),
+    featured: false,
   });
   await nanny.save();
 
@@ -1177,11 +1201,32 @@ router.patch('/nannies/:id/photos/:photoId', requireRole('admin', 'super_admin')
   const photo = (nanny.photos || []).id(req.params.photoId);
   if (!photo) return res.status(404).json({ error: 'Photo not found' });
 
-  res.locals.auditBefore = { approved: photo.approved, caption: photo.caption };
+  res.locals.auditBefore = {
+    approved: photo.approved, featured: photo.featured, caption: photo.caption,
+  };
   if (req.body?.caption !== undefined) photo.caption = String(req.body.caption).slice(0, 200);
+
   if (req.body?.approved !== undefined) {
     photo.approved = !!req.body.approved;
     photo.approvedAt = photo.approved ? new Date() : undefined;
+    if (!photo.approved) { photo.featured = false; photo.featuredAt = undefined; }
+  }
+
+  if (req.body?.featured !== undefined) {
+    const want = !!req.body.featured;
+    if (want && !photo.approved) {
+      return res.status(409).json({ error: 'Approve the photo before showing it on the profile' });
+    }
+    if (want && !photo.featured) {
+      const shown = (nanny.photos || []).filter((p) => p.featured && p.approved).length;
+      if (shown >= MAX_FEATURED_PHOTOS) {
+        return res.status(409).json({
+          error: `Only ${MAX_FEATURED_PHOTOS} photos can show on a profile. Uncheck another first.`,
+        });
+      }
+    }
+    photo.featured = want;
+    photo.featuredAt = want ? new Date() : undefined;
   }
   await nanny.save();
 
@@ -2406,6 +2451,10 @@ router.get('/settings', wrap(async (req, res) => {
     pricing: { ...PRICING_DEFAULTS, ...(runtime.pricing || {}) },
     referralDiscount: { ...DISCOUNT_DEFAULTS, ...(runtime.referralDiscount || {}) },
     calendar: { ...CALENDAR_DEFAULTS, ...(runtime.calendar || {}) },
+    // Falls back to the configured default, so the form opens on the figure
+    // actually in force rather than a blank field.
+    emergency: { surcharge: runtime.emergency?.surcharge ?? config.emergencySurcharge },
+    socialDiscount: { ...SOCIAL_DEFAULTS, ...(runtime.socialDiscount || {}) },
   });
 }));
 
@@ -2420,6 +2469,8 @@ const RUNTIME_SETTINGS = new Set([
   'voiceTranscription',
   'pricing',
   'referralDiscount',
+  'socialDiscount',
+  'emergency',
   'calendar',
 ]);
 
@@ -2432,6 +2483,37 @@ const RUNTIME_SETTINGS = new Set([
  */
 function validateSetting(key, value) {
   if (key === 'voiceTranscription') return !!value;
+
+  /**
+   * What an emergency adds to the transport fee.
+   *
+   * The nanny collects it in cash on arrival, so it is never part of the
+   * amount a family transfers. Zero is allowed — that is how you turn the
+   * surcharge off without a deploy.
+   */
+  if (key === 'emergency') {
+    const surcharge = Number(value?.surcharge);
+    if (!Number.isFinite(surcharge) || surcharge < 0) {
+      throw new Error('The emergency surcharge must be zero or a positive amount');
+    }
+    if (surcharge > 5_000_000) {
+      throw new Error('That emergency surcharge looks like a typo — it is over 5,000,000');
+    }
+    return { surcharge };
+  }
+
+  if (key === 'socialDiscount') {
+    const days = Number(value?.validityDays);
+    if (!Number.isInteger(days) || days < 1 || days > 365) {
+      throw new Error('The follow & save discount must last between 1 and 365 days');
+    }
+    return {
+      enabled: value?.enabled !== false,
+      validityDays: days,
+      requireInstagram: value?.requireInstagram !== false,
+      requireWhatsapp: value?.requireWhatsapp !== false,
+    };
+  }
 
   if (key === 'pricing') {
     const out = { standard: {}, referred: {} };

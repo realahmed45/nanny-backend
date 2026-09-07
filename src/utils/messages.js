@@ -2,7 +2,9 @@ import {
   money, prettyDate, prettyDateFull, timeRange, prettyTime, ratedList, starLine,
   childLines, weekdayList, statusLabel, numbered, durationMenu, firstName, nannyDisplayName,
 } from './format.js';
-import { LANGUAGES, SKILLS, SUBJECTS, WEEKDAYS } from './constants.js';
+import {
+  LANGUAGES, SKILLS, SUBJECTS, WEEKDAYS, MAX_FEATURED_VIDEOS, MAX_FEATURED_PHOTOS,
+} from './constants.js';
 import config from '../config/index.js';
 
 /* ------------------------------------------------------------------ *
@@ -70,9 +72,9 @@ export const COMMANDS_HELP = `*Available commands*
  * into the transfer total: the family pays the platform for hours and the
  * nanny in cash for the journey.
  */
-export const importantFamilyInfo = ({ isEmergency = false } = {}) => {
+export const importantFamilyInfo = ({ isEmergency = false, surcharge } = {}) => {
   const { min, max } = config.transportFee;
-  const bump = config.emergencySurcharge;
+  const bump = surcharge ?? config.emergencySurcharge;
   const transport = isEmergency
     ? `🚕 *Transport:* ${money(min + bump)}–${money(max + bump)} depending on the area — this includes a ${money(bump)} emergency surcharge, paid to the nanny *in cash when she arrives*.`
     : `🚕 *Transport:* A ${money(min)}–${money(max)} transport fee applies depending on the area.`;
@@ -413,7 +415,9 @@ export function bookingSummary(b, {
     lines.push('');
     lines.push('⚡ *EMERGENCY BOOKING* — needed today');
     // Stated beside the total, because it is the one cost that is not in it.
-    lines.push(`🚕 Transport includes a ${money(config.emergencySurcharge)} emergency surcharge, paid to the nanny in cash on arrival.`);
+    // The booking's own figure, not today's rate: an old booking must keep
+    // quoting what it was actually sold at.
+    lines.push(`🚕 Transport includes a ${money(b.emergencySurcharge ?? config.emergencySurcharge)} emergency surcharge, paid to the nanny in cash on arrival.`);
   }
 
   // Round-the-clock care changes what is being staffed, so it is stated on
@@ -539,9 +543,9 @@ export function nannyProfile(n, { hourlyRate = null } = {}) {
   lines.push(n.backgroundCheckPassed ? '✅Background Check' : '⬜Background Check');
   lines.push(n.cprCertified ? '✅CPR Certificate' : '⬜No CPR Certificate');
 
-  // Only what an admin has approved. A nanny sends whatever she likes over
-  // months; the family sees the selection, not the archive.
-  const media = approvedMedia(n);
+  // Only what was picked for the profile. A nanny sends whatever she likes
+  // over months; the family sees the selection, not the archive.
+  const media = featuredMedia(n);
   if (media.length) {
     lines.push('', '*📸 Photos & Videos*');
     media.forEach((m, i) => lines.push(`${i + 1}. ${m.caption || m.title || (m.kind === 'video' ? 'Video' : 'Photo')}\n   ${m.url}`));
@@ -550,16 +554,27 @@ export function nannyProfile(n, { hourlyRate = null } = {}) {
 }
 
 /**
- * The media a family is allowed to see, videos first.
+ * The media on a nanny's public profile, videos first.
  *
- * Approval is the whole point: these show other people's children, and a
- * nanny keeps sending more over time. Anything not explicitly approved is
- * invisible here no matter how it got onto her record.
+ * Two conditions, both required. `approved` means someone watched it and it
+ * is safe to show; `featured` means it was chosen to represent her. Approval
+ * alone puts nothing in front of a family — that is the whole point of having
+ * two flags.
+ *
+ * The caps are enforced here as well as when the box is ticked, so a record
+ * that somehow carries too many (an import, a hand-edit) still shows a
+ * sensible profile rather than forty photos.
  */
-export function approvedMedia(n) {
-  const videos = (n.videos || []).filter((v) => v.approved).map((v) => ({ ...(v.toObject?.() ?? v), kind: 'video' }));
-  const photos = (n.photos || []).filter((p) => p.approved).map((p) => ({ ...(p.toObject?.() ?? p), kind: 'photo' }));
-  return [...videos, ...photos];
+export function featuredMedia(n) {
+  const pick = (list, kind, limit) => (list || [])
+    .filter((m) => m.approved && m.featured)
+    .map((m) => ({ ...(m.toObject?.() ?? m), kind }))
+    .slice(0, limit);
+
+  return [
+    ...pick(n.videos, 'video', MAX_FEATURED_VIDEOS),
+    ...pick(n.photos, 'photo', MAX_FEATURED_PHOTOS),
+  ];
 }
 
 export const NANNY_PROFILE_ACTIONS = `What do you want to do?
