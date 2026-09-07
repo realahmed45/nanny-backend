@@ -1619,6 +1619,50 @@ ${nanny.fullName} has been assigned to Booking #${booking.bookingNumber}.${requi
   res.json({ ok: true, booking, difference, requiresPayment });
 }));
 
+/**
+ * The agent's decision on a 24-hour booking: one nanny, or two.
+ *
+ * A family asking for round-the-clock care across several days is told an
+ * agent will call, and their request waits rather than going to nanny search.
+ * This is where that call ends: the decision is recorded and pushed to the
+ * family in WhatsApp, which puts them back into the flow at the right
+ * question.
+ */
+router.post('/bookings/:id/agent-decision', wrap(async (req, res) => {
+  const booking = await Booking.findById(req.params.id);
+  if (!booking) return res.status(404).json({ error: 'Booking not found' });
+  if (!booking.needsAgentReview) {
+    return res.status(409).json({ error: 'This booking is not awaiting an agent decision' });
+  }
+
+  const nanniesNeeded = Number(req.body?.nanniesNeeded);
+  if (![1, 2].includes(nanniesNeeded)) {
+    return res.status(400).json({ error: 'nanniesNeeded must be 1 or 2' });
+  }
+
+  res.locals.auditBefore = { needsAgentReview: true };
+  booking.nanniesNeeded = nanniesNeeded;
+  booking.needsAgentReview = false;
+  await booking.save();
+
+  // Move the family's conversation to the matching question, so their next
+  // reply is understood. Without this they would answer into whatever state
+  // they were left in.
+  const { Session } = await import('../models/index.js');
+  const family = await User.findById(booking.family);
+  const state = nanniesNeeded === 1 ? 'FF_AGENT_ONE_NANNY' : 'FF_AGENT_TWO_NANNIES';
+  if (family) {
+    await Session.updateOne(
+      { phone: family.phone },
+      { $set: { state, 'data.nanniesNeeded': nanniesNeeded, 'data.needsAgentReview': false } },
+    );
+    await notifyUser(family, nanniesNeeded === 1 ? M.AGENT_DECIDED_ONE : M.AGENT_DECIDED_TWO);
+  }
+
+  res.locals.auditLabel = `#${booking.bookingNumber}`;
+  res.json({ ok: true, booking });
+}));
+
 /* ------------------------------------------------------------------ *
  * Payments & payouts
  * ------------------------------------------------------------------ */

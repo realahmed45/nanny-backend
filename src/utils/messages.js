@@ -111,8 +111,126 @@ export const ASK_EMERGENCY = `⚡ *Booking for today*
 
 Is this an emergency? We prioritise urgent same-day requests and contact available nannies straight away.
 
-1. Yes, it's urgent
-2. No, it's a normal booking`;
+1. It's urgent (Emergency)
+2. It's a normal booking for today`;
+
+/**
+ * The emergency promise.
+ *
+ * Someone who needs a nanny in the next hour is not reading a form, they are
+ * panicking. So the reassurance comes first and in full — what we are doing,
+ * when we will call — and only then the request for details, framed as
+ * helping us help them rather than as a queue to get through.
+ */
+export const EMERGENCY_PROMISE = `⚠️ The most important thing is that we get you someone available straight away.
+
+We are arranging someone within *1 hour* to come to you.
+
+📞 *We will call you within 15 minutes.*
+
+Please fill in the rest of the information so we can help you — and tell us as much as you can.`;
+
+/** Emergencies start from where they already are, so we confirm rather than ask. */
+export const confirmEmergencyLocation = (address) => `📍 *Confirm location*
+
+${address}
+
+Do you want to continue with this location?
+
+1. Yes, continue
+2. No, I want to change it`;
+
+/* ---- 24-hour care ---------------------------------------------------- */
+
+/**
+ * 24-hour care over several days is more than one person can do.
+ *
+ * Said plainly and early: a family that has already picked dates and children
+ * should not discover at the summary that we cannot staff it as asked. The
+ * agent call is promised here, and the flow carries on collecting what that
+ * agent will need.
+ */
+export const TWENTY_FOUR_HOUR_NOTICE = `⏰ *24-Hour Nanny Care*
+
+You selected 24-hour care.
+
+For multiple-day bookings, 24-hour care can be demanding for one nanny, especially when there are several children. We may recommend *2 nannies* to provide better coverage and allow proper rest.
+
+Don't worry — we'll help you find the right solution.
+
+📞 We will call you within 2 hours, once you have finished filling in the information we need.
+
+Please continue filling in the information required for us to understand your needs.`;
+
+export const ASK_CONTINUE_24H = `Continue with booking details?
+
+1. Yes, continue
+2. Change duration`;
+
+export const ASK_LIVE_IN = `🏠 Will the nanny stay at your home during the booking?
+
+1. Yes, the nanny will stay at our home
+2. No, the nanny will leave after each 24-hour shift`;
+
+export const LIVE_IN_CONFIRMED = `Got it. The nanny will stay at your home during the booking.
+
+Please make sure the nanny has a suitable place to sleep and rest during the booking.`;
+
+export const LIVE_OUT_CONFIRMED =
+  'Got it. The nanny will leave after each 24-hour shift.';
+
+/** More than two children round the clock is an agent conversation, not a form. */
+export const TWENTY_FOUR_HOUR_MANY_CHILDREN = `Alright — you need 24-hour care for more than 2 children, so we will need to discuss your requirements with you before sending the booking to a nanny.
+
+After you complete the booking details, our agent will call you to understand your needs and help arrange the best solution. You may need *2 nannies* for suitable coverage.
+
+Let's continue.`;
+
+/* ---- After the agent has called -------------------------------------- */
+
+/** Option A: one nanny will do. */
+export const AGENT_DECIDED_ONE = `Your requirements have been reviewed.
+
+*1 nanny* can be arranged for your booking.
+
+Would you like to continue?
+
+1. Yes, continue
+2. No, discard booking request`;
+
+/** Option B: two are needed, so the family picks each in turn. */
+export const AGENT_DECIDED_TWO = `Based on your requirements, we recommend *2 nannies* to provide suitable coverage.
+
+This will allow the nannies to share the care period and have appropriate rest time.
+
+Would you like to continue with 2 nannies?
+
+1. Yes, continue
+2. No, discard booking request`;
+
+export const SEARCHING_TWO = 'Hang on, I am searching for perfect nannies.';
+export const PICK_FIRST_NANNY = "Let's start by selecting the first nanny.";
+export const pickSecondNanny = (firstName) =>
+  `✅ *${firstName}* is your first nanny.\n\nNow let's choose the second nanny.`;
+
+/**
+ * The standing answer while an agent decides one nanny or two.
+ *
+ * Repeated on every message rather than falling back to a menu: a family in
+ * this state has one question — what happens now — and a menu does not
+ * answer it.
+ */
+export const AGENT_REVIEW_PENDING = `📞 *An agent will contact you* to discuss your requirements and determine whether 1 or 2 nannies would be the best solution.
+
+Status: 🟤 *Pending for Payment* — agent contact required
+
+You can view this request later under:
+*My Bookings → Pending for Payment*
+
+Type *0* for the main menu.`;
+
+export const BOOKING_DISCARDED =
+  '🗑️ Your booking request has been discarded. You can start a new one any time from the main menu.';
 /** Echo the date we settled on, so a weekday answer is unambiguous. */
 export const startDateConfirmed = (date) =>
   `\u{1F4C5} Start date: *${prettyDate(date)}*`;
@@ -257,6 +375,17 @@ export function bookingSummary(b, {
   if (b.isEmergency) {
     lines.push('');
     lines.push('⚡ *EMERGENCY BOOKING* — needed today');
+  }
+
+  // Round-the-clock care changes what is being staffed, so it is stated on
+  // the summary rather than left implicit in "24hrs per day".
+  if (b.hoursPerDay === 24) {
+    lines.push('');
+    lines.push('⏰ *24-hour care*');
+    lines.push(b.isLiveIn
+      ? '🏠 The nanny will stay at your home'
+      : '🏠 The nanny will leave after each 24-hour shift');
+    if (b.nanniesNeeded > 1) lines.push(`👥 ${b.nanniesNeeded} nannies sharing the care period`);
   }
 
   const days = dayCount || 1;

@@ -17,7 +17,12 @@ const CallbackRequestSchema = new mongoose.Schema({
 
   reason: {
     type: String,
-    enum: ['no_nanny_found', 'agent_requested', 'other'],
+    // 'emergency' and 'twenty_four_hour' are promises made mid-conversation:
+    // a call within 15 minutes for someone who needs a nanny today, and within
+    // 2 hours for round-the-clock care that may need two nannies. Both are
+    // recorded the moment they are promised, not at the end of the flow, so
+    // abandoning the chat does not lose the commitment.
+    enum: ['no_nanny_found', 'agent_requested', 'emergency', 'twenty_four_hour', 'other'],
     default: 'no_nanny_found',
     index: true,
   },

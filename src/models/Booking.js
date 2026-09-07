@@ -62,8 +62,32 @@ const BookingSchema = new mongoose.Schema({
   family: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   nanny: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
 
+  /**
+   * The second nanny on a round-the-clock booking.
+   *
+   * 24-hour care over several days is shared between two people so both can
+   * rest. `nanny` above stays the first: everything that already reads a
+   * booking's nanny keeps working, and only the code that knows about pairs
+   * looks here.
+   */
+  secondNanny: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+
   status: { type: String, enum: Object.values(BOOKING_STATUS), default: BOOKING_STATUS.DRAFT, index: true },
   subStatus: { type: String, enum: Object.values(BOOKING_SUBSTATUS) },
+
+  /* ---- Round-the-clock care ---- */
+
+  /** The nanny sleeps at the family's home rather than handing over each day. */
+  isLiveIn: { type: Boolean, default: false },
+
+  /**
+   * Held back from nanny search until an agent has decided one nanny or two.
+   * Set when a family asks for 24-hour care across multiple days.
+   */
+  needsAgentReview: { type: Boolean, default: false },
+
+  /** What the agent decided: 1 or 2. */
+  nanniesNeeded: { type: Number, default: 1 },
 
   isMultiDay: { type: Boolean, default: false },
   startDate: String,                 // "YYYY-MM-DD"

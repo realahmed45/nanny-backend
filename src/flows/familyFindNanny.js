@@ -295,25 +295,61 @@ on('FF_START_DATE_CUSTOM', startDateCustomHandler);
 /**
  * Flagged on the booking so support and the dashboard can see at a glance that
  * someone needs a nanny today.
+ *
+ * An emergency does not simply continue the form. We promise the call first,
+ * then re-confirm where they are: the address chosen minutes ago may not be
+ * where they now need someone to knock, and sending a nanny to the wrong place
+ * is the one mistake this flow cannot afford.
  */
 const emergencyHandler = async (ctx) => {
   const choice = parseChoice(ctx.text, 2);
   if (!choice) return M.ASK_EMERGENCY;
 
   ctx.set('isEmergency', choice === 1);
-  const steps = afterStartDate(ctx);
-  const rest = Array.isArray(steps) ? steps : [steps];
 
-  if (choice === 1) {
-    return [
-      { text: '⚡ Understood — we will treat this as an emergency and contact available nannies right away.' },
-      ...rest,
-    ];
+  if (choice !== 1) {
+    const steps = afterStartDate(ctx);
+    return Array.isArray(steps) ? steps : [steps];
   }
-  return rest;
+
+  // Record the callback immediately, before another question is asked. The
+  // promise of a call in 15 minutes has to survive the family abandoning the
+  // chat halfway — which, in an emergency, is exactly what they might do.
+  await recordCallbackRequest(ctx, { reason: 'emergency' }).catch((err) => {
+    console.error('[callback] could not record emergency:', err.message);
+  });
+
+  return [
+    { text: M.EMERGENCY_PROMISE },
+    { text: M.confirmEmergencyLocation(emergencyAddressLine(ctx)), state: 'FF_EMERGENCY_LOCATION' },
+  ];
 };
 emergencyHandler.prompt = () => M.ASK_EMERGENCY;
 on('FF_EMERGENCY', emergencyHandler);
+
+/** Whatever address the family already gave, rendered for confirmation. */
+function emergencyAddressLine(ctx) {
+  const d = ctx.session.data || {};
+  const addr = d.address || {};
+  const parts = [addr.addressLine || d.addressLine, addr.mapUrl || d.mapUrl].filter(Boolean);
+  return parts.length ? parts.join('\n') : 'No address on file yet.';
+}
+
+const emergencyLocationHandler = async (ctx) => {
+  const choice = parseChoice(ctx.text, 2);
+  if (!choice) return M.confirmEmergencyLocation(emergencyAddressLine(ctx));
+
+  if (choice === 1) {
+    const steps = afterStartDate(ctx);
+    return Array.isArray(steps) ? steps : [steps];
+  }
+
+  // Changing it re-uses the ordinary location questions, which already know
+  // how to save an address and label it.
+  return { text: M.ASK_LOCATION, state: 'FF_LOCATION' };
+};
+emergencyLocationHandler.prompt = (ctx) => M.confirmEmergencyLocation(emergencyAddressLine(ctx));
+on('FF_EMERGENCY_LOCATION', emergencyLocationHandler);
 
 const endDateHandler = async (ctx) => {
   const date = parseDate(ctx.text);
@@ -375,11 +411,65 @@ on('FF_START_TIME', startTimeHandler);
 const durationHandler = async (ctx) => {
   const choice = parseChoice(ctx.text, DURATION_OPTIONS.length);
   if (!choice) return M.ASK_DURATION;
-  ctx.set('hoursPerDay', DURATION_OPTIONS[choice - 1]);
+  const hours = DURATION_OPTIONS[choice - 1];
+  ctx.set('hoursPerDay', hours);
+
+  // Round-the-clock care across several days is more than one person can do,
+  // so it is said here rather than discovered at the summary. A single day of
+  // 24 hours is demanding but staffable, so it does not trigger this.
+  if (hours === 24 && ctx.get('isMultiDay')) {
+    ctx.set('needsAgentReview', true);
+    return [
+      { text: M.TWENTY_FOUR_HOUR_NOTICE },
+      { text: M.ASK_CONTINUE_24H, state: 'FF_CONFIRM_24H' },
+    ];
+  }
   return askLanguages();
 };
 durationHandler.prompt = () => M.ASK_DURATION;
 on('FF_DURATION', durationHandler);
+
+/** Carry on with 24-hour care, or go back and pick a shorter day. */
+const confirm24hHandler = async (ctx) => {
+  const choice = parseChoice(ctx.text, 2);
+  if (!choice) return M.ASK_CONTINUE_24H;
+
+  if (choice === 2) {
+    // Changing their mind here must also drop the agent review, or a family
+    // who backed out of 24-hour care would still be told to expect a call.
+    ctx.merge({ needsAgentReview: false, isLiveIn: undefined });
+    return { text: M.ASK_DURATION, state: 'FF_DURATION' };
+  }
+
+  // The call was promised in the notice above, so it is recorded now rather
+  // than at the end: the family may never reach the summary.
+  await recordCallbackRequest(ctx, { reason: 'twenty_four_hour' }).catch((err) => {
+    console.error('[callback] could not record 24h review:', err.message);
+  });
+
+  return { text: M.ASK_LIVE_IN, state: 'FF_LIVE_IN' };
+};
+confirm24hHandler.prompt = () => M.ASK_CONTINUE_24H;
+on('FF_CONFIRM_24H', confirm24hHandler);
+
+/**
+ * Whether the nanny sleeps at the house.
+ *
+ * Only asked for 24-hour care, where it decides what we are actually staffing:
+ * one nanny living in, or shifts handing over each day.
+ */
+const liveInHandler = async (ctx) => {
+  const choice = parseChoice(ctx.text, 2);
+  if (!choice) return M.ASK_LIVE_IN;
+
+  ctx.set('isLiveIn', choice === 1);
+  return [
+    { text: choice === 1 ? M.LIVE_IN_CONFIRMED : M.LIVE_OUT_CONFIRMED },
+    ...askLanguages(),
+  ];
+};
+liveInHandler.prompt = () => M.ASK_LIVE_IN;
+on('FF_LIVE_IN', liveInHandler);
 
 /* ------------------------------------------------------------------ *
  * Requirements
@@ -496,6 +586,29 @@ const pickChildrenHandler = async (ctx) => {
 pickChildrenHandler.prompt = () => M.INVALID_CHOICE;
 on('FF_CHILDREN_PICK', pickChildrenHandler);
 
+/**
+ * Steps that follow the child count, once we know how many there are.
+ *
+ * 24-hour care for more than two children is the point at which we stop
+ * pretending a form can arrange this, and say so before asking twenty more
+ * questions — the agent call is already promised, this explains why.
+ */
+function afterChildCount(ctx, count) {
+  ctx.merge({ childCount: count, children: [], childIndex: 0 });
+
+  const roundTheClock = ctx.get('hoursPerDay') === 24 && ctx.get('isMultiDay');
+  const notice = roundTheClock && count > 2
+    ? [{ text: M.TWENTY_FOUR_HOUR_MANY_CHILDREN }]
+    : [];
+  if (roundTheClock && count > 2) ctx.set('suggestTwoNannies', true);
+
+  return [
+    ...notice,
+    { text: M.CHILD_INTRO },
+    { text: M.ASK_CHILD_NAME(ORDINALS[0]), state: 'FF_CHILD_NAME' },
+  ];
+}
+
 const childCountHandler = async (ctx) => {
   const choice = parseChoice(ctx.text, 4);
   if (!choice) return M.ASK_CHILD_COUNT;
@@ -504,11 +617,7 @@ const childCountHandler = async (ctx) => {
   if (choice === 4) {
     return { text: M.ASK_CHILD_COUNT_EXACT, state: 'FF_CHILD_COUNT_EXACT' };
   }
-  ctx.merge({ childCount: choice, children: [], childIndex: 0 });
-  return [
-    { text: M.CHILD_INTRO },
-    { text: M.ASK_CHILD_NAME(ORDINALS[0]), state: 'FF_CHILD_NAME' },
-  ];
+  return afterChildCount(ctx, choice);
 };
 childCountHandler.prompt = () => M.ASK_CHILD_COUNT;
 on('FF_CHILD_COUNT', childCountHandler);
@@ -516,11 +625,7 @@ on('FF_CHILD_COUNT', childCountHandler);
 const childCountExactHandler = async (ctx) => {
   const n = parseInteger(ctx.text, { min: 4, max: 12 });
   if (!n) return `❌ Please type a number between 4 and 12.`;
-  ctx.merge({ childCount: n, children: [], childIndex: 0 });
-  return [
-    { text: M.CHILD_INTRO },
-    { text: M.ASK_CHILD_NAME(ORDINALS[0]), state: 'FF_CHILD_NAME' },
-  ];
+  return afterChildCount(ctx, n);
 };
 childCountExactHandler.prompt = () => M.ASK_CHILD_COUNT_EXACT;
 on('FF_CHILD_COUNT_EXACT', childCountExactHandler);
@@ -662,6 +767,11 @@ export function draftToBooking(ctx, { hourlyRate = null } = {}) {
     otherInstructions: d.otherInstructions,
     agentCallRequested: !!d.agentCallRequested,
     isEmergency: !!d.isEmergency,
+    isLiveIn: !!d.isLiveIn,
+    needsAgentReview: !!d.needsAgentReview,
+    nanniesNeeded: d.nanniesNeeded || 1,
+    // The pair is chosen in order; the first is the booking's `nanny`.
+    secondNanny: (d.selectedNannyIds || [])[1],
     hourlyRate: rate,
     totalAmount: computeBookingAmount({ hourlyRate: rate, hoursPerDay: d.hoursPerDay, days: serviceDays.length }),
   };
@@ -814,15 +924,23 @@ export async function recordCallbackRequest(ctx, { reason = 'no_nanny_found' } =
   const d = ctx.session.data || {};
   const user = await User.findById(ctx.session.user);
 
-  // After 00:30 and before 10:00 there is nobody to ring until the morning.
+  // After 00:30 and before 10:00 there is nobody to ring until the morning —
+  // except for an emergency, where we have promised a call within 15 minutes
+  // and someone is waiting on it tonight. Deferring that to 10am would break
+  // the one promise the family is holding on to.
   const now = new Date();
   const hour = now.getHours();
-  const morning = hour === 0 ? now.getMinutes() >= 30 : hour < 10;
+  const urgent = reason === 'emergency';
+  const morning = !urgent && (hour === 0 ? now.getMinutes() >= 30 : hour < 10);
 
   const promisedCallAt = new Date(now);
   if (morning) {
     promisedCallAt.setHours(10, 0, 0, 0);
     if (promisedCallAt <= now) promisedCallAt.setDate(promisedCallAt.getDate() + 1);
+  } else if (urgent) {
+    promisedCallAt.setMinutes(promisedCallAt.getMinutes() + 15);
+  } else if (reason === 'twenty_four_hour') {
+    promisedCallAt.setHours(promisedCallAt.getHours() + 2);
   }
 
   // Do not stack duplicates: a family who loops back through the flow
@@ -861,7 +979,39 @@ export async function recordCallbackRequest(ctx, { reason = 'no_nanny_found' } =
   });
 }
 
+/**
+ * A 24-hour multi-day request does not go to search.
+ *
+ * We have told the family an agent will call to decide whether one nanny or
+ * two are needed, and that decision changes who we would even be searching
+ * for. Showing a nanny list now would contradict the promise and let them
+ * book a single nanny for something we said needs two.
+ *
+ * The request is parked where they can find it — My Bookings → Pending for
+ * Payment — and the agent releases it from the dashboard.
+ */
 export async function searchNannies(ctx) {
+  if (ctx.get('needsAgentReview')) return holdForAgentReview(ctx);
+  return runNannySearch(ctx);
+}
+
+async function holdForAgentReview(ctx) {
+  const preview = draftToBooking(ctx);
+  return [
+    { text: M.bookingSummary(preview, { title: '*Booking Summary*' }) },
+    { text: M.AGENT_REVIEW_PENDING, state: 'FF_AWAITING_AGENT' },
+  ];
+}
+
+/**
+ * Where a family sits while the agent decides. Their next message is answered
+ * with the same standing explanation rather than a stale menu.
+ */
+const awaitingAgentHandler = async () => M.AGENT_REVIEW_PENDING;
+awaitingAgentHandler.prompt = () => M.AGENT_REVIEW_PENDING;
+on('FF_AWAITING_AGENT', awaitingAgentHandler);
+
+export async function runNannySearch(ctx) {
   const d = ctx.session.data || {};
   const preview = draftToBooking(ctx);
 
@@ -911,6 +1061,57 @@ export async function searchNannies(ctx) {
   ];
 }
 
+/* ------------------------------------------------------------------ *
+ * After the agent has called
+ *
+ * The agent decides in the dashboard whether the booking needs one nanny or
+ * two, and that decision is pushed to the family as one of the two questions
+ * below. Both are a yes/no on continuing: the family can still walk away
+ * having heard what it would actually take.
+ * ------------------------------------------------------------------ */
+
+/** Option A: one nanny is enough after all. */
+const agentOneNannyHandler = async (ctx) => {
+  const choice = parseChoice(ctx.text, 2);
+  if (!choice) return M.AGENT_DECIDED_ONE;
+  if (choice === 2) return discardRequest(ctx);
+
+  // Review is over, so the ordinary search runs.
+  ctx.merge({ needsAgentReview: false, nanniesNeeded: 1 });
+  return runNannySearch(ctx);
+};
+agentOneNannyHandler.prompt = () => M.AGENT_DECIDED_ONE;
+on('FF_AGENT_ONE_NANNY', agentOneNannyHandler);
+
+/** Option B: two are needed, chosen one after the other. */
+const agentTwoNanniesHandler = async (ctx) => {
+  const choice = parseChoice(ctx.text, 2);
+  if (!choice) return M.AGENT_DECIDED_TWO;
+  if (choice === 2) return discardRequest(ctx);
+
+  ctx.merge({
+    needsAgentReview: false,
+    nanniesNeeded: 2,
+    selectedNannyIds: [],
+    nannyPickIndex: 0,
+  });
+
+  const search = await runNannySearch(ctx);
+  // Say which of the two we are choosing, before the list arrives.
+  return [{ text: M.PICK_FIRST_NANNY }, ...(Array.isArray(search) ? search : [search])];
+};
+agentTwoNanniesHandler.prompt = () => M.AGENT_DECIDED_TWO;
+on('FF_AGENT_TWO_NANNIES', agentTwoNanniesHandler);
+
+async function discardRequest(ctx) {
+  return {
+    text: `${M.BOOKING_DISCARDED}\n\n${M.FAMILY_MAIN_MENU}`,
+    state: 'FAMILY_MAIN_MENU',
+    resetData: true,
+    clearStack: true,
+  };
+}
+
 const noNanniesHandler = async (ctx) => {
   const choice = parseChoice(ctx.text, 4);
   if (!choice) return M.NO_NANNIES;
@@ -922,10 +1123,26 @@ const noNanniesHandler = async (ctx) => {
 noNanniesHandler.prompt = () => M.NO_NANNIES;
 on('FF_NO_NANNIES', noNanniesHandler);
 
-/** Render the current page of the nanny listing. */
-export async function renderListingPage(ctx) {
+/**
+ * Render the current page of the nanny listing.
+ *
+ * `exclude` drops nannies already chosen for a two-nanny booking, and rebuilds
+ * the listing without them so the numbers the family types keep matching what
+ * is on screen.
+ */
+export async function renderListingPage(ctx, { exclude = [] } = {}) {
   const listing = ctx.session.listing;
   if (!listing?.ids?.length) return null;
+
+  if (exclude.length) {
+    const remaining = listing.ids.filter((id) => !exclude.includes(String(id)));
+    if (!remaining.length) return null;
+    listing.ids = remaining;
+    listing.page = 0;
+    ctx.session.listing = listing;
+    ctx.session.markModified('listing');
+  }
+
   const start = listing.page * listing.pageSize;
   const ids = listing.ids.slice(start, start + listing.pageSize);
   if (!ids.length) return null;

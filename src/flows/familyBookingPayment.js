@@ -31,9 +31,37 @@ const profileHandler = async (ctx) => {
 profileHandler.prompt = () => M.NANNY_PROFILE_ACTIONS;
 on('FF_NANNY_PROFILE', profileHandler);
 
-/** Summary priced at the selected nanny's rate, then the pay-first notice. */
+/**
+ * Summary priced at the selected nanny's rate, then the pay-first notice.
+ *
+ * A booking the agent decided needs two nannies pauses here: the first pick is
+ * banked and the listing comes back for the second, because pricing and paying
+ * for half a booking would be wrong.
+ */
 export async function showPreBookingSummary(ctx, nanny) {
+  const needed = ctx.get('nanniesNeeded', 1);
+  const picked = ctx.get('selectedNannyIds', []);
+
+  if (needed > 1 && picked.length < needed - 1) {
+    const nextPicked = [...picked, String(nanny._id)];
+    ctx.merge({ selectedNannyIds: nextPicked, nannyPickIndex: nextPicked.length });
+
+    // Offer the rest of the list, minus whoever has already been chosen.
+    const { renderListingPage } = await import('./familyFindNanny.js');
+    const page = await renderListingPage(ctx, { exclude: nextPicked });
+    return [
+      { text: M.pickSecondNanny(nannyDisplayName(nanny)) },
+      { text: page || M.INVALID_CHOICE, state: 'FF_NANNY_LISTING' },
+    ];
+  }
+
   ctx.set('selectedNannyId', String(nanny._id));
+  if (needed > 1) {
+    // The last of the pair — record it alongside the others.
+    const all = [...picked, String(nanny._id)];
+    ctx.set('selectedNannyIds', all);
+  }
+
   const preview = draftToBooking(ctx, { hourlyRate: nanny.hourlyRate });
   return [
     { text: M.bookingSummary(preview, { title: '*Booking Summary*', nanny }) },

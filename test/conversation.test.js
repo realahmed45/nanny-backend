@@ -616,6 +616,207 @@ test('the video step keeps every video and photo a nanny sends', async () => {
   assert.equal(session.data.introVideoUrls.length, 2, 'nothing lost on the way out');
 });
 
+/**
+ * Walk a family to the duration question with a multi-day booking, which is
+ * the only route into the 24-hour branch.
+ */
+async function multiDayToDuration(phone = FAMILY) {
+  await say(phone, 'nanny');
+  await say(phone, '1');
+  await say(phone, '1');
+  await say(phone, 'Sarah Johnson');
+  await say(phone, 'sarah@email.com');
+  await say(phone, await latestOtp(phone));
+  await say(phone, 'https://maps.google.com/?q=25.2,55.3');
+  await say(phone, 'Downtown Dubai');
+  await say(phone, '2');                                       // don't save
+  await say(phone, '2');                                       // multiple days
+  await say(phone, dayjs().add(2, 'day').format('YYYY-MM-DD')); // start
+  await say(phone, dayjs().add(9, 'day').format('YYYY-MM-DD')); // end
+  await say(phone, '8');                                       // every day
+  return say(phone, '9 AM');                                   // -> duration
+}
+
+test('24-hour multi-day care warns, asks live-in, and waits for an agent', async () => {
+  const { Session, CallbackRequest } = await import('../src/models/index.js');
+
+  let reply = await multiDayToDuration();
+  assert.match(reply, /How long do you need/);
+
+  // Option 10 is "Full day 24 Hours".
+  reply = await say(FAMILY, '10');
+  assert.match(reply, /24-Hour Nanny Care/);
+  assert.match(reply, /2 nannies/);
+  assert.match(reply, /within 2 hours/i, 'the call is promised up front');
+
+  // The promise is recorded immediately, not at the end of the flow.
+  reply = await say(FAMILY, '1');                       // yes, continue
+  assert.match(reply, /stay at your home/);
+  const callback = await CallbackRequest.findOne({ phone: FAMILY, reason: 'twenty_four_hour' });
+  assert.ok(callback, 'a callback is recorded as soon as it is promised');
+
+  reply = await say(FAMILY, '1');                       // nanny stays over
+  assert.match(reply, /suitable place to sleep/);
+  assert.match(reply, /Choose a language/);
+
+  await say(FAMILY, '1 2');                             // languages
+  await say(FAMILY, '1 3');                             // skills
+
+  // More than two children round the clock earns the extra explanation.
+  reply = await say(FAMILY, '3');                       // three children
+  assert.match(reply, /more than 2 children/);
+  assert.match(reply, /agent will call/i);
+
+  // First child, then the flow offers to let an agent collect the rest.
+  await say(FAMILY, 'Emma');
+  await say(FAMILY, '4 years');
+  await say(FAMILY, 'None');
+  reply = await say(FAMILY, 'None');
+  assert.match(reply, /Continue Myself/);
+
+  await say(FAMILY, '1');                               // carry on myself
+  for (const name of ['Noah', 'Ava']) {
+    await say(FAMILY, name);
+    await say(FAMILY, '4 years');
+    await say(FAMILY, 'None');
+    await say(FAMILY, 'None');
+  }
+  reply = await say(FAMILY, 'None');                    // other instructions
+
+  // The summary states what is being staffed, then the request parks.
+  assert.match(reply, /24-hour care/);
+  assert.match(reply, /stay at your home/);
+  reply = await say(FAMILY, '1');                       // confirm summary
+  assert.match(reply, /Pending for Payment/);
+  assert.match(reply, /whether 1 or 2 nannies/);
+
+  const session = await Session.findOne({ phone: FAMILY });
+  assert.equal(session.state, 'FF_AWAITING_AGENT', 'held, not sent to search');
+  assert.equal(session.data.needsAgentReview, true);
+
+  // Waiting means waiting: another message repeats the explanation.
+  reply = await say(FAMILY, 'any news?');
+  assert.match(reply, /Pending for Payment/);
+});
+
+test('a 24-hour booking for one day does not need an agent', async () => {
+  const { Session } = await import('../src/models/index.js');
+  await createVerifiedNanny();
+
+  await say(FAMILY, 'nanny');
+  await say(FAMILY, '1');
+  await say(FAMILY, '1');
+  await say(FAMILY, 'Sarah Johnson');
+  await say(FAMILY, 'sarah@email.com');
+  await say(FAMILY, await latestOtp(FAMILY));
+  await say(FAMILY, 'https://maps.google.com/?q=25.2,55.3');
+  await say(FAMILY, 'Downtown Dubai');
+  await say(FAMILY, '2');
+  await say(FAMILY, '1');                                        // single day
+  await say(FAMILY, dayjs().add(2, 'day').format('YYYY-MM-DD'));
+  await say(FAMILY, '9 AM');
+
+  const reply = await say(FAMILY, '10');                         // 24 hours
+  assert.doesNotMatch(reply, /24-Hour Nanny Care/, 'one long day is staffable');
+  assert.match(reply, /Choose a language/);
+
+  const session = await Session.findOne({ phone: FAMILY });
+  assert.notEqual(session.data.needsAgentReview, true);
+});
+
+test('an emergency promises a call, records it, and confirms the address', async () => {
+  const { Session, CallbackRequest } = await import('../src/models/index.js');
+
+  await say(FAMILY, 'nanny');
+  await say(FAMILY, '1');
+  await say(FAMILY, '1');
+  await say(FAMILY, 'Sarah Johnson');
+  await say(FAMILY, 'sarah@email.com');
+  await say(FAMILY, await latestOtp(FAMILY));
+  await say(FAMILY, 'https://maps.google.com/?q=25.2,55.3');
+  await say(FAMILY, 'Downtown Dubai');
+  await say(FAMILY, '2');
+  await say(FAMILY, '1');                                // single day
+  await say(FAMILY, dayjs().format('YYYY-MM-DD'));       // today
+
+  let reply = await say(FAMILY, '1');                    // it's urgent
+  assert.match(reply, /within \*1 hour\*/i);
+  assert.match(reply, /call you within 15 minutes/i);
+  assert.match(reply, /Confirm location/);
+  assert.match(reply, /Downtown Dubai/, 'shows the address already given');
+
+  // Promised in the message, so it exists before another question is asked.
+  const callback = await CallbackRequest.findOne({ phone: FAMILY, reason: 'emergency' });
+  assert.ok(callback, 'the emergency callback is recorded straight away');
+  assert.equal(callback.callWindow, 'now', 'never deferred to the morning');
+  assert.ok(
+    callback.promisedCallAt - Date.now() < 20 * 60 * 1000,
+    'promised within the quarter hour, not tomorrow',
+  );
+
+  // Changing the address re-uses the ordinary location questions.
+  reply = await say(FAMILY, '2');
+  assert.match(reply, /location/i);
+  let session = await Session.findOne({ phone: FAMILY });
+  assert.equal(session.state, 'FF_LOCATION');
+
+  await say(FAMILY, 'https://maps.google.com/?q=25.9,55.9');
+  reply = await say(FAMILY, 'Marina Walk');
+  assert.match(reply, /save/i, 'continues into the usual address questions');
+});
+
+test('an emergency that keeps its address carries straight on', async () => {
+  await say(FAMILY, 'nanny');
+  await say(FAMILY, '1');
+  await say(FAMILY, '1');
+  await say(FAMILY, 'Sarah Johnson');
+  await say(FAMILY, 'sarah@email.com');
+  await say(FAMILY, await latestOtp(FAMILY));
+  await say(FAMILY, 'https://maps.google.com/?q=25.2,55.3');
+  await say(FAMILY, 'Downtown Dubai');
+  await say(FAMILY, '2');
+  await say(FAMILY, '1');
+  await say(FAMILY, dayjs().format('YYYY-MM-DD'));
+  await say(FAMILY, '1');                                // urgent
+
+  const reply = await say(FAMILY, '1');                  // keep this location
+  assert.match(reply, /time does the session start|start\?/i);
+});
+
+test('the agent decision moves the family on to picking nannies', async () => {
+  const { Session, Booking, User } = await import('../src/models/index.js');
+  const { BOOKING_STATUS } = await import('../src/utils/constants.js');
+
+  await createVerifiedNanny();
+  const family = await User.create({
+    phone: FAMILY, role: 'family', fullName: 'Sarah Johnson', registrationComplete: true,
+  });
+  const booking = await Booking.create({
+    bookingNumber: 'B-24H-1',
+    family: family._id,
+    status: BOOKING_STATUS.PENDING_PAYMENT,
+    needsAgentReview: true,
+    hoursPerDay: 24,
+    isMultiDay: true,
+  });
+  await Session.create({ phone: FAMILY, state: 'FF_AWAITING_AGENT', role: 'family', user: family._id });
+
+  // The agent decides two nannies are needed. These tests drive the flow
+  // rather than HTTP, so this mirrors what the admin route does.
+  booking.nanniesNeeded = 2;
+  booking.needsAgentReview = false;
+  await booking.save();
+  await Session.updateOne(
+    { phone: FAMILY },
+    { $set: { state: 'FF_AGENT_TWO_NANNIES', 'data.nanniesNeeded': 2, 'data.needsAgentReview': false } },
+  );
+
+  const reply = await say(FAMILY, '2');                  // no, discard
+  assert.match(reply, /discarded/i);
+  const session = await Session.findOne({ phone: FAMILY });
+  assert.equal(session.state, 'FAMILY_MAIN_MENU');
+});
+
 test('family registration collects name, email and verifies OTP', async () => {
   const { User } = await import('../src/models/index.js');
 
@@ -736,9 +937,11 @@ test('booking asks for a date by option, and flags same-day as an emergency', as
   assert.match(reply, /Is this an emergency/i, 'same-day asks about urgency');
 
   reply = await say(FAMILY, '1');                // yes, urgent
-  assert.match(reply, /emergency/i);
+  assert.match(reply, /straight away/i, 'promises help before asking anything');
+  assert.match(reply, /Confirm location/, 'then re-confirms where to send someone');
 
   // Straight into the time question — no budget or CPR steps any more.
+  await say(FAMILY, '1');                        // keep this location
   await say(FAMILY, '9 AM');
   await say(FAMILY, '2');
   await say(FAMILY, '1 2');
