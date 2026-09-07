@@ -155,7 +155,10 @@ const UserSchema = new mongoose.Schema({
     // reappearing in a queue that has already judged it.
     rejectedAt: Date,
     rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'AdminUser' },
-    rejectionReason: { type: String, enum: ['bad_quality', 'misconduct', 'other', null], default: null },
+    // Several can apply at once — a video is often both dark and too short.
+    // `rejectionReason` holds the first for anything still reading one value.
+    rejectionReasons: [{ type: String }],
+    rejectionReason: { type: String, default: null },
     rejectionDetail: String,
   }],
 
@@ -177,7 +180,10 @@ const UserSchema = new mongoose.Schema({
     featuredAt: Date,
     rejectedAt: Date,
     rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'AdminUser' },
-    rejectionReason: { type: String, enum: ['bad_quality', 'misconduct', 'other', null], default: null },
+    // Several can apply at once — a video is often both dark and too short.
+    // `rejectionReason` holds the first for anything still reading one value.
+    rejectionReasons: [{ type: String }],
+    rejectionReason: { type: String, default: null },
     rejectionDetail: String,
   }],
   age: Number,

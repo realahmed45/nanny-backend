@@ -968,17 +968,20 @@ test('a rejected photo tells the nanny why, and stays out of the queue', async (
     photos: [{ url: 'https://cdn/blurry.jpg', approved: false }],
   });
 
-  // What the reject endpoint writes, and what she is sent.
+  // What the reject endpoint writes, and what she is sent. Several reasons
+  // can apply at once — a video is often both dark and too short.
   const photo = nanny.photos[0];
   photo.approved = false;
   photo.featured = false;
   photo.rejectedAt = new Date();
-  photo.rejectionReason = 'bad_quality';
+  photo.rejectionReasons = ['unclear_video', 'duration'];
+  photo.rejectionReason = 'unclear_video';
   await nanny.save();
 
   const fresh = await User.findById(nanny._id);
   assert.ok(fresh.photos[0].rejectedAt, 'the verdict is recorded, not the file deleted');
-  assert.equal(fresh.photos[0].rejectionReason, 'bad_quality');
+  assert.deepEqual([...fresh.photos[0].rejectionReasons], ['unclear_video', 'duration']);
+  assert.equal(fresh.photos[0].rejectionReason, 'unclear_video', 'the single field still reads');
 
   // The queue asks for unjudged items only, so a rejected one does not
   // come back round for a second opinion.
@@ -988,13 +991,25 @@ test('a rejected photo tells the nanny why, and stays out of the queue', async (
   });
   assert.equal(waiting.length, 0, 'already judged, so no longer waiting');
 
-  // And the message is written to keep her sending.
+  // Every reason ticked reaches her, along with the note, and the whole
+  // thing is written to keep her sending rather than to tell her off.
   const told = mediaRejected({
-    kind: 'photo',
-    reason: 'the quality was too low — it was blurry, dark, or hard to make out',
+    kind: 'video',
+    reasons: [
+      'the picture was not clear enough — it looked blurred, low resolution, or too dark',
+      'the length was not right — please keep it to about one minute',
+    ],
+    detail: 'Try filming near a window.',
   });
-  assert.match(told, /blurry/);
+  assert.match(told, /blurred/);
+  assert.match(told, /one minute/, 'the second reason is not dropped');
+  assert.match(told, /near a window/, 'and the note reaches her');
   assert.match(told, /send another/i, 'invites another rather than telling her off');
+
+  // A single reason still reads as a sentence, not a one-item list.
+  const one = mediaRejected({ kind: 'video', reasons: ['you have already sent us this one'] });
+  assert.match(one, /because you have already sent us this one\./);
+  assert.doesNotMatch(one, /•/);
 });
 
 test('family registration collects name, email and verifies OTP', async () => {

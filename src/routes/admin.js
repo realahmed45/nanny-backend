@@ -1178,10 +1178,75 @@ router.delete('/nannies/:id/videos/:videoId', requireRole('admin', 'super_admin'
  * ------------------------------------------------------------------ */
 
 /** Why a piece of media was turned down. Sent to her, so worded for her. */
+/**
+ * Why a submission was turned down.
+ *
+ * `label` is what a reviewer ticks; `told` is what she reads on WhatsApp, and
+ * they are deliberately not the same words. "Vulgar content" is a category for
+ * us; to her it needs to be a sentence that says what to do differently. Every
+ * one of these is phrased as a fixable thing, because the point of telling her
+ * is to get a better video, not to close a ticket.
+ *
+ * More than one can apply — a video is often both dark and too short — so a
+ * rejection carries a list.
+ */
 const REJECTION_REASONS = {
-  bad_quality: 'the quality was too low — it was blurry, dark, or hard to make out',
-  misconduct: 'it did not meet our standards for what can appear on a profile',
-  other: null,
+  unclear_video: {
+    label: 'Video quality is unclear (blurred, low resolution, or poor lighting)',
+    told: 'the picture was not clear enough — it looked blurred, low resolution, or too dark',
+  },
+  unclear_audio: {
+    label: 'Audio is not clear or has background noise',
+    told: 'the sound was hard to make out — there was background noise, or your voice was too quiet',
+  },
+  instructions_not_followed: {
+    label: 'Required instructions were not followed',
+    told: 'it did not follow the instructions we sent for the video',
+  },
+  incomplete_information: {
+    label: 'Incomplete or missing information',
+    told: 'some of what we asked you to say was missing',
+  },
+  duration: {
+    label: 'Video duration does not meet the requirement',
+    told: 'the length was not right — please keep it to about one minute',
+  },
+  off_guidelines: {
+    label: 'Content does not match referral guidelines',
+    told: 'the content did not match our guidelines for profile videos',
+  },
+  face_not_visible: {
+    label: 'Face is not clearly visible',
+    told: 'your face was not clearly visible — families want to see who they are meeting',
+  },
+  children_visible: {
+    label: "Children's faces are visible",
+    told: "a child's face was visible. Please blur or hide any child's face, or film without children in shot — we protect their privacy",
+  },
+  duplicate: {
+    label: 'Duplicate or previously submitted video',
+    told: 'you have already sent us this one',
+  },
+  vulgar: {
+    label: 'Vulgar content',
+    told: 'it contained something not suitable for a public profile',
+  },
+  spam: {
+    label: 'Spam content',
+    told: 'it did not look like a profile video',
+  },
+  low_quality: {
+    label: 'Not good enough quality',
+    told: 'the overall quality was not high enough for your profile',
+  },
+  video_error: {
+    label: 'Error in video',
+    told: 'the file would not play properly at our end',
+  },
+  other: {
+    label: 'Other reason',
+    told: null,
+  },
 };
 
 router.get('/media-queue', wrap(async (req, res) => {
@@ -1224,7 +1289,11 @@ router.get('/media-queue', wrap(async (req, res) => {
     items,
     total: items.length,
     waiting: items.reduce((sum, n) => sum + n.videos.length + n.photos.length, 0),
-    reasons: Object.keys(REJECTION_REASONS),
+    // Sent with the queue so the picker is defined in one place — a label the
+    // dashboard invents itself would drift from what she is actually told.
+    reasons: Object.entries(REJECTION_REASONS).map(([value, r]) => ({
+      value, label: r.label,
+    })),
     limits: { videos: MAX_FEATURED_VIDEOS, photos: MAX_FEATURED_PHOTOS },
   });
 }));
@@ -1245,17 +1314,26 @@ router.post('/nannies/:id/:kind(videos|photos)/:mediaId/reject',
     const item = (nanny[kind] || []).id(req.params.mediaId);
     if (!item) return res.status(404).json({ error: 'Not found' });
 
-    const reason = String(req.body?.reason || '').trim();
-    if (!(reason in REJECTION_REASONS)) {
-      return res.status(400).json({
-        error: `A reason is required: ${Object.keys(REJECTION_REASONS).join(', ')}`,
-      });
+    // A video is often wrong in more than one way — dark *and* too short —
+    // so several reasons can be ticked. A single string is still accepted,
+    // since that is what the earlier version sent.
+    const raw = req.body?.reasons ?? req.body?.reason;
+    const reasons = [...new Set((Array.isArray(raw) ? raw : [raw])
+      .map((r) => String(r || '').trim())
+      .filter(Boolean))];
+
+    if (!reasons.length) {
+      return res.status(400).json({ error: 'Tick at least one reason' });
+    }
+    const unknown = reasons.filter((r) => !(r in REJECTION_REASONS));
+    if (unknown.length) {
+      return res.status(400).json({ error: `Unknown reason: ${unknown.join(', ')}` });
     }
 
-    // "Other" has no stock wording, so the reviewer must supply it — a
-    // rejection she cannot act on is worse than none.
-    const detail = String(req.body?.detail || '').trim().slice(0, 400);
-    if (reason === 'other' && !detail) {
+    // The note is optional, except for "Other" — which says nothing on its
+    // own, and a rejection she cannot act on is worse than none.
+    const detail = String(req.body?.detail || req.body?.note || '').trim().slice(0, 600);
+    if (reasons.includes('other') && !detail) {
       return res.status(400).json({ error: 'Say what was wrong with it, so she can fix it' });
     }
 
@@ -1265,7 +1343,10 @@ router.post('/nannies/:id/:kind(videos|photos)/:mediaId/reject',
     item.featuredAt = undefined;
     item.rejectedAt = new Date();
     item.rejectedBy = req.admin?._id;
-    item.rejectionReason = reason;
+    item.rejectionReasons = reasons;
+    // The first tick still fills the old single field, so anything reading it
+    // keeps working rather than silently showing nothing.
+    item.rejectionReason = reasons[0];
     item.rejectionDetail = detail || undefined;
     await nanny.save();
 
@@ -1273,7 +1354,7 @@ router.post('/nannies/:id/:kind(videos|photos)/:mediaId/reject',
       nanny,
       M.mediaRejected({
         kind: kind === 'videos' ? 'video' : 'photo',
-        reason: REJECTION_REASONS[reason],
+        reasons: reasons.map((r) => REJECTION_REASONS[r].told).filter(Boolean),
         detail,
       }),
     ).catch(() => {});

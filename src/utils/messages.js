@@ -259,13 +259,29 @@ Type *0* for the main menu.`;
  * as a telling-off — a nanny who feels judged stops contributing, and an
  * empty profile costs her the bookings.
  */
-export const mediaRejected = ({ kind, reason, detail }) => {
-  const because = detail || reason;
-  return `📷 About the ${kind} you sent
+export const mediaRejected = ({ kind, reasons = [], reason, detail }) => {
+  // One reason reads better in a sentence; several read better as a list she
+  // can work down. Both end with the same invitation to send another.
+  const list = reasons.length ? reasons : [reason].filter(Boolean);
 
-We could not add it to your profile${because ? ` because ${because}` : ''}.
+  const lines = [`📷 *About the ${kind} you sent*`, ''];
 
-Please feel free to send another — a ${kind} of you with a family or at work helps you get chosen more often.`;
+  if (list.length === 1) {
+    lines.push(`We could not add it to your profile because ${list[0]}.`);
+  } else if (list.length > 1) {
+    lines.push('We could not add it to your profile for these reasons:', '');
+    list.forEach((r) => lines.push(`• ${r.charAt(0).toUpperCase()}${r.slice(1)}`));
+  } else {
+    lines.push('We could not add it to your profile.');
+  }
+
+  if (detail) lines.push('', `📝 ${detail}`);
+
+  lines.push(
+    '',
+    `Please send another when you can — a ${kind} of you with a family or at work helps you get chosen more often.`,
+  );
+  return lines.join('\n');
 };
 
 /* ---- Follow & save discount ------------------------------------------ */
