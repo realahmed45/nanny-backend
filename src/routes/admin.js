@@ -1663,6 +1663,140 @@ router.post('/bookings/:id/agent-decision', wrap(async (req, res) => {
   res.json({ ok: true, booking });
 }));
 
+/**
+ * Send the backup now, rather than waiting for tonight.
+ *
+ * Useful before a risky change, and the only way to confirm the nightly job
+ * actually works without staying up for it. `to` overrides the recipient so a
+ * test send does not have to go to the real inbox.
+ */
+router.post('/backup/send', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const { sendDailyBackup } = await import('../services/backup.js');
+  const to = String(req.body?.to || '').trim() || undefined;
+  const result = await sendDailyBackup(to ? { to } : {});
+  res.locals.auditLabel = result.to;
+  res.json({ ok: true, ...result });
+}));
+
+/* ------------------------------------------------------------------ *
+ * Follow & save — the 2-day discount
+ *
+ * Neither half can be checked automatically: Instagram will not tell us who
+ * follows, and nothing can see whether a stranger saved our number. So an
+ * admin confirms each by eye, and every change records who said so. The
+ * discount window starts when the second of the two is confirmed.
+ * ------------------------------------------------------------------ */
+
+router.get('/social', wrap(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(100, Number(req.query.limit) || 25);
+
+  const filter = {};
+  if (req.query.role === 'family' || req.query.role === 'nanny') filter.role = req.query.role;
+  else filter.role = { $in: [USER_ROLE.FAMILY, USER_ROLE.NANNY] };
+
+  // "Waiting" is the working queue: someone who has done one half, or whose
+  // handle is on file but unverified.
+  if (req.query.status === 'verified') {
+    filter['social.instagramFollowing'] = true;
+    filter['social.whatsappSaved'] = true;
+  } else if (req.query.status === 'waiting') {
+    filter.$or = [
+      { 'social.instagramFollowing': true, 'social.whatsappSaved': { $ne: true } },
+      { 'social.whatsappSaved': true, 'social.instagramFollowing': { $ne: true } },
+      { 'social.instagramHandle': { $nin: [null, ''] }, 'social.instagramFollowing': { $ne: true } },
+    ];
+  }
+  if (req.query.search) {
+    const rx = new RegExp(String(req.query.search).slice(0, 60).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    filter.$and = [...(filter.$and || []), { $or: [{ fullName: rx }, { phone: rx }, { 'social.instagramHandle': rx }] }];
+  }
+
+  const { getSettings } = await import('../services/settings.js');
+  const [items, total, settings] = await Promise.all([
+    User.find(filter)
+      .select('fullName nickname phone role social lastSeenAt createdAt')
+      .sort({ 'social.discountStartedAt': -1, createdAt: -1 })
+      .skip((page - 1) * limit).limit(limit).lean(),
+    User.countDocuments(filter),
+    getSettings(),
+  ]);
+
+  const { socialDiscountStatus, DEFAULT_SOCIAL_DISCOUNT } = await import('../services/pricing.js');
+  const config = { ...DEFAULT_SOCIAL_DISCOUNT, ...(settings.socialDiscount || {}) };
+
+  res.json({
+    items: items.map((u) => ({ ...u, discount: socialDiscountStatus(u, config) })),
+    total,
+    page,
+    pages: Math.ceil(total / limit),
+    config,
+  });
+}));
+
+router.patch('/social/:id', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const user = await User.findById(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const before = { ...(user.social || {}) };
+  res.locals.auditBefore = {
+    instagramFollowing: before.instagramFollowing,
+    whatsappSaved: before.whatsappSaved,
+  };
+
+  user.social = user.social || {};
+  if (req.body?.instagramHandle !== undefined) {
+    user.social.instagramHandle = String(req.body.instagramHandle).trim().replace(/^@/, '').slice(0, 60);
+  }
+  if (req.body?.notes !== undefined) user.social.notes = String(req.body.notes).slice(0, 500);
+
+  // Each confirmation is somebody's judgement, so it is stamped with theirs.
+  if (req.body?.instagramFollowing !== undefined) {
+    const on = !!req.body.instagramFollowing;
+    user.social.instagramFollowing = on;
+    user.social.instagramVerifiedAt = on ? new Date() : undefined;
+    user.social.instagramVerifiedBy = on ? req.admin?._id : undefined;
+  }
+  if (req.body?.whatsappSaved !== undefined) {
+    const on = !!req.body.whatsappSaved;
+    user.social.whatsappSaved = on;
+    user.social.whatsappVerifiedAt = on ? new Date() : undefined;
+    user.social.whatsappVerifiedBy = on ? req.admin?._id : undefined;
+  }
+  if (req.body?.discountCancelled !== undefined) {
+    user.social.discountCancelled = !!req.body.discountCancelled;
+  }
+
+  // The clock starts when the second one lands, and is not restarted by
+  // re-confirming something already true.
+  const bothDone = user.social.instagramFollowing && user.social.whatsappSaved;
+  if (bothDone && !user.social.discountStartedAt) {
+    user.social.discountStartedAt = new Date();
+  } else if (!bothDone) {
+    user.social.discountStartedAt = undefined;
+  }
+
+  user.markModified('social');
+  await user.save();
+
+  const { getSettings } = await import('../services/settings.js');
+  const settings = await getSettings();
+  const { socialDiscountStatus, DEFAULT_SOCIAL_DISCOUNT } = await import('../services/pricing.js');
+  const discount = socialDiscountStatus(
+    user,
+    { ...DEFAULT_SOCIAL_DISCOUNT, ...(settings.socialDiscount || {}) },
+  );
+
+  // Tell them the moment it starts — a discount nobody knows about buys
+  // nothing, and this one only lasts two days.
+  if (bothDone && !before.discountStartedAt && discount.active) {
+    await notifyUser(user, M.socialDiscountUnlocked(discount.expiresAt)).catch(() => {});
+  }
+
+  res.locals.auditLabel = user.nickname || user.fullName;
+  res.json({ ok: true, user, discount });
+}));
+
 /* ------------------------------------------------------------------ *
  * Payments & payouts
  * ------------------------------------------------------------------ */

@@ -10,6 +10,7 @@ import { refundBooking, releaseDuePayouts, queuePayout } from '../services/payme
 import { findReplacements } from '../services/matching.js';
 import { notifyUser } from '../services/notify.js';
 import { notifyFamilyOfDecline } from '../flows/nannyMenu.js';
+import config from '../config/index.js';
 import { prettyDate, timeRange, money } from '../utils/format.js';
 import * as M from '../utils/messages.js';
 
@@ -283,6 +284,19 @@ export async function processReferralAbuse() {
  * Cron wiring
  * ------------------------------------------------------------------ */
 
+/**
+ * Email the end-of-day spreadsheet.
+ *
+ * Loud on both paths: a backup that quietly stopped running is the kind of
+ * thing nobody notices until the day they need it.
+ */
+export async function processDailyBackup() {
+  const { sendDailyBackup } = await import('../services/backup.js');
+  const result = await sendDailyBackup();
+  console.log(`[backup] sent ${result.filename} to ${result.to} (${result.bytes} bytes) — ${result.counts}`);
+  return result;
+}
+
 let tasks = [];
 
 export function startScheduler() {
@@ -307,7 +321,11 @@ export function startScheduler() {
   // here blocks anyone — it raises an alert and a person decides.
   tasks.push(cron.schedule('0 3,15 * * *', () => guard('referralAbuse', processReferralAbuse)));
 
-  console.log('[scheduler] started (7 jobs)');
+  // End of day: email the backup spreadsheet. Last job of the night so it
+  // captures everything that happened today.
+  tasks.push(cron.schedule(`0 ${config.backup.hour} * * *`, () => guard('backup', processDailyBackup)));
+
+  console.log('[scheduler] started (8 jobs)');
   return tasks;
 }
 
@@ -328,5 +346,5 @@ async function guard(name, fn) {
 export default {
   startScheduler, stopScheduler, processResponseTimeouts,
   processServiceDayTransitions, processReplacementDeadlines,
-  processReminders, processPayouts,
+  processReminders, processPayouts, processDailyBackup,
 };

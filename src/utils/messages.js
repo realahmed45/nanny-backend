@@ -1,5 +1,5 @@
 import {
-  money, prettyDate, timeRange, prettyTime, ratedList, starLine,
+  money, prettyDate, prettyDateFull, timeRange, prettyTime, ratedList, starLine,
   childLines, weekdayList, statusLabel, numbered, durationMenu, firstName, nannyDisplayName,
 } from './format.js';
 import { LANGUAGES, SKILLS, SUBJECTS, WEEKDAYS } from './constants.js';
@@ -61,12 +61,32 @@ export const COMMANDS_HELP = `*Available commands*
 • *Cancel* — Cancel a booking
 • *None* — No Google Maps location / no medical condition`;
 
-export const IMPORTANT_FAMILY_INFO = `⚠️ *Important Information for Families*
+/**
+ * The house rules, quoted from config so a fee change lands everywhere at once.
+ *
+ * An emergency raises the transport fee by a flat surcharge — the nanny is
+ * being pulled across town at no notice — so the emergency version states the
+ * raised band and that it is cash on arrival. It is deliberately not folded
+ * into the transfer total: the family pays the platform for hours and the
+ * nanny in cash for the journey.
+ */
+export const importantFamilyInfo = ({ isEmergency = false } = {}) => {
+  const { min, max } = config.transportFee;
+  const bump = config.emergencySurcharge;
+  const transport = isEmergency
+    ? `🚕 *Transport:* ${money(min + bump)}–${money(max + bump)} depending on the area — this includes a ${money(bump)} emergency surcharge, paid to the nanny *in cash when she arrives*.`
+    : `🚕 *Transport:* A ${money(min)}–${money(max)} transport fee applies depending on the area.`;
+
+  return `⚠️ *Important Information for Families*
 
 🍽️ *Meal:* For bookings of 5+ hours, please provide the nanny with at least 1 meal.
-🚕 *Transport:* A 50,000–100,000 transport fee applies depending on the area.
+${transport}
 ⏰ *Overtime:* 15+ mins = 30 mins charged; 45+ mins = 1 hour charged.
 🧸 *Kids' Preferences:* Please tell us your children's favorite toys, games, and activities.`;
+};
+
+/** Kept for callers that predate the emergency variant. */
+export const IMPORTANT_FAMILY_INFO = importantFamilyInfo();
 
 /* ------------------------------------------------------------------ *
  * Registration
@@ -229,6 +249,23 @@ You can view this request later under:
 
 Type *0* for the main menu.`;
 
+/* ---- Follow & save discount ------------------------------------------ */
+
+/**
+ * Sent the moment an admin confirms both halves.
+ *
+ * A two-day discount nobody hears about is not a discount, and by the time
+ * they next open the chat half of it may be gone — so this goes out on
+ * confirmation rather than waiting for their next booking.
+ */
+export const socialDiscountUnlocked = (expiresAt) => `🎉 *Your discount is active!*
+
+Thank you for following us on Instagram and saving our number.
+
+You now have *discounted pricing* on your bookings${expiresAt ? ` until *${prettyDateFull(expiresAt)}*` : ''}.
+
+Book now to use it — type *nanny* and choose *Find a Nanny*.`;
+
 export const BOOKING_DISCARDED =
   '🗑️ Your booking request has been discarded. You can start a new one any time from the main menu.';
 /** Echo the date we settled on, so a weekday answer is unambiguous. */
@@ -375,6 +412,8 @@ export function bookingSummary(b, {
   if (b.isEmergency) {
     lines.push('');
     lines.push('⚡ *EMERGENCY BOOKING* — needed today');
+    // Stated beside the total, because it is the one cost that is not in it.
+    lines.push(`🚕 Transport includes a ${money(config.emergencySurcharge)} emergency surcharge, paid to the nanny in cash on arrival.`);
   }
 
   // Round-the-clock care changes what is being staffed, so it is stated on
@@ -499,7 +538,28 @@ export function nannyProfile(n, { hourlyRate = null } = {}) {
   lines.push('');
   lines.push(n.backgroundCheckPassed ? '✅Background Check' : '⬜Background Check');
   lines.push(n.cprCertified ? '✅CPR Certificate' : '⬜No CPR Certificate');
+
+  // Only what an admin has approved. A nanny sends whatever she likes over
+  // months; the family sees the selection, not the archive.
+  const media = approvedMedia(n);
+  if (media.length) {
+    lines.push('', '*📸 Photos & Videos*');
+    media.forEach((m, i) => lines.push(`${i + 1}. ${m.caption || m.title || (m.kind === 'video' ? 'Video' : 'Photo')}\n   ${m.url}`));
+  }
   return lines.join('\n');
+}
+
+/**
+ * The media a family is allowed to see, videos first.
+ *
+ * Approval is the whole point: these show other people's children, and a
+ * nanny keeps sending more over time. Anything not explicitly approved is
+ * invisible here no matter how it got onto her record.
+ */
+export function approvedMedia(n) {
+  const videos = (n.videos || []).filter((v) => v.approved).map((v) => ({ ...(v.toObject?.() ?? v), kind: 'video' }));
+  const photos = (n.photos || []).filter((p) => p.approved).map((p) => ({ ...(p.toObject?.() ?? p), kind: 'photo' }));
+  return [...videos, ...photos];
 }
 
 export const NANNY_PROFILE_ACTIONS = `What do you want to do?
@@ -706,6 +766,10 @@ export function nannyBookingRequest(b, family, expiresAt, { isChange = false } =
   }
   lines.push('', '*💰 Your Earnings*', `Rate: ${money(b.hourlyRate)}/hr`);
   lines.push(`Total: *${money(b.totalAmount)}*`);
+  // She is the one collecting it, so she is told before she accepts.
+  if (b.isEmergency && b.emergencySurcharge) {
+    lines.push('', `⚡ *Emergency booking* — the family pays you an extra ${money(b.emergencySurcharge)} in cash on top of the usual transport fee when you arrive.`);
+  }
   if (expiresAt) {
     const mins = Math.max(0, Math.round((new Date(expiresAt) - Date.now()) / 60000));
     lines.push('', `⏳ Please respond within *${mins} minutes*.`);

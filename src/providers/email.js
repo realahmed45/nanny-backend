@@ -47,7 +47,7 @@ const senderAddress = (from) => {
 
 const resendProvider = {
   name: 'resend',
-  async send({ to, subject, text, html }) {
+  async send({ to, subject, text, html, attachments }) {
     const address = senderAddress(config.resend.from);
 
     if (PUBLIC_MAILBOX.test(address)) {
@@ -71,6 +71,10 @@ const resendProvider = {
       html,
       // Replies reach a real person rather than a no-reply mailbox.
       ...(config.resend.replyTo ? { reply_to: config.resend.replyTo } : {}),
+      // Resend takes base64 content; nodemailer takes the buffer directly.
+      ...(attachments?.length
+        ? { attachments: attachments.map((a) => ({ filename: a.filename, content: a.content.toString('base64') })) }
+        : {}),
     });
 
     // The SDK reports failures in `error` rather than throwing.
@@ -81,7 +85,7 @@ const resendProvider = {
 
 const smtpProvider = {
   name: 'smtp',
-  async send({ to, subject, text, html }) {
+  async send({ to, subject, text, html, attachments }) {
     if (!transporter) {
       const nodemailer = (await import('nodemailer')).default;
       transporter = nodemailer.createTransport({
@@ -93,16 +97,21 @@ const smtpProvider = {
         tls: { rejectUnauthorized: config.smtp.rejectUnauthorized },
       });
     }
-    const info = await transporter.sendMail({ from: config.smtp.from, to, subject, text, html });
+    const info = await transporter.sendMail({
+      from: config.smtp.from, to, subject, text, html, attachments,
+    });
     return { success: true, messageId: info.messageId };
   },
 };
 
 export const consoleEmailProvider = {
   name: 'console',
-  async send({ to, subject, text }) {
+  async send({ to, subject, text, attachments }) {
     if (config.env !== 'test') {
-      console.log(`[email] to=${to} subject="${subject}"
+      const files = attachments?.length
+        ? ` attachments=${attachments.map((a) => `${a.filename} (${a.content.length} bytes)`).join(', ')}`
+        : '';
+      console.log(`[email] to=${to} subject="${subject}"${files}
 ${text}`);
     }
     return { success: true };
@@ -121,9 +130,39 @@ export async function send(message) {
   return BACKENDS[activeProvider()].send(message);
 }
 
+/**
+ * The masthead every email opens with.
+ *
+ * Mail clients block remote images by default, so the wordmark is real text
+ * beside the logo rather than baked into it: with images off the email still
+ * reads as ours. The logo needs a publicly reachable URL — set BRAND_LOGO_URL;
+ * without one the wordmark simply stands alone, which is why this degrades
+ * quietly instead of showing a broken image.
+ */
+const header = () => {
+  const logo = config.brand.logoUrl
+    ? `<img src="${config.brand.logoUrl}" alt="" width="56" height="56"
+         style="display:block;border:0;border-radius:50%;background:#fdfcf3">`
+    : '';
+  return `
+  <table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:0 0 20px">
+    <tr>
+      ${logo ? `<td style="padding-right:12px;vertical-align:middle">${logo}</td>` : ''}
+      <td style="vertical-align:middle">
+        <div style="font-size:19px;font-weight:700;color:#111;letter-spacing:.5px">${config.brand.name}</div>
+      </td>
+    </tr>
+  </table>`;
+};
+
+const footer = () => `
+  <p style="color:#999;font-size:12px;margin-top:28px;border-top:1px solid #eee;padding-top:14px">
+    ${config.brand.name}
+  </p>`;
+
 const CODE_TEMPLATE = (code) => `
   <div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:480px;margin:0 auto;padding:24px">
-    <h2 style="margin:0 0 4px;color:#111">My Nanny</h2>
+    ${header()}
     <p style="margin:0 0 20px;color:#666;font-size:14px">Account verification</p>
     <p style="color:#333;font-size:15px">Use this code to verify your account:</p>
     <p style="font-size:32px;font-weight:700;letter-spacing:6px;color:#2563eb;margin:16px 0">${code}</p>
@@ -131,6 +170,16 @@ const CODE_TEMPLATE = (code) => `
     <p style="color:#999;font-size:12px;margin-top:24px">
       If you didn't request this, you can ignore this email.
     </p>
+    ${footer()}
+  </div>
+`;
+
+/** Wrap arbitrary body HTML in the same masthead, for non-code emails. */
+export const brandedEmail = (bodyHtml) => `
+  <div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:560px;margin:0 auto;padding:24px">
+    ${header()}
+    ${bodyHtml}
+    ${footer()}
   </div>
 `;
 

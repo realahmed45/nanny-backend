@@ -105,6 +105,31 @@ export const config = {
     max: int(process.env.TRANSPORT_FEE_MAX, 100000),
   },
 
+  /**
+   * What an emergency costs on top.
+   *
+   * A same-day request pulls a nanny across town at no notice, so the
+   * transport fee rises by a flat amount rather than a percentage: 50,000
+   * becomes 100,000, 100,000 becomes 150,000. Paid to the nanny in cash when
+   * she arrives, not taken through the platform — which is why it is quoted
+   * everywhere but never added to the amount the family transfers.
+   */
+  emergencySurcharge: int(process.env.EMERGENCY_SURCHARGE, 50000),
+
+  brand: {
+    name: process.env.BRAND_NAME || 'Nanny in Paradise',
+    // Must be a public URL — mail clients cannot read files from our disk.
+    // Left unset, emails show the wordmark alone rather than a broken image.
+    logoUrl: process.env.BRAND_LOGO_URL || '',
+  },
+
+  /** Where the end-of-day backup goes. */
+  backup: {
+    email: process.env.BACKUP_EMAIL || 'bassam.agi@gmail.com',
+    // Local hour to send at, in the server's timezone.
+    hour: int(process.env.BACKUP_HOUR, 23),
+  },
+
   // Response windows (spec: 1h new booking, 2h existing booking change)
   newBookingResponseMinutes: int(process.env.NEW_BOOKING_RESPONSE_MINUTES, 60),
   changeBookingResponseMinutes: int(process.env.CHANGE_BOOKING_RESPONSE_MINUTES, 120),

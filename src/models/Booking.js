@@ -122,6 +122,13 @@ const BookingSchema = new mongoose.Schema({
   refundDue: { type: Number, default: 0 },        // owed per policy
   refundedAmount: { type: Number, default: 0 },   // actually transferred back
   transportFee: { type: Number, default: 0 },
+
+  /**
+   * Added to the transport fee on a same-day request, paid to the nanny in
+   * cash when she arrives. Recorded per booking rather than read from config
+   * at display time, so a later change to the rate does not rewrite history.
+   */
+  emergencySurcharge: { type: Number, default: 0 },
   paymentStatus: { type: String, enum: Object.values(PAYMENT_STATUS), default: PAYMENT_STATUS.IN_PROCESS },
 
   nannyResponses: [NannyResponseSchema],

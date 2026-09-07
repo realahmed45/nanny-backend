@@ -237,7 +237,7 @@ function afterStartDate(ctx, { confirm = true } = {}) {
   }
   return [
     ...steps,
-    { text: M.IMPORTANT_FAMILY_INFO },
+    { text: M.importantFamilyInfo({ isEmergency: ctx.get('isEmergency') }) },
     { text: M.ASK_START_TIME, state: 'FF_START_TIME' },
   ];
 }
@@ -392,7 +392,7 @@ const repeatDaysHandler = async (ctx) => {
     // Confirm what we understood, so a typed answer like "monday, tuesday and
     // wed" is visibly registered rather than silently assumed.
     { text: M.repeatDaysConfirmed(days, preview.length) },
-    { text: M.IMPORTANT_FAMILY_INFO },
+    { text: M.importantFamilyInfo({ isEmergency: ctx.get('isEmergency') }) },
     { text: M.ASK_START_TIME, state: 'FF_START_TIME' },
   ];
 };
@@ -767,6 +767,7 @@ export function draftToBooking(ctx, { hourlyRate = null } = {}) {
     otherInstructions: d.otherInstructions,
     agentCallRequested: !!d.agentCallRequested,
     isEmergency: !!d.isEmergency,
+    emergencySurcharge: d.isEmergency ? config.emergencySurcharge : 0,
     isLiveIn: !!d.isLiveIn,
     needsAgentReview: !!d.needsAgentReview,
     nanniesNeeded: d.nanniesNeeded || 1,

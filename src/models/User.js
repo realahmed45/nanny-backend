@@ -186,6 +186,35 @@ const UserSchema = new mongoose.Schema({
   referralDiscountCancelled: { type: Boolean, default: false },
 
   /**
+   * Following us on Instagram and saving our number, and the discount earned
+   * for doing both.
+   *
+   * Neither can be checked automatically — Instagram will not tell us who
+   * follows, and nothing can see a stranger's contacts — so an admin confirms
+   * each one by eye. That is why every field records who verified it and when:
+   * the record is a person's judgement, and it needs to be attributable.
+   *
+   * The discount runs from the moment the second of the two is confirmed,
+   * because that is when the family has actually done what was asked.
+   */
+  social: {
+    instagramHandle: String,
+    instagramFollowing: { type: Boolean, default: false },
+    instagramVerifiedAt: Date,
+    instagramVerifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'AdminUser' },
+
+    whatsappSaved: { type: Boolean, default: false },
+    whatsappVerifiedAt: Date,
+    whatsappVerifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'AdminUser' },
+
+    // Set when both are true; the window is measured from here.
+    discountStartedAt: Date,
+    // An admin can revoke it early, the same as the referral discount.
+    discountCancelled: { type: Boolean, default: false },
+    notes: String,
+  },
+
+  /**
    * The attribution engine's record. `referredBy` above is kept in step with
    * this for the older readers, but this sub-document is authoritative — it
    * is the only one that knows whether the claim is still takeable.

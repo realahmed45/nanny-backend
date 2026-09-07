@@ -32,6 +32,52 @@ export const DEFAULT_REFERRAL_DISCOUNT = {
   stackReferrals: true,
 };
 
+/**
+ * The discount for following us on Instagram and saving our number.
+ *
+ * Short by design: two days is enough to be worth doing at signup and to
+ * bring someone back quickly, without giving away the referred rate to
+ * anyone who taps follow once.
+ */
+export const DEFAULT_SOCIAL_DISCOUNT = {
+  enabled: true,
+  validityDays: 2,
+  // Both are required by default — following alone is easy to undo the
+  // next day, saving the number alone is invisible to anyone else.
+  requireInstagram: true,
+  requireWhatsapp: true,
+};
+
+/**
+ * Is this family inside the follow-and-save discount window?
+ *
+ * Deliberately mirrors discountStatus: both grant the same referred price
+ * table, so whichever is active wins and neither needs to know about the
+ * other.
+ */
+export function socialDiscountStatus(user, socialConfig) {
+  const cfg = { ...DEFAULT_SOCIAL_DISCOUNT, ...(socialConfig || {}) };
+  const s = user?.social || {};
+
+  if (!cfg.enabled) return { active: false, reason: 'disabled', expiresAt: null };
+  if (s.discountCancelled) return { active: false, reason: 'cancelled', expiresAt: null };
+
+  const needs = [];
+  if (cfg.requireInstagram && !s.instagramFollowing) needs.push('instagram');
+  if (cfg.requireWhatsapp && !s.whatsappSaved) needs.push('whatsapp');
+  if (needs.length) return { active: false, reason: 'not_verified', needs, expiresAt: null };
+
+  // Started when the second was confirmed; fall back to the later of the two
+  // verification stamps for records written before that field existed.
+  const since = s.discountStartedAt
+    || [s.instagramVerifiedAt, s.whatsappVerifiedAt].filter(Boolean).sort((a, b) => b - a)[0];
+  if (!since) return { active: false, reason: 'not_verified', expiresAt: null };
+
+  const expiresAt = new Date(new Date(since).getTime() + cfg.validityDays * 86400000);
+  const active = expiresAt > new Date();
+  return { active, reason: active ? 'active' : 'expired', expiresAt, days: cfg.validityDays };
+}
+
 /** Read the price table for a given child count from either tier. */
 function rateFor(table, children, extraShare) {
   const tiers = Object.keys(table)
@@ -95,16 +141,30 @@ export async function hourlyRateFor({ user, children = 1 }) {
   const discount = { ...DEFAULT_REFERRAL_DISCOUNT, ...(settings.referralDiscount || {}) };
 
   const status = discountStatus(user, discount);
-  const table = status.active ? pricing.referred : pricing.standard;
+  const social = socialDiscountStatus(user, settings.socialDiscount);
+
+  // Both grant the same table, so either is enough. When both are running,
+  // the one lasting longer is what the family is told about.
+  const active = status.active || social.active;
+  const table = active ? pricing.referred : pricing.standard;
   const share = pricing.extraChildShare ?? DEFAULT_PRICING.extraChildShare;
+
+  const expiresAt = status.active && social.active
+    ? [status.expiresAt, social.expiresAt].filter(Boolean).sort((a, b) => b - a)[0] ?? null
+    : (status.active ? status.expiresAt : social.expiresAt);
 
   return {
     hourlyRate: rateFor(table, children, share),
     standardRate: rateFor(pricing.standard, children, share),
-    discounted: status.active,
-    discountExpiresAt: status.expiresAt,
+    discounted: active,
+    discountExpiresAt: expiresAt,
+    // Which one earned it, so the summary can say so.
+    discountReason: status.active ? 'referral' : (social.active ? 'social' : null),
     children: Math.max(1, Number(children) || 1),
   };
 }
 
-export default { hourlyRateFor, discountStatus, DEFAULT_PRICING, DEFAULT_REFERRAL_DISCOUNT };
+export default {
+  hourlyRateFor, discountStatus, socialDiscountStatus,
+  DEFAULT_PRICING, DEFAULT_REFERRAL_DISCOUNT, DEFAULT_SOCIAL_DISCOUNT,
+};

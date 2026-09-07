@@ -111,6 +111,8 @@ export async function createBooking({ family, nanny, draft }) {
     },
     children: draft.children || [],
     isEmergency: !!draft.isEmergency,
+    // Locked in at booking time so a later rate change cannot rewrite it.
+    emergencySurcharge: draft.isEmergency ? config.emergencySurcharge : 0,
     isLiveIn: !!draft.isLiveIn,
     needsAgentReview: !!draft.needsAgentReview,
     nanniesNeeded: draft.nanniesNeeded || 1,
