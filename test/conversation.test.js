@@ -959,6 +959,44 @@ test('a booking waiting on an agent is not thrown away', async () => {
   assert.equal(session.data.needsAgentReview, true);
 });
 
+test('a rejected photo tells the nanny why, and stays out of the queue', async () => {
+  const { User } = await import('../src/models/index.js');
+  const { mediaRejected } = await import('../src/utils/messages.js');
+
+  const nanny = await User.create({
+    phone: NANNY, role: 'nanny', fullName: 'Maria Grook', registrationComplete: true,
+    photos: [{ url: 'https://cdn/blurry.jpg', approved: false }],
+  });
+
+  // What the reject endpoint writes, and what she is sent.
+  const photo = nanny.photos[0];
+  photo.approved = false;
+  photo.featured = false;
+  photo.rejectedAt = new Date();
+  photo.rejectionReason = 'bad_quality';
+  await nanny.save();
+
+  const fresh = await User.findById(nanny._id);
+  assert.ok(fresh.photos[0].rejectedAt, 'the verdict is recorded, not the file deleted');
+  assert.equal(fresh.photos[0].rejectionReason, 'bad_quality');
+
+  // The queue asks for unjudged items only, so a rejected one does not
+  // come back round for a second opinion.
+  const waiting = await User.find({
+    role: 'nanny',
+    photos: { $elemMatch: { approved: false, rejectedAt: null } },
+  });
+  assert.equal(waiting.length, 0, 'already judged, so no longer waiting');
+
+  // And the message is written to keep her sending.
+  const told = mediaRejected({
+    kind: 'photo',
+    reason: 'the quality was too low — it was blurry, dark, or hard to make out',
+  });
+  assert.match(told, /blurry/);
+  assert.match(told, /send another/i, 'invites another rather than telling her off');
+});
+
 test('family registration collects name, email and verifies OTP', async () => {
   const { User } = await import('../src/models/index.js');
 

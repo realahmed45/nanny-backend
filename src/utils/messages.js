@@ -251,6 +251,23 @@ You can view this request later under:
 
 Type *0* for the main menu.`;
 
+/**
+ * Told to a nanny when something she sent is turned down.
+ *
+ * Written to keep her sending. She went to the trouble of filming something,
+ * so the message says what was wrong and invites another rather than reading
+ * as a telling-off — a nanny who feels judged stops contributing, and an
+ * empty profile costs her the bookings.
+ */
+export const mediaRejected = ({ kind, reason, detail }) => {
+  const because = detail || reason;
+  return `📷 About the ${kind} you sent
+
+We could not add it to your profile${because ? ` because ${because}` : ''}.
+
+Please feel free to send another — a ${kind} of you with a family or at work helps you get chosen more often.`;
+};
+
 /* ---- Follow & save discount ------------------------------------------ */
 
 /**

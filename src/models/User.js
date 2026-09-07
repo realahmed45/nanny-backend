@@ -150,6 +150,13 @@ const UserSchema = new mongoose.Schema({
     // Picked for the public profile. Never true without approved.
     featured: { type: Boolean, default: false },
     featuredAt: Date,
+    // Turned down, with the reason she was told. Kept rather than deleted:
+    // it records what was sent and what was decided, and stops the same file
+    // reappearing in a queue that has already judged it.
+    rejectedAt: Date,
+    rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'AdminUser' },
+    rejectionReason: { type: String, enum: ['bad_quality', 'misconduct', 'other', null], default: null },
+    rejectionDetail: String,
   }],
 
   /**
@@ -168,6 +175,10 @@ const UserSchema = new mongoose.Schema({
     approvedAt: Date,
     featured: { type: Boolean, default: false },
     featuredAt: Date,
+    rejectedAt: Date,
+    rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'AdminUser' },
+    rejectionReason: { type: String, enum: ['bad_quality', 'misconduct', 'other', null], default: null },
+    rejectionDetail: String,
   }],
   age: Number,
   experienceYears: Number,

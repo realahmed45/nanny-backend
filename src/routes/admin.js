@@ -1118,6 +1118,14 @@ router.patch('/nannies/:id/videos/:videoId', requireRole('admin', 'super_admin')
   if (req.body?.approved !== undefined) {
     video.approved = !!req.body.approved;
     video.approvedAt = video.approved ? new Date() : undefined;
+    // Approving overturns an earlier rejection, so the old verdict goes
+    // rather than sitting alongside a contradictory one.
+    if (video.approved) {
+      video.rejectedAt = undefined;
+      video.rejectedBy = undefined;
+      video.rejectionReason = null;
+      video.rejectionDetail = undefined;
+    }
     // Un-approving must pull it off the profile too, or a video judged
     // unsuitable would keep showing.
     if (!video.approved) { video.featured = false; video.featuredAt = undefined; }
@@ -1159,6 +1167,120 @@ router.delete('/nannies/:id/videos/:videoId', requireRole('admin', 'super_admin'
   res.locals.auditLabel = nanny.nickname || nanny.fullName;
   res.json({ ok: true, videos: nanny.videos });
 }));
+
+/* ------------------------------------------------------------------ *
+ * The review queue
+ *
+ * Everything a nanny has sent that nobody has ruled on yet, grouped by nanny
+ * so a reviewer works through a person rather than a stream of unattributed
+ * files. Rejected items are not silently dropped: she is told why, because
+ * she cannot send a better photo if nobody says what was wrong with this one.
+ * ------------------------------------------------------------------ */
+
+/** Why a piece of media was turned down. Sent to her, so worded for her. */
+const REJECTION_REASONS = {
+  bad_quality: 'the quality was too low — it was blurry, dark, or hard to make out',
+  misconduct: 'it did not meet our standards for what can appear on a profile',
+  other: null,
+};
+
+router.get('/media-queue', wrap(async (req, res) => {
+  // Only nannies with something actually waiting.
+  const nannies = await User.find({
+    role: USER_ROLE.NANNY,
+    $or: [
+      { videos: { $elemMatch: { approved: false, rejectedAt: null } } },
+      { photos: { $elemMatch: { approved: false, rejectedAt: null } } },
+    ],
+  })
+    .select('fullName nickname phone nannyStatus age experienceYears hourlyRate '
+      + 'ratingAverage profilePhotoUrl videos photos lastSeenAt createdAt')
+    .sort({ createdAt: -1 })
+    .lean();
+
+  const pending = (list = []) => list.filter((m) => !m.approved && !m.rejectedAt);
+
+  const items = nannies.map((n) => ({
+    _id: n._id,
+    fullName: n.fullName,
+    nickname: n.nickname,
+    phone: n.phone,
+    nannyStatus: n.nannyStatus,
+    age: n.age,
+    experienceYears: n.experienceYears,
+    hourlyRate: n.hourlyRate,
+    ratingAverage: n.ratingAverage,
+    profilePhotoUrl: n.profilePhotoUrl,
+    lastSeenAt: n.lastSeenAt,
+    videos: pending(n.videos),
+    photos: pending(n.photos),
+    // What is already live, so a reviewer knows whether there is room to
+    // feature this one before they tick the box.
+    featuredVideos: (n.videos || []).filter((v) => v.approved && v.featured).length,
+    featuredPhotos: (n.photos || []).filter((p) => p.approved && p.featured).length,
+  }));
+
+  res.json({
+    items,
+    total: items.length,
+    waiting: items.reduce((sum, n) => sum + n.videos.length + n.photos.length, 0),
+    reasons: Object.keys(REJECTION_REASONS),
+    limits: { videos: MAX_FEATURED_VIDEOS, photos: MAX_FEATURED_PHOTOS },
+  });
+}));
+
+/**
+ * Turn one item down, and tell her why.
+ *
+ * The item is kept rather than deleted: it is the record of what was sent and
+ * what was decided, and deleting it would let the same file be re-sent into a
+ * queue that has already judged it.
+ */
+router.post('/nannies/:id/:kind(videos|photos)/:mediaId/reject',
+  requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+    const { kind } = req.params;
+    const nanny = await User.findOne({ _id: req.params.id, role: USER_ROLE.NANNY });
+    if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
+
+    const item = (nanny[kind] || []).id(req.params.mediaId);
+    if (!item) return res.status(404).json({ error: 'Not found' });
+
+    const reason = String(req.body?.reason || '').trim();
+    if (!(reason in REJECTION_REASONS)) {
+      return res.status(400).json({
+        error: `A reason is required: ${Object.keys(REJECTION_REASONS).join(', ')}`,
+      });
+    }
+
+    // "Other" has no stock wording, so the reviewer must supply it — a
+    // rejection she cannot act on is worse than none.
+    const detail = String(req.body?.detail || '').trim().slice(0, 400);
+    if (reason === 'other' && !detail) {
+      return res.status(400).json({ error: 'Say what was wrong with it, so she can fix it' });
+    }
+
+    res.locals.auditBefore = { approved: item.approved, featured: item.featured };
+    item.approved = false;
+    item.featured = false;
+    item.featuredAt = undefined;
+    item.rejectedAt = new Date();
+    item.rejectedBy = req.admin?._id;
+    item.rejectionReason = reason;
+    item.rejectionDetail = detail || undefined;
+    await nanny.save();
+
+    await notifyUser(
+      nanny,
+      M.mediaRejected({
+        kind: kind === 'videos' ? 'video' : 'photo',
+        reason: REJECTION_REASONS[reason],
+        detail,
+      }),
+    ).catch(() => {});
+
+    res.locals.auditLabel = nanny.nickname || nanny.fullName;
+    res.json({ ok: true, [kind]: nanny[kind] });
+  }));
 
 /* ------------------------------------------------------------------ *
  * Nanny photos
@@ -1209,6 +1331,14 @@ router.patch('/nannies/:id/photos/:photoId', requireRole('admin', 'super_admin')
   if (req.body?.approved !== undefined) {
     photo.approved = !!req.body.approved;
     photo.approvedAt = photo.approved ? new Date() : undefined;
+    // Approving overturns an earlier rejection, so the old verdict goes
+    // rather than sitting alongside a contradictory one.
+    if (photo.approved) {
+      photo.rejectedAt = undefined;
+      photo.rejectedBy = undefined;
+      photo.rejectionReason = null;
+      photo.rejectionDetail = undefined;
+    }
     if (!photo.approved) { photo.featured = false; photo.featuredAt = undefined; }
   }
 
