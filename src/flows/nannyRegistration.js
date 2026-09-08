@@ -226,15 +226,41 @@ on('NR_PHOTO', photoHandler);
  * accepted: a photo saved as a video would show families a still frame where
  * they expected someone talking.
  */
+/** The ways someone actually says they have finished sending things. */
+const DONE_WORDS = /^(done|skip|next|ok|okay|finish|finished|continue|no|nope|nothing|that.s all|thats all|complete|end|stop)[.!]?$/i;
+
 const videoHandler = async (ctx) => {
-  // "Done" and "Skip" both move on: she may have sent several already, or
-  // none at all, and either way this is how she leaves.
-  if (ctx.command === 'SKIP' || ctx.command === 'NONE'
-      || /^(skip|done)$/i.test(String(ctx.text || '').trim())) {
+  const said = String(ctx.text || '').trim();
+
+  // She may have sent several already, or none at all, and either way this is
+  // how she leaves. Accepting only "done" trapped anyone who typed the same
+  // thing in any other words.
+  if (ctx.command === 'SKIP' || ctx.command === 'NONE' || DONE_WORDS.test(said)) {
     return { text: M.NANNY_ASK_DAYS, state: 'NR_DAYS' };
   }
 
-  if (!ctx.mediaUrl) return M.NANNY_ASK_VIDEO;
+  // She has answered the *next* question instead of this one — typing her
+  // weekdays while we were still asking for media. That is not confusion, it
+  // is someone moving on, so take the answer rather than making her repeat it.
+  if (!ctx.mediaUrl && parseWeekdays(said)) {
+    ctx.set('availableDays', parseWeekdays(said));
+    return { text: M.NANNY_ASK_AVAIL_START, state: 'NR_AVAIL_START' };
+  }
+
+  if (!ctx.mediaUrl) {
+    // She typed something we did not understand. Ask once more, then move on
+    // regardless: a step that will not let her leave is worse than a missing
+    // video, and she cannot be booked at all until she gets past it.
+    const asked = ctx.get('videoPromptCount', 0) + 1;
+    ctx.set('videoPromptCount', asked);
+    if (asked >= 2) {
+      return [
+        { text: M.NANNY_VIDEO_MOVING_ON },
+        { text: M.NANNY_ASK_DAYS, state: 'NR_DAYS' },
+      ];
+    }
+    return M.NANNY_VIDEO_NOT_UNDERSTOOD;
+  }
 
   // We ask for a video and photos, so both are accepted; anything else is
   // explained rather than saved as a broken profile.
@@ -246,6 +272,10 @@ const videoHandler = async (ctx) => {
 
   // She may send several before moving on, so both kinds collect rather than
   // replace, and the step stays put until she says she is done.
+  // Media arriving means she is following along, so the confusion counter
+  // starts again — two puzzled replies in a row is the signal, not two ever.
+  ctx.set('videoPromptCount', 0);
+
   if (isImage) {
     ctx.set('introPhotoUrls', [...ctx.get('introPhotoUrls', []), ctx.mediaUrl].slice(0, 10));
     return M.NANNY_PHOTO_SAVED;

@@ -763,6 +763,23 @@ export const NANNY_PHOTO_SAVED = `\u{2705} Photo saved \u2014 it will show on yo
 
 Send another photo or video, or type *Done* to carry on.`;
 
+/**
+ * She typed something at the media step that was neither a file nor a way of
+ * saying she is finished. Restates both options plainly rather than repeating
+ * the original ask, which she has evidently not read the way we hoped.
+ */
+export const NANNY_VIDEO_NOT_UNDERSTOOD = `\u{1F914} Sorry — I did not catch that.
+
+\u{1F4CE} *Send* a photo or video, or
+\u{2705} *Type "Done"* to carry on with your profile.`;
+
+/**
+ * Said on the way past after a second unrecognised answer. Nobody is held at
+ * this step: she cannot be booked at all until she gets through it, so a
+ * missing video is much the cheaper loss.
+ */
+export const NANNY_VIDEO_MOVING_ON = `No problem — let's carry on. You can add photos and videos any time from *My Profile*.`;
+
 export const NANNY_VIDEO_WRONG_TYPE = `\u{274C} That does not look like a video. Please record and send a short video, or type *Skip*.`;
 
 export const NANNY_VIDEO_TOO_LONG = `\u{26A0}\u{FE0F} That video is quite long. Please send one under about 2 minutes, or type *Skip*.`;

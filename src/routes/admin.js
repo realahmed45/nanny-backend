@@ -1291,8 +1291,11 @@ router.get('/media-queue', wrap(async (req, res) => {
     waiting: items.reduce((sum, n) => sum + n.videos.length + n.photos.length, 0),
     // Sent with the queue so the picker is defined in one place — a label the
     // dashboard invents itself would drift from what she is actually told.
+    // `told` travels too, so the dashboard can show a reviewer the exact
+    // message a nanny will receive before it is sent. A rejection cannot be
+    // recalled, so the last thing before sending should be the real words.
     reasons: Object.entries(REJECTION_REASONS).map(([value, r]) => ({
-      value, label: r.label,
+      value, label: r.label, told: r.told,
     })),
     limits: { videos: MAX_FEATURED_VIDEOS, photos: MAX_FEATURED_PHOTOS },
   });

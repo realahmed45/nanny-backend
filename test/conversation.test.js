@@ -1012,6 +1012,48 @@ test('a rejected photo tells the nanny why, and stays out of the queue', async (
   assert.doesNotMatch(one, /•/);
 });
 
+test('the video step can always be left, whatever she types', async () => {
+  const { Session } = await import('../src/models/index.js');
+
+  // Every ordinary way of saying "I am finished" gets her out. Accepting only
+  // "done" trapped a nanny at the last step before her working days, which
+  // left her signed up but invisible to every search.
+  for (const word of ['done', 'Done', 'next', 'ok', 'no', 'finished', 'continue', 'skip']) {
+    await clearDb();
+    await Session.create({ phone: NANNY, state: 'NR_VIDEO', role: 'nanny' });
+    await say(NANNY, '', { mediaUrl: 'https://cdn/v.mp4', mediaType: 'video' });
+    await say(NANNY, word);
+    const session = await Session.findOne({ phone: NANNY });
+    assert.equal(session.state, 'NR_DAYS', `"${word}" should move her on`);
+  }
+
+  // Answering the next question early is someone moving on, not confusion,
+  // so the answer counts rather than being thrown away.
+  await clearDb();
+  await Session.create({ phone: NANNY, state: 'NR_VIDEO', role: 'nanny' });
+  await say(NANNY, '', { mediaUrl: 'https://cdn/v.mp4', mediaType: 'video' });
+  const reply = await say(NANNY, '1,2,3,4,5,6,7');
+  assert.match(reply, /available to start/i, 'her weekdays are taken, not discarded');
+  let session = await Session.findOne({ phone: NANNY });
+  assert.equal(session.state, 'NR_AVAIL_START');
+  assert.equal(session.data.availableDays.length, 7);
+
+  // And nothing she can type keeps her there: two unrecognised replies and
+  // we move her on regardless. A step with no exit is worse than a missing
+  // video, because she cannot be booked at all until she is past it.
+  await clearDb();
+  await Session.create({ phone: NANNY, state: 'NR_VIDEO', role: 'nanny' });
+  await say(NANNY, '', { mediaUrl: 'https://cdn/v.mp4', mediaType: 'video' });
+  const first = await say(NANNY, 'what do you mean??');
+  assert.match(first, /did not catch that/i);
+  assert.equal((await Session.findOne({ phone: NANNY })).state, 'NR_VIDEO');
+
+  const second = await say(NANNY, '?????');
+  assert.match(second, /let's carry on/i);
+  session = await Session.findOne({ phone: NANNY });
+  assert.equal(session.state, 'NR_DAYS', 'never trapped, whatever she types');
+});
+
 test('family registration collects name, email and verifies OTP', async () => {
   const { User } = await import('../src/models/index.js');
 
