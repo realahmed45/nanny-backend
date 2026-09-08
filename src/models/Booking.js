@@ -89,6 +89,21 @@ const BookingSchema = new mongoose.Schema({
   /** What the agent decided: 1 or 2. */
   nanniesNeeded: { type: Number, default: 1 },
 
+  /**
+   * An emergency offered to everyone at once, claimed by whoever answers
+   * first. Kept on the booking rather than in a separate collection because
+   * the race is settled by a conditional update on this document — only the
+   * request that finds `claimedBy` still null wins it.
+   */
+  emergencyBroadcast: {
+    sentAt: Date,
+    expiresAt: Date,
+    candidates: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    claimedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    claimedAt: Date,
+    declined: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  },
+
   isMultiDay: { type: Boolean, default: false },
   startDate: String,                 // "YYYY-MM-DD"
   endDate: String,

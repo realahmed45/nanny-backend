@@ -117,11 +117,33 @@ export const config = {
   emergencySurcharge: int(process.env.EMERGENCY_SURCHARGE, 50000),
 
   /**
+   * Paid to a nanny on top of her hourly rate for taking an emergency, in
+   * recognition of dropping everything at an hour's notice. Quoted in the
+   * broadcast, because a nanny deciding in thirty seconds needs to know what
+   * the job is worth.
+   */
+  emergencyHourlyBonus: int(process.env.EMERGENCY_HOURLY_BONUS, 15000),
+
+  /**
    * How many days of silence before a half-finished conversation is dropped
    * and the next message starts cleanly. Long enough not to interrupt a real
    * pause, short enough that nobody resumes a form from last season.
    */
   staleSessionDays: int(process.env.STALE_SESSION_DAYS, 30),
+
+  /**
+   * Our own copy of every photo and video a nanny sends.
+   *
+   * Without this the profiles point at files on the WhatsApp provider's
+   * servers, which we do not own and cannot stop being deleted. MEDIA_DIR must
+   * be on persistent storage and included in the server's backups — it is the
+   * only copy we have.
+   */
+  media: {
+    enabled: process.env.MEDIA_ARCHIVE !== 'off',
+    dir: process.env.MEDIA_DIR || 'storage/media',
+    maxBytes: int(process.env.MEDIA_MAX_BYTES, 64 * 1024 * 1024),
+  },
 
   brand: {
     name: process.env.BRAND_NAME || 'Nanny in Paradise',

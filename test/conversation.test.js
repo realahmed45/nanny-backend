@@ -1,7 +1,9 @@
 import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import dayjs from 'dayjs';
-import { setupDb, teardownDb, clearDb, say, latestOtp, messagesTo } from './helpers.js';
+import { setupDb, teardownDb, clearDb, say, latestOtp, messagesTo, outbox } from './helpers.js';
+
+const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
 const FAMILY = '971500000001';
 const NANNY = '971500000002';
@@ -1052,6 +1054,80 @@ test('the video step can always be left, whatever she types', async () => {
   assert.match(second, /let's carry on/i);
   session = await Session.findOne({ phone: NANNY });
   assert.equal(session.state, 'NR_DAYS', 'never trapped, whatever she types');
+});
+
+test('an emergency is offered to everyone and claimed by the first to answer', async () => {
+  const { User, Booking } = await import('../src/models/index.js');
+  const { broadcastEmergency, claimEmergency } = await import('../src/services/emergencyBroadcast.js');
+
+  const family = await User.create({
+    phone: FAMILY, role: 'family', fullName: 'Ben Carter', registrationComplete: true,
+  });
+
+  const nannies = [];
+  for (let i = 0; i < 4; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    nannies.push(await User.create({
+      phone: `97150000010${i}`, role: 'nanny', fullName: `Nanny ${i}`, nickname: `N${i}`,
+      nannyStatus: 'verified', registrationComplete: true, hourlyRate: 120000,
+      availability: { days: [...WEEKDAY_NAMES], maxHoursPerDay: 12, blockedDates: [] },
+    }));
+  }
+
+  const at = dayjs().add(2, 'hour');
+  const booking = await Booking.create({
+    bookingNumber: 'E-1',
+    family: family._id,
+    status: 'pending_payment',
+    isEmergency: true,
+    emergencySurcharge: 50000,
+    hoursPerDay: 4,
+    startDate: at.format('YYYY-MM-DD'),
+    startTime: '14:00',
+    address: { label: 'Seminyak', addressLine: '12 Jl. Kayu Aya', mapUrl: 'https://maps.example/x' },
+    children: [{ name: 'Emma', age: '4' }],
+    serviceDays: [{
+      date: at.format('YYYY-MM-DD'),
+      startAt: at.toDate(),
+      endAt: at.add(4, 'hour').toDate(),
+      hours: 4,
+    }],
+  });
+
+  const sent = await broadcastEmergency(booking);
+  assert.equal(sent.sent, 4, 'every available nanny is asked at once');
+
+  // A family's address must not go out to everyone who might be free.
+  const offer = outbox.find((m) => m.body.includes('URGENT'));
+  assert.ok(offer, 'the offer went out');
+  assert.doesNotMatch(offer.body, /Kayu Aya/, 'the address is held back until someone accepts');
+  assert.match(offer.body, /First to accept/i);
+
+  // Two nannies answer in the same instant. Exactly one can win, or we send
+  // two people to one family and owe somebody an apology.
+  const [first, second] = await Promise.all([
+    claimEmergency(booking._id, nannies[0]._id),
+    claimEmergency(booking._id, nannies[1]._id),
+  ]);
+  assert.notEqual(first.claimed, second.claimed, 'exactly one nanny wins the race');
+
+  const winner = first.claimed ? nannies[0] : nannies[1];
+  const fresh = await Booking.findById(booking._id);
+  assert.equal(String(fresh.nanny), String(winner._id), 'the booking goes to the winner');
+
+  // She gets everything that was held back; everyone else is told it is gone,
+  // because silence is what stops a nanny answering the next one.
+  const claimed = outbox.find((m) => m.body.includes('It is yours'));
+  assert.match(claimed.body, /Kayu Aya/, 'the winner gets the address');
+  assert.equal(
+    outbox.filter((m) => m.body.includes('taken by another nanny')).length,
+    3,
+    'the other three are told',
+  );
+  assert.ok(
+    outbox.some((m) => m.body.includes('We found you a nanny')),
+    'and the family hears that someone is on the way',
+  );
 });
 
 test('family registration collects name, email and verifies OTP', async () => {

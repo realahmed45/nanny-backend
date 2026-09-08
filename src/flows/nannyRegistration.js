@@ -9,6 +9,7 @@ import {
   parseTime, parseMapUrl, parseWeekdays, clean,
 } from '../utils/parse.js';
 import { money } from '../utils/format.js';
+import { store } from '../services/mediaArchive.js';
 import * as M from '../utils/messages.js';
 
 /* ------------------------------------------------------------------ *
@@ -181,7 +182,10 @@ on('NR_CPR', cprHandler);
 function docStep(state, type, nextPrompt, nextState) {
   const handler = async (ctx) => {
     if (!ctx.mediaUrl) return `📎 Please attach the document as an image or file.`;
-    const docs = [...(ctx.get('documents') || []), { type, url: ctx.mediaUrl, mediaId: ctx.mediaId }];
+    // Archived like everything else: an ID or certificate is the evidence a
+    // nanny was verified, and losing it means the check never happened.
+    const url = await store(ctx.mediaUrl, { mediaType: ctx.mediaType });
+    const docs = [...(ctx.get('documents') || []), { type, url, mediaId: ctx.mediaId }];
     ctx.set('documents', docs);
     return { text: nextPrompt, state: nextState };
   };
@@ -213,7 +217,7 @@ on('NR_MAP', mapHandler);
 
 const photoHandler = async (ctx) => {
   if (!ctx.mediaUrl) return `📎 Please attach your profile photo.`;
-  ctx.set('profilePhotoUrl', ctx.mediaUrl);
+  ctx.set('profilePhotoUrl', await store(ctx.mediaUrl, { mediaType: ctx.mediaType }));
   return { text: M.NANNY_ASK_VIDEO, state: 'NR_VIDEO' };
 };
 photoHandler.prompt = () => M.NANNY_ASK_PHOTO;
@@ -276,12 +280,16 @@ const videoHandler = async (ctx) => {
   // starts again — two puzzled replies in a row is the signal, not two ever.
   ctx.set('videoPromptCount', 0);
 
+  // Copied to our own storage before it is recorded anywhere. The provider's
+  // link works today and will not forever; ours is the copy the profile keeps.
+  const stored = await store(ctx.mediaUrl, { mediaType: type });
+
   if (isImage) {
-    ctx.set('introPhotoUrls', [...ctx.get('introPhotoUrls', []), ctx.mediaUrl].slice(0, 10));
+    ctx.set('introPhotoUrls', [...ctx.get('introPhotoUrls', []), stored].slice(0, 10));
     return M.NANNY_PHOTO_SAVED;
   }
 
-  ctx.set('introVideoUrls', [...ctx.get('introVideoUrls', []), ctx.mediaUrl].slice(0, 5));
+  ctx.set('introVideoUrls', [...ctx.get('introVideoUrls', []), stored].slice(0, 5));
 
   return M.NANNY_VIDEO_SAVED;
 };

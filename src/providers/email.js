@@ -124,9 +124,21 @@ const BACKENDS = {
   console: consoleEmailProvider,
 };
 
+/**
+ * How many sent emails to remember.
+ *
+ * The simulator and tests read this list, so it has to exist — but it used to
+ * grow for the life of the process, which on a server left running for months
+ * is a slow leak. The recent ones are the only ones anybody looks at.
+ */
+const SENT_EMAIL_HISTORY = 200;
+
 export async function send(message) {
   // Always keep a local record - the simulator and tests read it.
   sentEmails.push({ ...message, at: new Date() });
+  if (sentEmails.length > SENT_EMAIL_HISTORY) {
+    sentEmails.splice(0, sentEmails.length - SENT_EMAIL_HISTORY);
+  }
   return BACKENDS[activeProvider()].send(message);
 }
 

@@ -7,6 +7,7 @@ import { AdminUser } from './models/index.js';
 import webhookRoutes from './routes/webhook.js';
 import adminRoutes from './routes/admin.js';
 import { startScheduler } from './jobs/scheduler.js';
+import { mountMediaRoutes } from './services/mediaArchive.js';
 import { isDryRun } from './providers/ultramsg.js';
 import { isDryRun as emailIsDryRun, activeProvider as emailProviderName } from './providers/email.js';
 import './flows/index.js';   // registers every conversation state
@@ -37,6 +38,10 @@ export function createApp() {
       }
     : {}));
   app.use(express.json({ limit: '2mb' }));
+
+  // Serve our own copies of nanny media. Read-only and long-cached: a stored
+  // file never changes, since its name is a hash of where it came from.
+  mountMediaRoutes(app, express);
   app.use(express.urlencoded({ extended: true }));
 
   app.get('/health', (req, res) => {
@@ -249,7 +254,40 @@ async function main() {
 
 // Only auto-start when run directly (tests import createApp instead).
 const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/').split('/').pop());
+/**
+ * Keep the bot alive through an unexpected error.
+ *
+ * Node's default is to print the error and exit. For a web server that is
+ * usually right — but this process is also holding every WhatsApp conversation
+ * in progress, and one odd booking in a background job at 2am should not end
+ * all of them. Nobody would notice until morning, and everyone who messaged
+ * overnight would have been met with silence.
+ *
+ * So the error is logged loudly and the process carries on. This is a net,
+ * not a cure: a fault that keeps recurring will fill the logs, which is the
+ * point — it stays visible instead of being hidden by a restart.
+ */
+function installCrashGuards() {
+  process.on('unhandledRejection', (reason) => {
+    console.error('[server] unhandled promise rejection — staying up:', reason);
+  });
+
+  process.on('uncaughtException', (err) => {
+    console.error('[server] uncaught exception — staying up:', err);
+  });
+
+  // A deliberate stop should still be clean: finish what is in flight rather
+  // than dropping a reply half-sent.
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.on(signal, () => {
+      console.log(`[server] ${signal} received, shutting down`);
+      process.exit(0);
+    });
+  }
+}
+
 if (isMain) {
+  installCrashGuards();
   main().catch((err) => {
     console.error('[server] failed to start:', err);
     process.exit(1);

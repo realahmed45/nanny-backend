@@ -292,9 +292,38 @@ export async function processReferralAbuse() {
  */
 export async function processDailyBackup() {
   const { sendDailyBackup } = await import('../services/backup.js');
-  const result = await sendDailyBackup();
-  console.log(`[backup] sent ${result.filename} to ${result.to} (${result.bytes} bytes) — ${result.counts}`);
-  return result;
+  try {
+    const result = await sendDailyBackup();
+    console.log(`[backup] sent ${result.filename} to ${result.to} (${result.bytes} bytes) — ${result.counts}`);
+    return result;
+  } catch (err) {
+    // A backup that stops working silently is worse than none, because you
+    // only discover it on the day you need it. So a failure is itself an
+    // email — and if even that cannot be sent, it is loud in the log.
+    console.error(`[backup] FAILED: ${err.message}`);
+    try {
+      const { send } = await import('../providers/email.js');
+      const { brandedEmail } = await import('../providers/email.js');
+      await send({
+        to: config.backup.email,
+        subject: '⚠️ Daily backup FAILED',
+        text: `Tonight's backup did not run.
+
+${err.message}
+
+`
+          + 'Nothing was saved for today. Please check the server.',
+        html: brandedEmail(`
+          <p style="color:#b00;font-size:15px;margin:0 0 10px"><strong>Tonight's backup did not run.</strong></p>
+          <p style="color:#333;font-size:14px;margin:0 0 10px">${err.message}</p>
+          <p style="color:#666;font-size:13px;margin:0">Nothing was saved for today. Please check the server.</p>
+        `),
+      });
+    } catch (mailErr) {
+      console.error(`[backup] could not send the failure alert either: ${mailErr.message}`);
+    }
+    throw err;
+  }
 }
 
 let tasks = [];

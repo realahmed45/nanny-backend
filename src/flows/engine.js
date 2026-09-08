@@ -101,6 +101,51 @@ export function mainMenuState(role) {
  * States that need to consume a command themselves (chat relay consuming BYE,
  * a prompt accepting "None") opt out via `allowCommands`.
  */
+/**
+ * A nanny answering an emergency broadcast.
+ *
+ * Checked before anything else, and from whatever state she happens to be in:
+ * the offer arrives unannounced while she is doing something else entirely,
+ * and "YES" has to work whether she is halfway through a menu or has not
+ * touched the bot in a week. Waiting for her to navigate somewhere first would
+ * lose the booking, which is the one thing an emergency cannot afford.
+ */
+async function handleEmergencyReply(ctx) {
+  const said = String(ctx.text || '').trim().toLowerCase();
+  const yes = /^(yes|y|yes i take it|i take it|take it|accept)[.!]?$/.test(said);
+  const no = /^(no|n|nope|cannot|can't|cant|busy)[.!]?$/.test(said);
+  if (!yes && !no) return null;
+  if (!ctx.session.user) return null;
+
+  // Only an offer she was actually sent, still open, still unclaimed.
+  const { Booking } = await import('../models/index.js');
+  const booking = await Booking.findOne({
+    isEmergency: true,
+    'emergencyBroadcast.candidates': ctx.session.user,
+    'emergencyBroadcast.claimedBy': null,
+    'emergencyBroadcast.expiresAt': { $gt: new Date() },
+    'emergencyBroadcast.declined': { $ne: ctx.session.user },
+  }).sort({ 'emergencyBroadcast.sentAt': -1 });
+
+  if (!booking) return null;
+
+  const { claimEmergency, declineEmergency } = await import('../services/emergencyBroadcast.js');
+
+  if (no) {
+    await declineEmergency(booking._id, ctx.session.user);
+    // Nothing is held against her — she may simply be working. Saying so
+    // keeps her answering the next one.
+    return { text: 'No problem — thank you for letting us know. We will send you the next one.' };
+  }
+
+  const result = await claimEmergency(booking._id, ctx.session.user);
+  // claimEmergency sends the address itself on success, so there is nothing
+  // to add here; a loser is told plainly rather than left wondering.
+  return result.claimed
+    ? { text: null }
+    : { text: M.emergencyTaken(booking) };
+}
+
 async function handleGlobalCommand(ctx) {
   const { command, session } = ctx;
   if (!command) return null;
@@ -339,10 +384,15 @@ export async function handleMessage({ phone: rawPhone, text = '', mediaUrl, medi
 
   let result;
   try {
+    // An emergency answer outranks whatever she was doing, and is checked
+    // before the state handler so "YES" works from anywhere in the bot.
+    const emergency = await handleEmergencyReply(ctx);
     const handler = handlers.get(session.state) || handlers.get('START');
 
-    // Global commands run first unless the state opts out.
-    if (!handler?.allowCommands) {
+    if (emergency) {
+      result = emergency;
+    } else if (!handler?.allowCommands) {
+      // Global commands run first unless the state opts out.
       const globalResult = await handleGlobalCommand(ctx);
       result = globalResult ?? (handler ? await callHandler(handler, ctx) : null);
     } else {

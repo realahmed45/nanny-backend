@@ -284,6 +284,101 @@ export const mediaRejected = ({ kind, reasons = [], reason, detail }) => {
   return lines.join('\n');
 };
 
+/* ---- Emergency broadcast --------------------------------------------- */
+
+/**
+ * The offer, sent to every suitable nanny at once.
+ *
+ * Written to be decided on in thirty seconds while she is doing something
+ * else, so it leads with the two facts that settle it — when, and what it
+ * pays — and keeps the rest short. First to reply gets it, and saying so is
+ * what makes people answer immediately rather than "in a minute".
+ *
+ * The address is deliberately absent. Broadcasting a family's home to forty
+ * people is a privacy problem, and nobody needs it to decide whether they are
+ * free.
+ */
+export function emergencyBroadcast(b, { hourlyBonus = 0, surcharge = 0, family } = {}) {
+  const hours = b.hoursPerDay || 0;
+  const bonusTotal = hourlyBonus * hours;
+
+  const lines = [
+    '\u{1F6A8} *URGENT — nanny needed now*',
+    '',
+    `\u{1F4CD} Area: ${b.address?.label || 'nearby'}`,
+    `\u{23F0} Starts: *within 1 hour*`,
+    `\u{1F552} Duration: ${hours} hour${hours === 1 ? '' : 's'}`,
+  ];
+
+  if (b.children?.length) {
+    lines.push(`\u{1F476} Children: ${b.children.length}`);
+  }
+  if (b.requirements?.skills?.length) {
+    lines.push(`\u{1F6E0} Needed: ${b.requirements.skills.join(', ')}`);
+  }
+
+  lines.push(
+    '',
+    '*\u{1F4B0} What you earn*',
+    `Your usual rate for ${hours} hour${hours === 1 ? '' : 's'}`,
+    `\u{002B} *${money(hourlyBonus)} per hour* emergency bonus (${money(bonusTotal)} total)`,
+    `\u{002B} *${money(surcharge)}* extra transport, cash on arrival`,
+    '',
+    '⚡ *First to accept gets the job.*',
+    '',
+    'Reply *YES* to take it — we will send you the full address straight away.',
+    'Reply *NO* if you cannot.',
+  );
+
+  return lines.join('\n');
+}
+
+/** She won it. Everything held back until now arrives in one message. */
+export function emergencyClaimed(b, family) {
+  const lines = [
+    '\u{2705} *It is yours — please go now.*',
+    '',
+    `*Booking #${b.bookingNumber}*`,
+    `\u{1F551} ${timeRange(b.startTime, b.hoursPerDay)}`,
+  ];
+  if (family?.fullName) lines.push(`\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} Family: ${family.fullName}`);
+  if (b.address?.addressLine) lines.push(`\u{1F3E1} ${b.address.addressLine}`);
+  if (b.address?.mapUrl) lines.push(`\u{1F4CD} ${b.address.mapUrl}`);
+
+  if (b.children?.length) {
+    lines.push('', `*Children:* ${b.children.length}`, childLines(b.children));
+  }
+  if (b.otherInstructions && b.otherInstructions !== 'None') {
+    lines.push('', `*Please note:*\n${b.otherInstructions}`);
+  }
+
+  lines.push(
+    '',
+    'Please head there straight away. The family has been told you are on your way.',
+    '',
+    'Open *My Bookings* to confirm your arrival when you get there.',
+  );
+  return lines.join('\n');
+}
+
+/**
+ * Told to everyone who did not get it.
+ *
+ * Sent because silence is worse than a no: a nanny who kept her afternoon
+ * clear for a job she never hears about again stops answering the next one.
+ */
+export const emergencyTaken = (b) =>
+  `This urgent booking has been taken by another nanny.\n\nThank you for being available — we will let you know about the next one.`;
+
+/** The family, the moment somebody is on the way. */
+export function emergencyNannyFound(b, nanny) {
+  return `\u{2705} *We found you a nanny*
+
+*${nannyDisplayName(nanny)}* has accepted and is on her way.
+
+She should arrive within the hour. You will get her details in *My Bookings*.`;
+}
+
 /* ---- Follow & save discount ------------------------------------------ */
 
 /**

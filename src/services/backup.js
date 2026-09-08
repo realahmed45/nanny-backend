@@ -4,6 +4,7 @@ import {
 } from '../models/index.js';
 import { send, brandedEmail } from '../providers/email.js';
 import config from '../config/index.js';
+import { money } from '../utils/format.js';
 import { USER_ROLE } from '../utils/constants.js';
 
 /**
@@ -264,4 +265,77 @@ export async function sendDailyBackup({ to = config.backup.email } = {}) {
   return { to, filename, bytes: buffer.length, counts };
 }
 
-export default { sendDailyBackup, buildBackupWorkbook };
+/**
+ * A record of one order, emailed the moment it is paid for.
+ *
+ * The nightly file is a safety net for the whole business; this is a receipt
+ * for a single transaction, and it lands while the order is still fresh. Two
+ * different jobs, so two different emails: if the nightly one ever fails, the
+ * per-order trail still reconstructs every booking that was actually paid.
+ *
+ * Failure is logged, never thrown — a bookkeeping email must not be able to
+ * fail a payment that has already been approved.
+ */
+export async function sendOrderBackup(booking, { to = config.backup.email } = {}) {
+  if (!booking) return null;
+
+  const { User } = await import('../models/index.js');
+  const [family, nanny] = await Promise.all([
+    booking.family ? User.findById(booking.family).select('fullName phone email').lean() : null,
+    booking.nanny ? User.findById(booking.nanny).select('fullName nickname phone').lean() : null,
+  ]);
+
+  const rows = [
+    ['Booking', booking.bookingNumber],
+    ['Status', booking.status],
+    ['Family', family?.fullName || '—'],
+    ['Family phone', family?.phone || '—'],
+    ['Nanny', nanny?.nickname || nanny?.fullName || '—'],
+    ['Nanny phone', nanny?.phone || '—'],
+    ['Dates', booking.isMultiDay ? `${booking.startDate} to ${booking.endDate}` : booking.startDate],
+    ['Start time', booking.startTime || '—'],
+    ['Hours per day', String(booking.hoursPerDay ?? '—')],
+    ['Days booked', String((booking.serviceDays || []).length)],
+    ['Children', String((booking.children || []).length)],
+    ['Rate per hour', money(booking.hourlyRate || 0)],
+    ['Total', money(booking.totalAmount || 0)],
+    ['Paid', money(booking.paidAmount || 0)],
+    ['Emergency', booking.isEmergency ? `yes (+${money(booking.emergencySurcharge || 0)} cash on arrival)` : 'no'],
+    ['Address', booking.address?.addressLine || '—'],
+  ];
+
+  // A spreadsheet as well as the table, so these can be collected into a
+  // ledger without retyping anything.
+  const book = new ExcelJS.Workbook();
+  book.creator = config.brand.name;
+  addSheet(book, 'Order', [
+    { header: 'Field', key: 'field', width: 22 },
+    { header: 'Value', key: 'value', width: 50 },
+  ], rows.map(([field, value]) => ({ field, value })));
+
+  const buffer = Buffer.from(await book.xlsx.writeBuffer());
+  const filename = `order-${booking.bookingNumber}.xlsx`;
+
+  await send({
+    to,
+    subject: `Order paid — #${booking.bookingNumber} — ${money(booking.totalAmount || 0)}`,
+    text: rows.map(([k, v]) => `${k}: ${v}`).join('\n'),
+    html: brandedEmail(`
+      <p style="color:#333;font-size:15px;margin:0 0 14px">
+        Payment confirmed for booking <strong>#${booking.bookingNumber}</strong>.
+      </p>
+      <table style="border-collapse:collapse;font-size:14px">
+        ${rows.map(([k, v]) => `
+          <tr>
+            <td style="padding:4px 14px 4px 0;color:#777;white-space:nowrap">${k}</td>
+            <td style="padding:4px 0;color:#111"><strong>${v}</strong></td>
+          </tr>`).join('')}
+      </table>
+    `),
+    attachments: [{ filename, content: buffer }],
+  });
+
+  return { to, filename, bookingNumber: booking.bookingNumber };
+}
+
+export default { sendDailyBackup, buildBackupWorkbook, sendOrderBackup };

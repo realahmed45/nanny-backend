@@ -85,6 +85,21 @@ export async function approveTransfer(payment, { adminId = null, note = '' } = {
     await booking.save();
   }
 
+  // A receipt for this order, emailed the moment it is paid.
+  //
+  // Separate from the nightly file on purpose: that one is a safety net for
+  // the whole business, this is a per-transaction trail that lands while the
+  // order is fresh. Never allowed to fail the payment — the money has already
+  // been approved, and a bookkeeping email must not undo that.
+  if (booking) {
+    try {
+      const { sendOrderBackup } = await import('./backup.js');
+      await sendOrderBackup(booking);
+    } catch (err) {
+      console.error(`[backup] order receipt for ${booking.bookingNumber} failed: ${err.message}`);
+    }
+  }
+
   // Wire 4 of the referral engine — OR10.
   //
   // Here rather than at booking creation, because a booking is created unpaid

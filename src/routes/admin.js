@@ -14,6 +14,7 @@ import {
   MAX_FEATURED_VIDEOS, MAX_FEATURED_PHOTOS,
 } from '../utils/constants.js';
 import { signToken, requireAuth, requireRole } from '../middleware/auth.js';
+import { rateLimit, clear as clearRateLimit } from '../middleware/rateLimit.js';
 import { auditMutations } from '../middleware/audit.js';
 import { recordAudit } from '../services/audit.js';
 import { cancelBooking, markNannyCancelled, openNannyResponseWindow } from '../services/booking.js';
@@ -42,7 +43,23 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
  * Auth
  * ------------------------------------------------------------------ */
 
-router.post('/auth/login', wrap(async (req, res) => {
+/**
+ * Counted by IP and by the email being tried, because either alone is easy to
+ * get around: one attacker with many addresses, or many attackers against one
+ * account. This dashboard holds every family's address and every child's
+ * medical notes, so an unlimited guessing machine is not an acceptable door.
+ */
+const loginLimiter = rateLimit({
+  max: 8,
+  windowMs: 15 * 60_000,
+  lockMs: 15 * 60_000,
+  by: (req) => [
+    `login:ip:${req.ip}`,
+    req.body?.email ? `login:email:${String(req.body.email).toLowerCase()}` : null,
+  ],
+});
+
+router.post('/auth/login', loginLimiter, wrap(async (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
 
@@ -51,6 +68,9 @@ router.post('/auth/login', wrap(async (req, res) => {
 
   const ok = await bcrypt.compare(password, admin.passwordHash);
   if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+
+  // Signing in correctly should not leave you closer to a lockout.
+  (res.locals.rateLimitKeys || []).forEach(clearRateLimit);
 
   admin.lastLoginAt = new Date();
   await admin.save();
@@ -1879,6 +1899,37 @@ ${nanny.fullName} has been assigned to Booking #${booking.bookingNumber}.${requi
 }));
 
 /**
+ * Offer an emergency to every suitable nanny at once.
+ *
+ * Deliberately a button rather than automatic: the flow already promises the
+ * family a call within fifteen minutes, and whoever makes that call is best
+ * placed to judge whether this is a broadcast or a conversation. Sending forty
+ * messages is not something to do by accident.
+ */
+router.post('/bookings/:id/broadcast-emergency',
+  requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+    if (!booking.isEmergency) {
+      return res.status(409).json({ error: 'Only an emergency booking can be broadcast' });
+    }
+    if (booking.emergencyBroadcast?.claimedBy) {
+      return res.status(409).json({ error: 'A nanny has already taken this booking' });
+    }
+
+    const { broadcastEmergency } = await import('../services/emergencyBroadcast.js');
+    const result = await broadcastEmergency(booking);
+
+    res.locals.auditLabel = `#${booking.bookingNumber}`;
+    res.json({
+      ok: true,
+      sent: result.sent,
+      expiresAt: result.expiresAt,
+      reason: result.reason,
+    });
+  }));
+
+/**
  * The agent's decision on a 24-hour booking: one nanny, or two.
  *
  * A family asking for round-the-clock care across several days is told an
@@ -2669,6 +2720,7 @@ router.get('/settings', wrap(async (req, res) => {
     // actually in force rather than a blank field.
     emergency: { surcharge: runtime.emergency?.surcharge ?? config.emergencySurcharge },
     socialDiscount: { ...SOCIAL_DEFAULTS, ...(runtime.socialDiscount || {}) },
+    accounts: { instagram: '', facebook: '', tiktok: '', ...(runtime.accounts || {}) },
   });
 }));
 
@@ -2686,6 +2738,7 @@ const RUNTIME_SETTINGS = new Set([
   'socialDiscount',
   'emergency',
   'calendar',
+  'accounts',
 ]);
 
 /**
@@ -2714,6 +2767,20 @@ function validateSetting(key, value) {
       throw new Error('That emergency surcharge looks like a typo — it is over 5,000,000');
     }
     return { surcharge };
+  }
+
+  /**
+   * Our own social accounts, shown to customers and used by the Follow & Save
+   * check. Stored as bare handles rather than full URLs so they can be
+   * rendered as links or as "@name" without having to be parsed apart.
+   */
+  if (key === 'accounts') {
+    const handle = (v) => String(v || '').trim().replace(/^@/, '').replace(/\s+/g, '').slice(0, 60);
+    return {
+      instagram: handle(value?.instagram),
+      facebook: handle(value?.facebook),
+      tiktok: handle(value?.tiktok),
+    };
   }
 
   if (key === 'socialDiscount') {
