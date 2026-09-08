@@ -7,3 +7,7 @@ dist/
 coverage/
 .mongo-binaries/
 .tmp/
+
+# Nanny media — our own copies of photos and videos. User data, not code:
+# it belongs on the server disk and in the server backups, not in the repo.
+storage/
