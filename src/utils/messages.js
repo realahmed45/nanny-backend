@@ -201,17 +201,29 @@ export const END_DATE_UNKNOWN_CONFIRMED = `\u{1F44D} No problem — we will arra
  * agent call is promised here, and the flow carries on collecting what that
  * agent will need.
  */
-export const TWENTY_FOUR_HOUR_NOTICE = `⏰ *24-Hour Nanny Care*
+export const twentyFourHourNotice = ({ isMultiDay = false } = {}) => {
+  // The second nanny is a multi-day matter: one person can cover a single
+  // round-the-clock day, but not several in a row without rest. Saying it on
+  // a one-day booking would promise a complication that is not there.
+  const coverage = isMultiDay
+    ? 'For multiple-day bookings, 24-hour care can be demanding for one nanny, especially when there are several children. We may recommend *2 nannies* to provide better coverage and allow proper rest.'
+    : '24-hour care means overnight cover, so we will check who is available for the whole period and make sure she can rest properly.';
+
+  return `⏰ *24-Hour Nanny Care*
 
 You selected 24-hour care.
 
-For multiple-day bookings, 24-hour care can be demanding for one nanny, especially when there are several children. We may recommend *2 nannies* to provide better coverage and allow proper rest.
+${coverage}
 
 Don't worry — we'll help you find the right solution.
 
 📞 We will call you within 2 hours, once you have finished filling in the information we need.
 
 Please continue filling in the information required for us to understand your needs.`;
+};
+
+/** Kept for callers that predate the one-day variant. */
+export const TWENTY_FOUR_HOUR_NOTICE = twentyFourHourNotice({ isMultiDay: true });
 
 export const ASK_CONTINUE_24H = `Continue with booking details?
 
@@ -450,6 +462,20 @@ export const ASK_END_DATE =
 export const ASK_REPEAT_DAYS = `Which days should the booking repeat on?\n\n${numbered(WEEKDAYS)}\n8. All days of the week\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;
 export const ASK_START_TIME =
   'What time does the session start?\n\nUse a time like *9:00 AM* or *2:30 PM*.';
+/**
+ * "2" could be either half of the day, so we ask rather than guess.
+ *
+ * Guessing is the expensive option here: a bare "2" read as 02:00 books a
+ * nanny for two in the morning, and nobody finds out until she is asked to
+ * turn up in the dark. One extra tap is cheaper than that.
+ */
+export const askAmPm = (typed, options) => `\u{1F553} Did you mean *${prettyTime(options.am)}* or *${prettyTime(options.pm)}*?
+
+1. ${prettyTime(options.am)}
+2. ${prettyTime(options.pm)}
+
+You can also type it in full next time — *${typed} PM*, or *${options.pm.replace(':', '')}* on a 24-hour clock.`;
+
 export const ASK_DURATION = `How long do you need the nanny?\n\n${durationMenu()}`;
 
 export const ASK_LANGUAGES = `Choose a language.\n\n${numbered(LANGUAGES)}\n\nSelect multiple with spaces or commas (e.g. 1 2 3)`;

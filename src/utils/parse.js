@@ -182,6 +182,48 @@ export function parseTime(text) {
 }
 
 /**
+ * Is this time genuinely ambiguous, or did they tell us which half of the day?
+ *
+ * "2" could be either. "14" could not. Guessing silently is the failure that
+ * matters here: a bare "2" read as 02:00 books a nanny for two in the morning,
+ * and nobody notices until she is asked to turn up in the dark.
+ *
+ * Only 1-12 with no AM/PM and no leading zero is ambiguous. "02" is someone
+ * writing a 24-hour clock, "14" settles itself, and anything with minutes
+ * ("2:30") is still ambiguous — the hour is what is in doubt, not the minutes.
+ */
+export function isAmbiguousTime(text) {
+  const t = clean(text).toUpperCase().replace(/\./g, '');
+  if (/AM|PM/.test(t)) return false;
+
+  // "1700" and "0930" are unambiguous 24-hour forms.
+  if (/^\d{4}$/.test(t)) return false;
+
+  const m = t.match(/^(\d{1,2})(?::(\d{2}))?$/);
+  if (!m) return false;
+
+  // A leading zero means they are already thinking in 24-hour terms.
+  if (m[1].length === 2 && m[1].startsWith('0')) return false;
+
+  const hour = parseInt(m[1], 10);
+  return hour >= 1 && hour <= 12;
+}
+
+/** The two readings of an ambiguous hour, as "HH:mm". */
+export function amPmOptions(text) {
+  const m = clean(text).match(/^(\d{1,2})(?::(\d{2}))?$/);
+  if (!m) return null;
+  const hour = parseInt(m[1], 10);
+  const minute = m[2] ? String(parseInt(m[2], 10)).padStart(2, '0') : '00';
+  const am = hour === 12 ? 0 : hour;
+  const pm = hour === 12 ? 12 : hour + 12;
+  return {
+    am: `${String(am).padStart(2, '0')}:${minute}`,
+    pm: `${String(pm).padStart(2, '0')}:${minute}`,
+  };
+}
+
+/**
  * Parse a date the way families type it in the script: "12 August",
  * "12 Aug 2026", "2026-08-12", "12/08/2026". Bare day+month resolves to the
  * next such date at or after `reference` (so "12 August" never lands in the past).

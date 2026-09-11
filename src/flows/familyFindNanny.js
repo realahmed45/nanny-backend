@@ -9,6 +9,7 @@ import {
 import {
   parseChoice, parseMultiChoice, pickFrom, parseYesNo, parseMoney, parseTime,
   parseDate, parseWeekdays, parseMapUrl, parseInteger, parseChildAge, clean, isNone, lower,
+  isAmbiguousTime, amPmOptions,
 } from '../utils/parse.js';
 import { findNannies } from '../services/matching.js';
 import { buildServiceDays } from '../services/booking.js';
@@ -475,6 +476,14 @@ repeatDaysHandler.prompt = () => M.ASK_REPEAT_DAYS;
 on('FF_REPEAT_DAYS', repeatDaysHandler);
 
 const startTimeHandler = async (ctx) => {
+  // A bare hour between 1 and 12 could be either half of the day. Ask, rather
+  // than book somebody for two in the morning and find out on the day.
+  if (isAmbiguousTime(ctx.text)) {
+    const options = amPmOptions(ctx.text);
+    ctx.set('pendingTime', options);
+    return { text: M.askAmPm(clean(ctx.text), options), state: 'FF_START_TIME_AMPM' };
+  }
+
   const time = parseTime(ctx.text);
   if (!time) return `❌ I couldn't read that time. Try *9 AM* or *09:00*.`;
   ctx.set('startTime', time);
@@ -483,19 +492,47 @@ const startTimeHandler = async (ctx) => {
 startTimeHandler.prompt = () => M.ASK_START_TIME;
 on('FF_START_TIME', startTimeHandler);
 
+/** Which half of the day they meant. Also accepts a fully-typed time. */
+const startTimeAmPmHandler = async (ctx) => {
+  const options = ctx.get('pendingTime');
+  if (!options) return { text: M.ASK_START_TIME, state: 'FF_START_TIME' };
+
+  const choice = parseChoice(ctx.text, 2);
+  if (choice) {
+    ctx.merge({ startTime: choice === 1 ? options.am : options.pm, pendingTime: null });
+    return { text: M.ASK_DURATION, state: 'FF_DURATION' };
+  }
+
+  // Someone who answers "2 PM" instead of picking a number has settled it
+  // just as clearly, so that is taken rather than refused.
+  const typed = parseTime(ctx.text);
+  if (typed && !isAmbiguousTime(ctx.text)) {
+    ctx.merge({ startTime: typed, pendingTime: null });
+    return { text: M.ASK_DURATION, state: 'FF_DURATION' };
+  }
+
+  return M.askAmPm('', options);
+};
+startTimeAmPmHandler.prompt = (ctx) => {
+  const options = ctx.get('pendingTime');
+  return options ? M.askAmPm('', options) : M.ASK_START_TIME;
+};
+on('FF_START_TIME_AMPM', startTimeAmPmHandler);
+
 const durationHandler = async (ctx) => {
   const choice = parseChoice(ctx.text, DURATION_OPTIONS.length);
   if (!choice) return M.ASK_DURATION;
   const hours = DURATION_OPTIONS[choice - 1];
   ctx.set('hoursPerDay', hours);
 
-  // Round-the-clock care across several days is more than one person can do,
-  // so it is said here rather than discovered at the summary. A single day of
-  // 24 hours is demanding but staffable, so it does not trigger this.
-  if (hours === 24 && ctx.get('isMultiDay')) {
+  // Round-the-clock care is said here rather than discovered at the summary.
+  // Every 24-hour request gets the explanation and the agent call: even a
+  // single day of it is a night shift someone has to actually staff, and a
+  // family should hear what that involves while they can still change it.
+  if (hours === 24) {
     ctx.set('needsAgentReview', true);
     return [
-      { text: M.TWENTY_FOUR_HOUR_NOTICE },
+      { text: M.twentyFourHourNotice({ isMultiDay: ctx.get('isMultiDay') }) },
       { text: M.ASK_CONTINUE_24H, state: 'FF_CONFIRM_24H' },
     ];
   }
