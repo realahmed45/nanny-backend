@@ -132,6 +132,17 @@ export const config = {
   staleSessionDays: int(process.env.STALE_SESSION_DAYS, 30),
 
   /**
+   * Show this number instead of the real one, everywhere in the dashboard.
+   *
+   * For demos and seeded data: the database keeps genuine per-person numbers,
+   * because the bot finds people by looking theirs up and a shared one would
+   * match hundreds of accounts at random. Only the display is replaced.
+   *
+   * Unset in production, where the real number is the whole point.
+   */
+  displayPhoneOverride: process.env.DISPLAY_PHONE_OVERRIDE || '',
+
+  /**
    * Our own copy of every photo and video a nanny sends.
    *
    * Without this the profiles point at files on the WhatsApp provider's

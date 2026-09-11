@@ -99,6 +99,43 @@ router.get('/auth/me', requireAuth, (req, res) => {
 
 // Everything below requires an authenticated admin.
 router.use(requireAuth);
+
+/**
+ * Replace every phone number on the way out, when an override is configured.
+ *
+ * Seeded data needs genuine per-person numbers: the bot finds people by
+ * looking theirs up, and a shared one would match hundreds of accounts and
+ * pick between them at random. But a demo wants one reachable number on every
+ * screen. Only the display is changed; the database is untouched.
+ *
+ * Done here rather than in each endpoint because there are dozens, and one
+ * missed would show a seeded number next to real ones — which is exactly the
+ * confusion this is meant to prevent. Off unless DISPLAY_PHONE_OVERRIDE is
+ * set, so production is unaffected.
+ */
+router.use((req, res, next) => {
+  const override = config.displayPhoneOverride;
+  if (!override) return next();
+
+  const swap = (value, depth = 0) => {
+    // Deep structures exist (a booking holds a family holds addresses), but
+    // not unboundedly deep. The limit stops a cycle turning into a hang.
+    if (depth > 8 || value == null) return value;
+    if (Array.isArray(value)) return value.map((v) => swap(v, depth + 1));
+    if (typeof value !== 'object') return value;
+
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = k === 'phone' && typeof v === 'string' && v ? override : swap(v, depth + 1);
+    }
+    return out;
+  };
+
+  const original = res.json.bind(res);
+  res.json = (body) => original(swap(body));
+  return next();
+});
+
 // Everything past this point is an authenticated admin action, and every
 // one that changes state is recorded.
 router.use(auditMutations);
@@ -2148,6 +2185,51 @@ router.post('/bookings/:id/agent-decision', wrap(async (req, res) => {
   res.locals.auditLabel = `#${booking.bookingNumber}`;
   res.json({ ok: true, booking });
 }));
+
+/**
+ * Accept one media file, so an archive can be copied onto this server.
+ *
+ * Files live beside the server that received them, which means a database
+ * seeded or archived elsewhere points at images this host does not have. There
+ * is no other way in without shell access, and hosted platforms rarely give
+ * one.
+ *
+ * The name is fixed by the caller and checked hard: it is the only part an
+ * attacker controls, and a path separator in it would write anywhere on disk.
+ * Existing files are never overwritten — a name is a hash of its source, so a
+ * file that is already here is the same file.
+ */
+router.put('/media/:name', requireRole('admin', 'super_admin'),
+  express.raw({ type: '*/*', limit: '64mb' }),
+  wrap(async (req, res) => {
+    const name = String(req.params.name || '');
+
+    // Hash plus a known extension, and nothing else. No dots, slashes or
+    // backslashes can survive this, so the path cannot escape the directory.
+    if (!/^[a-f0-9]{8,64}\.(mp4|mov|webm|jpe?g|png|webp)$/i.test(name)) {
+      return res.status(400).json({ error: 'Bad file name' });
+    }
+    if (!req.body?.length) return res.status(400).json({ error: 'Empty body' });
+
+    const fsp = await import('node:fs/promises');
+    const nodePath = await import('node:path');
+    const dir = config.media.dir;
+    const dest = nodePath.join(dir, name);
+
+    try {
+      await fsp.mkdir(dir, { recursive: true });
+      // wx fails rather than overwriting, which is what we want.
+      await fsp.writeFile(dest, req.body, { flag: 'wx' });
+    } catch (err) {
+      if (err.code === 'EEXIST') {
+        return res.json({ ok: true, name, alreadyPresent: true });
+      }
+      return res.status(500).json({ error: `Could not store the file: ${err.message}` });
+    }
+
+    res.locals.auditLabel = name;
+    return res.json({ ok: true, name, bytes: req.body.length });
+  }));
 
 /**
  * Send the backup now, rather than waiting for tonight.
