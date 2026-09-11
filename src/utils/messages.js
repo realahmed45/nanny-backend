@@ -545,7 +545,7 @@ export function bookingSummary(b, {
   if (nanny) {
     lines.push('');
     lines.push(`👩 *${nannyDisplayName(nanny)}*`);
-    lines.push(`${starLine(nanny.ratingAverage)} | ${money(b.hourlyRate ?? nanny.hourlyRate)}/hr | Experience ${nanny.experienceYears ?? 0} yrs`);
+    lines.push(`${starLine(nanny.ratingAverage)} | Experience ${nanny.experienceYears ?? 0} yrs`);
   }
 
   lines.push('');
