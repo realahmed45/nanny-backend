@@ -113,8 +113,33 @@ export async function storeAll(urls = [], opts = {}) {
  * outside the directory, and with a long cache because a stored file never
  * changes — its name is a hash of where it came from.
  */
+/**
+ * Say so, loudly, when the archive is sitting somewhere that will be wiped.
+ *
+ * A relative MEDIA_DIR lives inside the deployed code directory, and hosts
+ * that redeploy by replacing that directory — Render, Heroku, most container
+ * platforms — destroy it every time. The failure is silent and delayed: the
+ * files copy fine, the profiles look right, and then a deploy weeks later
+ * turns every one of them into a dead link with nothing to recover from.
+ *
+ * This cannot be fixed in code. It needs a disk that outlives a deploy, so
+ * the only honest thing is to be impossible to ignore about it.
+ */
+function warnIfEphemeral() {
+  if (path.isAbsolute(ROOT)) return;
+  console.warn(
+    `[media] WARNING: MEDIA_DIR is "${ROOT}", a path inside the app directory.\n`
+    + '[media] On a host that redeploys by replacing that directory (Render, Heroku,\n'
+    + '[media] most containers) every archived photo and video is destroyed on the\n'
+    + '[media] next deploy, and the profiles pointing at them break with no way back.\n'
+    + '[media] Set MEDIA_DIR to a persistent disk — on Render, mount one and point\n'
+    + '[media] MEDIA_DIR at it, e.g. /var/data/media.',
+  );
+}
+
 export function mountMediaRoutes(app, express) {
   if (!config.media.enabled) return;
+  warnIfEphemeral();
 
   // Creating the directory must never stop the server starting. This runs
   // while the app is being built, before the port is bound, so a read-only

@@ -719,11 +719,17 @@ test('a 24-hour booking for one day does not need an agent', async () => {
   await say(FAMILY, '9 AM');
 
   const reply = await say(FAMILY, '10');                         // 24 hours
-  assert.doesNotMatch(reply, /24-Hour Nanny Care/, 'one long day is staffable');
-  assert.match(reply, /Choose a language/);
+
+  // Every 24-hour request is explained and gets the agent call, single day or
+  // not: one long day is still a night shift somebody has to staff, and a
+  // family should hear what that involves while they can still change it.
+  assert.match(reply, /24-Hour Nanny Care/);
+  assert.match(reply, /overnight cover/i, 'the one-day wording, not the two-nanny one');
+  assert.doesNotMatch(reply, /2 nannies/, 'a second nanny is a multi-day matter');
 
   const session = await Session.findOne({ phone: FAMILY });
-  assert.notEqual(session.data.needsAgentReview, true);
+  assert.equal(session.data.needsAgentReview, true);
+  assert.equal(session.state, 'FF_CONFIRM_24H');
 });
 
 test('an emergency promises a call, records it, and confirms the address', async () => {
@@ -1287,7 +1293,11 @@ test('nanny search lists matching nannies and shows a full profile', async () =>
   assert.match(reply, /available nannies/);
   assert.match(reply, /Maria/, 'families see her nickname');
   assert.doesNotMatch(reply, /Grook/, 'her legal surname stays private');
-  assert.match(reply, /25[,.\d]*\/hr/, 'her rate is shown');
+  // A nanny's own rate is what she is paid; what a family pays is set by the
+  // platform and is the same whichever nanny they pick. Showing hers invited
+  // the one conclusion that is not true — that choosing differently changes
+  // the price.
+  assert.doesNotMatch(reply, /\/hr/, 'her rate is never shown to a family');
 
   reply = await say(FAMILY, '1');               // view profile
   assert.match(reply, /Maria/, 'families see her nickname');
@@ -1307,7 +1317,8 @@ test('nannies are no longer filtered by budget or CPR', async () => {
   assert.match(reply, /available nannies/, 'search still returns results');
   assert.match(reply, /Maria/, 'families see her nickname');
   assert.doesNotMatch(reply, /Grook/, 'her legal surname stays private');
-  assert.match(reply, /200[,.\d]*\/hr/, 'the rate is shown, not used as a filter');
+  assert.doesNotMatch(reply, /\/hr/,
+    'the rate is neither a filter nor shown — pricing is the platform\'s');
 });
 
 test('booking asks for a date by option, and flags same-day as an emergency', async () => {
