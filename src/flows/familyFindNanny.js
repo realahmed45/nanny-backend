@@ -233,19 +233,56 @@ async function startDateError(date) {
 function afterStartDate(ctx, { confirm = true } = {}) {
   const steps = confirm ? [{ text: M.startDateConfirmed(ctx.get('startDate')) }] : [];
 
+  const houseRules = {
+    text: M.importantFamilyInfo({
+      isEmergency: ctx.get('isEmergency'),
+      surcharge: ctx.get('emergencySurcharge'),
+    }),
+  };
+
+  // An emergency starts now, so we do not ask when.
+  //
+  // "What time?" is a strange question to put to someone who has just told us
+  // they need a nanny immediately, and every question is another minute lost.
+  // The time is set to the next quarter hour — a real arrival time rather than
+  // one already in the past by the time she reads it — and confirmed rather
+  // than asked, so a family who meant something else can still say so.
+  if (ctx.get('isEmergency')) {
+    const startTime = nextQuarterHour();
+    ctx.set('startTime', startTime);
+
+    if (ctx.get('isMultiDay')) {
+      return [...steps, { text: M.emergencyStartsNow(startTime) }, houseRules,
+        { text: M.ASK_END_DATE_EMERGENCY, state: 'FF_END_DATE' }];
+    }
+    return [
+      ...steps,
+      { text: M.emergencyStartsNow(startTime) },
+      houseRules,
+      { text: M.ASK_DURATION, state: 'FF_DURATION' },
+    ];
+  }
+
   if (ctx.get('isMultiDay')) {
     return [...steps, { text: M.ASK_END_DATE, state: 'FF_END_DATE' }];
   }
   return [
     ...steps,
-    {
-      text: M.importantFamilyInfo({
-        isEmergency: ctx.get('isEmergency'),
-        surcharge: ctx.get('emergencySurcharge'),
-      }),
-    },
+    houseRules,
     { text: M.ASK_START_TIME, state: 'FF_START_TIME' },
   ];
+}
+
+/**
+ * The next quarter hour, as "HH:mm".
+ *
+ * Rounded up rather than using the exact minute: a nanny cannot be at the door
+ * at 14:03, and a start time already in the past makes every later calculation
+ * — overtime especially — read as though she were late before she set off.
+ */
+function nextQuarterHour() {
+  const now = dayjs();
+  return now.add(15 - (now.minute() % 15 || 15), 'minute').second(0).format('HH:mm');
 }
 
 const startDateHandler = async (ctx) => {
@@ -363,6 +400,26 @@ emergencyLocationHandler.prompt = (ctx) => M.confirmEmergencyLocation(emergencyA
 on('FF_EMERGENCY_LOCATION', emergencyLocationHandler);
 
 const endDateHandler = async (ctx) => {
+  const emergency = ctx.get('isEmergency');
+  const said = clean(ctx.text).toLowerCase();
+
+  // In an emergency, not knowing is a real answer rather than a failure to
+  // answer. Someone whose childcare has just collapsed usually cannot say how
+  // long they need cover for, and a forced guess becomes a booking that has to
+  // be changed later. We take today, flag it, and settle it on the call we
+  // have already promised them.
+  if (emergency && (parseChoice(said, 2) === 2 || /^(unknown|dont know|don't know|not sure|no idea)$/.test(said))) {
+    ctx.merge({ endDate: ctx.get('startDate'), endDateUnknown: true });
+    return [
+      { text: M.END_DATE_UNKNOWN_CONFIRMED },
+      { text: M.ASK_REPEAT_DAYS, state: 'FF_REPEAT_DAYS' },
+    ];
+  }
+  // Option 1 is "I will type it", so ask rather than treat it as a date.
+  if (emergency && parseChoice(said, 2) === 1 && said.length <= 2) {
+    return M.ASK_END_DATE_EMERGENCY;
+  }
+
   const date = parseDate(ctx.text);
   if (!date) return `❌ I couldn't read that date. Try a format like *30 August* or *2026-08-30*.`;
   const startDate = ctx.get('startDate');
@@ -382,7 +439,9 @@ const endDateHandler = async (ctx) => {
     { text: M.ASK_REPEAT_DAYS, state: 'FF_REPEAT_DAYS' },
   ];
 };
-endDateHandler.prompt = () => M.ASK_END_DATE;
+endDateHandler.prompt = (ctx) => (ctx.get('isEmergency')
+  ? M.ASK_END_DATE_EMERGENCY
+  : M.ASK_END_DATE);
 on('FF_END_DATE', endDateHandler);
 
 const repeatDaysHandler = async (ctx) => {
@@ -784,6 +843,7 @@ export function draftToBooking(ctx, { hourlyRate = null } = {}) {
     agentCallRequested: !!d.agentCallRequested,
     isEmergency: !!d.isEmergency,
     emergencySurcharge: d.isEmergency ? (d.emergencySurcharge ?? config.emergencySurcharge) : 0,
+    endDateUnknown: !!d.endDateUnknown,
     isLiveIn: !!d.isLiveIn,
     needsAgentReview: !!d.needsAgentReview,
     nanniesNeeded: d.nanniesNeeded || 1,

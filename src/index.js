@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import config from './config/index.js';
+import mongoose from 'mongoose';
 import { connectDB } from './config/db.js';
 import { AdminUser } from './models/index.js';
 import webhookRoutes from './routes/webhook.js';
@@ -44,11 +45,25 @@ export function createApp() {
   mountMediaRoutes(app, express);
   app.use(express.urlencoded({ extended: true }));
 
+  /**
+   * Is this thing working?
+   *
+   * `ok` follows the database rather than being hard-coded true. The server
+   * now starts before the database is reachable — which is what stops a slow
+   * database from failing the whole deploy — so a health check that always
+   * said "ok" would hide exactly the state this exists to report.
+   */
   app.get('/health', (req, res) => {
-    res.json({
-      ok: true,
+    // 0 disconnected, 1 connected, 2 connecting, 3 disconnecting.
+    const DB_STATE = ['disconnected', 'connected', 'connecting', 'disconnecting'];
+    const dbState = DB_STATE[mongoose.connection.readyState] || 'unknown';
+    const dbReady = mongoose.connection.readyState === 1;
+
+    res.status(dbReady ? 200 : 503).json({
+      ok: dbReady,
       service: 'my-nanny-server',
       env: config.env,
+      database: dbState,
       whatsapp: isDryRun() ? 'dry-run (no WhatsApp credentials)' : 'live',
       email: emailIsDryRun() ? 'dry-run (no email provider configured)' : `live (${emailProviderName()})`,
       payments: 'manual bank transfer (admin-verified)',
@@ -234,19 +249,53 @@ async function ensureAdmin() {
   }
 }
 
+/**
+ * Start listening first, then connect to the database.
+ *
+ * The order matters more than it looks. Connecting first meant a database
+ * that was slow or unreachable took the whole deploy down: connectDB throws
+ * after ten seconds, main() rejected, app.listen was never reached, and the
+ * host saw a process that had bound no port at all. The logs said "no open
+ * ports detected", which points at the web server and not at the real
+ * culprit — so the failure was both fatal and misleading.
+ *
+ * Binding the port first means the service comes up, answers /health with an
+ * honest "database: connecting", and recovers by itself the moment the
+ * database is reachable. A site that is briefly degraded is worth a great deal
+ * more than one that will not boot.
+ */
 async function main() {
-  await connectDB();
-  await ensureAdmin().catch((err) => {
-    console.error('[admin] bootstrap failed:', err.message);
-  });
-
   const app = createApp();
-  app.listen(config.port, () => {
-    console.log(`[server] listening on http://localhost:${config.port}`);
+
+  // 0.0.0.0, not localhost: a container's health check comes from outside the
+  // container, and the default binding refuses it.
+  const server = app.listen(config.port, '0.0.0.0', () => {
+    console.log(`[server] listening on 0.0.0.0:${config.port}`);
     console.log(`[server] webhook URL: ${config.publicBaseUrl}/webhook/ultramsg`);
     if (isDryRun()) {
-      console.log('[server] ⚠️  UltraMsg credentials missing — messages will be logged, not sent.');
+      console.log('[server] \u26A0\uFE0F  UltraMsg credentials missing \u2014 messages will be logged, not sent.');
     }
+  });
+
+  server.on('error', (err) => {
+    // Nothing can be served without a port, so this one is worth dying over.
+    console.error(`[server] could not bind port ${config.port}: ${err.message}`);
+    process.exit(1);
+  });
+
+  try {
+    await connectDB();
+  } catch (err) {
+    // Loud, and repeated: mongoose keeps retrying underneath, so the process
+    // stays up and starts working the moment the database answers. The most
+    // common cause by far is the database refusing this host's IP address.
+    console.error(`[db] could not connect: ${err.message}`);
+    console.error('[db] the server is up but cannot read or write yet. '
+      + 'Check MONGODB_URI, and that this host\'s IP is allowed by the database.');
+  }
+
+  await ensureAdmin().catch((err) => {
+    console.error('[admin] bootstrap failed:', err.message);
   });
 
   startScheduler();

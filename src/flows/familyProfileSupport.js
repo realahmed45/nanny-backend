@@ -543,8 +543,20 @@ async function renderPaymentPage(familyId, status, page = 0) {
     ? `\n\n_Showing ${skip + 1}-${shown} of ${total}._\nType *NEXT* for older payments.`
     : '';
 
+  // Money that has left the family's account but is not yet confirmed is the
+  // one category people re-check anxiously. Saying plainly that we are on it —
+  // and that they will hear from us — is what stops the "has it gone through?"
+  // message an hour later.
+  const WAITING_NOTICE = {
+    [PAYMENT_STATUS.IN_PROCESS]:
+      '\n\n⏳ _We are checking these now. *We will let you know* as soon as each one is confirmed — you do not need to do anything._',
+    [PAYMENT_STATUS.REFUND_IN_PROCESS]:
+      '\n\n⏳ _Your refund is being processed. *We will let you know* once it has been sent._',
+  };
+  const notice = WAITING_NOTICE[status] || '';
+
   return {
-    text: `💳 *${status.replace(/_/g, ' ').toUpperCase()}*\n\n${rows.join('\n\n')}${more}\n\n*Total: ${money(sum)}*`,
+    text: `💳 *${status.replace(/_/g, ' ').toUpperCase()}*\n\n${rows.join('\n\n')}${more}\n\n*Total: ${money(sum)}*${notice}`,
     hasMore: shown < total,
     total,
   };

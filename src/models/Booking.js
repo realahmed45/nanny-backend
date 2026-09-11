@@ -144,6 +144,16 @@ const BookingSchema = new mongoose.Schema({
    * at display time, so a later change to the rate does not rewrite history.
    */
   emergencySurcharge: { type: Number, default: 0 },
+
+  /**
+   * The family could not say how long they need cover for.
+   *
+   * Only reachable in an emergency, where someone whose childcare has just
+   * collapsed genuinely does not know yet. `endDate` holds today so the
+   * booking is valid and staffable; this says the date is a placeholder rather
+   * than a decision, so nobody reads it as a one-day booking and closes it.
+   */
+  endDateUnknown: { type: Boolean, default: false },
   paymentStatus: { type: String, enum: Object.values(PAYMENT_STATUS), default: PAYMENT_STATUS.IN_PROCESS },
 
   nannyResponses: [NannyResponseSchema],

@@ -115,7 +115,19 @@ export async function storeAll(urls = [], opts = {}) {
  */
 export function mountMediaRoutes(app, express) {
   if (!config.media.enabled) return;
-  fsSync.mkdirSync(ROOT, { recursive: true });
+
+  // Creating the directory must never stop the server starting. This runs
+  // while the app is being built, before the port is bound, so a read-only
+  // filesystem or a bad MEDIA_DIR would take the whole deploy down and report
+  // it as "no open ports" — a failure that points nowhere near the cause.
+  try {
+    fsSync.mkdirSync(ROOT, { recursive: true });
+  } catch (err) {
+    console.error(`[media] cannot use ${ROOT}: ${err.message}`);
+    console.error('[media] photos and videos will not be archived. Set MEDIA_DIR to a writable path.');
+    return;
+  }
+
   app.use(PUBLIC_PREFIX, express.static(ROOT, {
     maxAge: '365d',
     immutable: true,

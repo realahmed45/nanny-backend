@@ -73,7 +73,7 @@ const familyMenuHandler = async (ctx) => {
     }
     case 2: return myBookingsMenu();
     case 3: return { text: PROFILE_MENU, state: 'FP_MENU' };
-    case 4: return { text: PAYMENTS_MENU, state: 'FPAY_MENU' };
+    case 4: return paymentsMenu('FPAY_MENU');
     case 5: return showReferral(ctx);
     case 6: return { text: SUPPORT_MENU_TEXT, state: 'SUPPORT_MENU' };
     default: return M.FAMILY_MAIN_MENU;
@@ -339,17 +339,43 @@ What would you like to manage?
 
 Type *0* Return to Main Menu`;
 
-export const PAYMENTS_MENU = `💳 *My Payments*
+/**
+ * Split the same way as My Bookings, and for the same reason.
+ *
+ * The first two are what a family actually came to look at — what has gone
+ * through, and what is still moving. On a phone a single block of five is one
+ * wall of text to be skimmed past; separate bubbles give the two that matter
+ * their own weight, and the rest stay together as the tail.
+ */
+export const PAYMENTS_COMPLETED = `💳 *My Payments*
 
 Choose a category:
 
-1. Payment Completed
-2. Payment In Process
-3. Refund In Process
-4. Refunded
-5. Payment Failed
+*1. Payment Completed*
+Payments that have gone through.`;
+
+export const PAYMENTS_IN_PROCESS = `*2. Payment In Process*
+Sent, waiting for us to confirm.`;
+
+export const PAYMENTS_REST = `*3. Refund In Process*
+*4. Refunded*
+*5. Payment Failed*
 
 Type *0* Return to Main Menu`;
+
+/** The same options in one message, for re-prompts after a bad choice. */
+export const PAYMENTS_MENU = [
+  PAYMENTS_COMPLETED,
+  PAYMENTS_IN_PROCESS,
+  PAYMENTS_REST,
+].join('\n\n');
+
+/** The three-message form, for when the menu is shown fresh. */
+export const paymentsMenu = (state = 'FB_PAYMENTS_MENU') => [
+  { text: PAYMENTS_COMPLETED },
+  { text: PAYMENTS_IN_PROCESS },
+  { text: PAYMENTS_REST, state },
+];
 
 export const SUPPORT_MENU_TEXT = `\u{1F198} *Help / Support*
 
@@ -434,6 +460,19 @@ export async function showReferral(ctx) {
   );
   const expiryLine = `\n\n\u{23F3} This link is valid for *${days} more day${days === 1 ? '' : 's'}*.`;
 
+  // The other way to earn the same discount, offered where someone is already
+  // thinking about discounts. Only shown once an Instagram account is actually
+  // set in Settings — an invitation to follow nobody is worse than silence.
+  const { getSettings } = await import('../services/settings.js');
+  const settings = await getSettings().catch(() => ({}));
+  const handle = settings.accounts?.instagram;
+  const socialCfg = settings.socialDiscount || {};
+  const socialDays = socialCfg.validityDays ?? 2;
+
+  const instagramLine = handle && socialCfg.enabled !== false
+    ? `\n\n\u{1F4F8} *Or follow us on Instagram*\nFollow @${handle} and save our number, and you get the same *${discountedRate}* rate for ${socialDays} day${socialDays === 1 ? '' : 's'}.\nhttps://instagram.com/${handle}`
+    : '';
+
   return {
     text: `\u{1F381} *Refer a Friend*
 
@@ -441,7 +480,7 @@ Share My Nanny with your friends and earn rewards!
 
 Your link: ${link}
 
-You pay only *${discountedRate}* instead of *${standardRate}* as a thank you for your referral.${expiryLine}${favouriteLines}
+You pay only *${discountedRate}* instead of *${standardRate}* as a thank you for your referral.${expiryLine}${instagramLine}${favouriteLines}
 
 Type *0* to return to the Main Menu.`,
     state: 'FAMILY_MAIN_MENU',

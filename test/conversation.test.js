@@ -782,7 +782,18 @@ test('an emergency that keeps its address carries straight on', async () => {
   await say(FAMILY, '1');                                // urgent
 
   const reply = await say(FAMILY, '1');                  // keep this location
-  assert.match(reply, /time does the session start|start\?/i);
+
+  // An emergency is never asked what time it starts. Someone who has just
+  // said they need a nanny immediately has answered that already, and every
+  // question is another minute — so the time is set and confirmed instead.
+  assert.match(reply, /as soon as possible/i);
+  assert.doesNotMatch(reply, /What time does the session start/i);
+  assert.match(reply, /How long do you need/i, 'straight on to the duration');
+
+  const { Session } = await import('../src/models/index.js');
+  const session = await Session.findOne({ phone: FAMILY });
+  assert.equal(session.state, 'FF_DURATION');
+  assert.match(session.data.startTime, /^\d{2}:\d{2}$/, 'a real start time was set');
 });
 
 test('the agent decision moves the family on to picking nannies', async () => {
@@ -1128,6 +1139,78 @@ test('an emergency is offered to everyone and claimed by the first to answer', a
     outbox.some((m) => m.body.includes('We found you a nanny')),
     'and the family hears that someone is on the way',
   );
+});
+
+test('an emergency lasting an unknown time is still bookable', async () => {
+  const { Session } = await import('../src/models/index.js');
+
+  await say(FAMILY, 'nanny');
+  await say(FAMILY, '1');
+  await say(FAMILY, '1');
+  await say(FAMILY, 'Sarah Johnson');
+  await say(FAMILY, 'sarah@email.com');
+  await say(FAMILY, await latestOtp(FAMILY));
+  await say(FAMILY, 'https://maps.google.com/?q=25.2,55.3');
+  await say(FAMILY, 'Downtown Dubai');
+  await say(FAMILY, '2');
+  await say(FAMILY, '2');                              // multiple days
+  await say(FAMILY, dayjs().format('YYYY-MM-DD'));     // today
+  await say(FAMILY, '1');                              // it is urgent
+  let reply = await say(FAMILY, '1');                  // keep this location
+
+  assert.match(reply, /How long do you need the nanny/i);
+  assert.match(reply, /I do not know yet/i, 'not knowing is offered as an answer');
+
+  // Someone whose childcare has just collapsed often cannot say how long they
+  // need cover for. Forcing a date would only get a guess, and a guess becomes
+  // a booking that has to be changed later.
+  reply = await say(FAMILY, '2');
+  assert.match(reply, /No problem/i);
+
+  const session = await Session.findOne({ phone: FAMILY });
+  assert.equal(session.data.endDateUnknown, true, 'flagged, not silently guessed');
+  assert.equal(
+    session.data.endDate,
+    session.data.startDate,
+    'today stands in, so the booking is valid and staffable today',
+  );
+  assert.equal(session.state, 'FF_REPEAT_DAYS');
+});
+
+test('an emergency lasting an unknown time is still bookable', async () => {
+  const { Session } = await import('../src/models/index.js');
+
+  await say(FAMILY, 'nanny');
+  await say(FAMILY, '1');
+  await say(FAMILY, '1');
+  await say(FAMILY, 'Sarah Johnson');
+  await say(FAMILY, 'sarah@email.com');
+  await say(FAMILY, await latestOtp(FAMILY));
+  await say(FAMILY, 'https://maps.google.com/?q=25.2,55.3');
+  await say(FAMILY, 'Downtown Dubai');
+  await say(FAMILY, '2');
+  await say(FAMILY, '2');                              // multiple days
+  await say(FAMILY, dayjs().format('YYYY-MM-DD'));     // today
+  await say(FAMILY, '1');                              // it is urgent
+  let reply = await say(FAMILY, '1');                  // keep this location
+
+  assert.match(reply, /How long do you need the nanny/i);
+  assert.match(reply, /I do not know yet/i, 'not knowing is offered as an answer');
+
+  // Someone whose childcare has just collapsed often cannot say how long they
+  // need cover for. Forcing a date would only get a guess, and a guess becomes
+  // a booking that has to be changed later.
+  reply = await say(FAMILY, '2');
+  assert.match(reply, /No problem/i);
+
+  const session = await Session.findOne({ phone: FAMILY });
+  assert.equal(session.data.endDateUnknown, true, 'flagged, not silently guessed');
+  assert.equal(
+    session.data.endDate,
+    session.data.startDate,
+    'today stands in, so the booking is valid and staffable today',
+  );
+  assert.equal(session.state, 'FF_REPEAT_DAYS');
 });
 
 test('family registration collects name, email and verifies OTP', async () => {

@@ -162,6 +162,35 @@ Do you want to continue with this location?
 1. Yes, continue
 2. No, I want to change it`;
 
+/**
+ * An emergency starts now, so we tell rather than ask.
+ *
+ * "What time do you need her?" is a strange thing to put to someone who has
+ * just said they need somebody immediately, and every extra question is
+ * another minute. Confirmed rather than assumed silently, so a family who
+ * meant something else can still correct it.
+ */
+export const emergencyStartsNow = (time) => `\u{23F1} *Starting: as soon as possible — around ${prettyTime(time)}*
+
+We are looking for someone who can be with you within the hour.`;
+
+/**
+ * The end date, when the family is in an emergency.
+ *
+ * Someone whose childcare has just fallen through often does not know how long
+ * they need cover for — that depends on things they have not sorted out yet.
+ * Forcing a date would get a guess, and a guess becomes a booking that has to
+ * be changed later. "I do not know yet" is a real answer, so it is offered.
+ */
+export const ASK_END_DATE_EMERGENCY = `\u{1F4C5} *How long do you need the nanny?*
+
+1. I know the end date — I will type it
+2. I do not know yet
+
+Or just type a date like *30 August*.`;
+
+export const END_DATE_UNKNOWN_CONFIRMED = `\u{1F44D} No problem — we will arrange cover starting today and sort the rest out with you on the call.`;
+
 /* ---- 24-hour care ---------------------------------------------------- */
 
 /**
@@ -539,6 +568,11 @@ export function bookingSummary(b, {
     lines.push(`*Other Instructions:*\n ${b.otherInstructions}`);
   }
 
+  if (b.endDateUnknown) {
+    lines.push('');
+    lines.push('📅 _End date to be confirmed — we will agree it with you on the call._');
+  }
+
   if (b.isEmergency) {
     lines.push('');
     lines.push('⚡ *EMERGENCY BOOKING* — needed today');
@@ -612,7 +646,7 @@ export const SEARCHING = 'Hang on I am searching for a perfect nanny.';
 export function nannyListing(nannies, { startIndex = 0, total = null } = {}) {
   const head = `I found *${total ?? nannies.length} available nannies*.\n`;
   const items = nannies.map((n, i) =>
-    `${startIndex + i + 1}. 👩 *${nannyDisplayName(n)}*\n   ${starLine(n.ratingAverage)} | ${n.distanceKm ?? 2} km | ${money(n.hourlyRate)}/hr | Experience ${n.experienceYears ?? 0} yrs`
+    `${startIndex + i + 1}. 👩 *${nannyDisplayName(n)}*\n   ${starLine(n.ratingAverage)} | ${n.distanceKm ?? 2} km | Experience ${n.experienceYears ?? 0} yrs`
   ).join('\n\n');
   const nums = nannies.map((_, i) => startIndex + i + 1).join(',');
   const tail = `\n\nReply with ${nums} to view details\nType *NEXT* to view more profiles`;
@@ -652,7 +686,7 @@ export const NO_NANNIES = NO_NANNIES_ACTIONS;
 export function nannyProfile(n, { hourlyRate = null } = {}) {
   const lines = [
     `*${nannyDisplayName(n)}*`,
-    `${starLine(n.ratingAverage)} | ${n.distanceKm ?? 2} km | ${money(hourlyRate ?? n.hourlyRate)}/hr | Experience ${n.experienceYears ?? 0} yrs.`,
+    `${starLine(n.ratingAverage)} | ${n.distanceKm ?? 2} km | Experience ${n.experienceYears ?? 0} yrs.`,
     '',
     `*Age*: ${n.age ?? '-'}yr`,
     '',
@@ -665,8 +699,6 @@ export function nannyProfile(n, { hourlyRate = null } = {}) {
   if (n.subjects?.length) {
     lines.push('', '*Tutoring*', n.subjects.join(', '));
   }
-  const av = n.availability || {};
-  lines.push('', '*Availability*', ` ${av.maxHoursPerDay ? `${av.maxHoursPerDay} hours per day` : 'Flexible'}`);
   lines.push('');
   lines.push(n.backgroundCheckPassed ? '✅Background Check' : '⬜Background Check');
   lines.push(n.cprCertified ? '✅CPR Certificate' : '⬜No CPR Certificate');

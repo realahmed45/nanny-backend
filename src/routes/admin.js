@@ -2721,6 +2721,7 @@ router.get('/settings', wrap(async (req, res) => {
     emergency: { surcharge: runtime.emergency?.surcharge ?? config.emergencySurcharge },
     socialDiscount: { ...SOCIAL_DEFAULTS, ...(runtime.socialDiscount || {}) },
     accounts: { instagram: '', facebook: '', tiktok: '', ...(runtime.accounts || {}) },
+    areas: runtime.areas || [],
   });
 }));
 
@@ -2739,6 +2740,7 @@ const RUNTIME_SETTINGS = new Set([
   'emergency',
   'calendar',
   'accounts',
+  'areas',
 ]);
 
 /**
@@ -2774,6 +2776,43 @@ function validateSetting(key, value) {
    * check. Stored as bare handles rather than full URLs so they can be
    * rendered as links or as "@name" without having to be parsed apart.
    */
+  /**
+   * The areas we serve, and what transport costs to reach each one.
+   *
+   * A flat 50,000-100,000 band was only ever a stand-in for "it depends where
+   * you are". Naming the areas lets the fee be right rather than a range, and
+   * gives the team one list to point at when a family asks whether we cover
+   * them. An area switched off stays in the list rather than being deleted:
+   * the bookings that already reference it still need to make sense.
+   */
+  if (key === 'areas') {
+    if (!Array.isArray(value)) throw new Error('areas must be a list');
+    if (value.length > 200) throw new Error('That is more areas than we can sensibly manage');
+
+    const seen = new Set();
+    return value.map((a, i) => {
+      const name = String(a?.name || '').trim().slice(0, 80);
+      if (!name) throw new Error(`Area ${i + 1} needs a name`);
+
+      const key2 = name.toLowerCase();
+      if (seen.has(key2)) throw new Error(`"${name}" is listed twice`);
+      seen.add(key2);
+
+      const fee = Number(a?.transportFee);
+      if (!Number.isFinite(fee) || fee < 0) {
+        throw new Error(`"${name}" needs a transport fee of zero or more`);
+      }
+      if (fee > 5_000_000) throw new Error(`The fee for "${name}" looks like a typo`);
+
+      return {
+        name,
+        transportFee: fee,
+        active: a?.active !== false,
+        notes: String(a?.notes || '').slice(0, 300),
+      };
+    });
+  }
+
   if (key === 'accounts') {
     const handle = (v) => String(v || '').trim().replace(/^@/, '').replace(/\s+/g, '').slice(0, 60);
     return {
