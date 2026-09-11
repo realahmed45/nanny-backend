@@ -490,16 +490,12 @@ on('FB_REPLACEMENT_LISTING', async (ctx) => {
 
   ctx.set('replacementNannyId', String(nanny._id));
 
-  const remainingHours = booking.remainingDays().reduce((s, d) => s + (d.hours || 0), 0);
-  const difference = round2((nanny.hourlyRate - booking.hourlyRate) * remainingHours);
-
+  // Changing nanny does not change the price: pricing is set by the platform
+  // and does not vary by who takes the booking. There is nothing to pay and
+  // nothing to refund, which is worth saying plainly — a family choosing
+  // between nannies should not be weighing them on a cost that is identical.
   const lines = [M.nannyProfile(nanny), ''];
-  if (difference > 0) {
-    lines.push(`⚠️ This nanny costs *${money(nanny.hourlyRate)}/hr* — ${money(difference)} more than your current booking.`);
-    lines.push('You will need to pay the difference before the booking is confirmed.');
-  } else if (difference < 0) {
-    lines.push(`✅ This nanny costs less. *${money(Math.abs(difference))}* will be refunded to you.`);
-  }
+  lines.push('💰 The price of your booking does not change.');
   lines.push('', '1. Select this Nanny', '2. View Other Nannies');
 
   return { text: lines.join('\n'), state: 'FB_REPLACEMENT_CONFIRM' };

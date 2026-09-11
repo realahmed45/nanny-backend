@@ -58,12 +58,15 @@ async function showFavourites(ctx, user) {
     );
   }
 
+  // A nanny's own rate is what she is paid, not what a family is charged —
+  // pricing is the platform's and is the same whichever nanny they pick. It is
+  // not fetched at all here, so it cannot leak into the list by accident.
   const nannies = await User.find({ _id: { $in: ids } })
-    .select('fullName nickname hourlyRate experienceYears ratingAverage ratingCount nannyStatus');
+    .select('fullName nickname experienceYears ratingAverage ratingCount nannyStatus');
 
   const rows = nannies.map((n, i) => {
     const stars = n.ratingCount ? `\u{2B50} ${n.ratingAverage.toFixed(1)}` : 'No ratings yet';
-    return `*${i + 1}. \u{1F469} ${nannyDisplayName(n)}*\n   ${stars} | ${money(n.hourlyRate)}/hr | ${n.experienceYears || 0} yrs exp.`;
+    return `*${i + 1}. \u{1F469} ${nannyDisplayName(n)}*\n   ${stars} | ${n.experienceYears || 0} yrs exp.`;
   }).join('\n\n');
 
   return {

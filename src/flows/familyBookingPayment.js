@@ -32,7 +32,7 @@ profileHandler.prompt = () => M.NANNY_PROFILE_ACTIONS;
 on('FF_NANNY_PROFILE', profileHandler);
 
 /**
- * Summary priced at the selected nanny's rate, then the pay-first notice.
+ * Summary priced the way the booking will be, then the pay-first notice.
  *
  * A booking the agent decided needs two nannies pauses here: the first pick is
  * banked and the listing comes back for the second, because pricing and paying
@@ -62,7 +62,18 @@ export async function showPreBookingSummary(ctx, nanny) {
     ctx.set('selectedNannyIds', all);
   }
 
-  const preview = draftToBooking(ctx, { hourlyRate: nanny.hourlyRate });
+  // Priced the way the booking will actually be priced — by the platform, for
+  // this family and this number of children. Quoting the nanny's own rate here
+  // showed a total the family was never going to be charged, and made her look
+  // more or less expensive than the nanny beside her when they cost the same.
+  const { hourlyRateFor } = await import('../services/pricing.js');
+  const family = await User.findById(ctx.session.user);
+  const pricing = await hourlyRateFor({
+    user: family,
+    children: (ctx.get('children') || []).length || 1,
+  });
+
+  const preview = draftToBooking(ctx, { hourlyRate: pricing.hourlyRate });
   return [
     { text: M.bookingSummary(preview, { title: '*Booking Summary*', nanny }) },
     { text: M.PAY_FIRST_NOTICE(nannyDisplayName(nanny)), state: 'FF_PAY_CONFIRM' },
