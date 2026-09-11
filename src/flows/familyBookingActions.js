@@ -300,14 +300,19 @@ on('FB_RESCHEDULE_CONFIRM', async (ctx) => {
 
 She has *2 hours* to accept the changes. We'll let you know as soon as she responds.
 
-While we wait, we won't show you other nannies.`,
+While we wait, we won't show you other nannies.
+
+Type *0* to return to the Main Menu.`,
       state: 'FAMILY_MAIN_MENU',
     };
   }
 
   // No nanny assigned — apply immediately.
   await applyPendingChange(booking);
-  return { text: '✅ Your booking has been updated.', state: 'FAMILY_MAIN_MENU' };
+  return {
+    text: '✅ Your booking has been updated.\n\nType *0* to return to the Main Menu.',
+    state: 'FAMILY_MAIN_MENU',
+  };
 });
 
 /** Apply a change the nanny accepted (or that needed no approval). */
@@ -424,12 +429,18 @@ async function sendChangeToNanny(ctx, booking, label) {
   await notifyUser(nanny, M.nannyBookingRequest(preview, family, expiresAt, { isChange: true }));
   await setNannyRequestState(nanny, booking);
 
-  return {
-    text: `✅ ${label} sent to ${nannyDisplayName(nanny)}.
+  // The menu has to come with the confirmation, not just the state change.
+  // Landing someone in FAMILY_MAIN_MENU with nothing on screen leaves them
+  // staring at a dead end — their next message gets "I didn't understand
+  // that", because the options they were never shown are what it expects.
+  return [
+    {
+      text: `✅ ${label} sent to ${nannyDisplayName(nanny)}.
 
 She has *2 hours* to accept. We'll notify you as soon as she responds.`,
-    state: 'FAMILY_MAIN_MENU',
-  };
+    },
+    { text: M.FAMILY_MAIN_MENU, state: 'FAMILY_MAIN_MENU' },
+  ];
 }
 
 /* ------------------------------------------------------------------ *
@@ -548,7 +559,9 @@ Your booking will move to *Pending for Additional Payment* until this is paid.
   return {
     text: `✅ ${nannyDisplayName(nanny)} has been selected. Waiting for her confirmation.
 
-We'll notify you as soon as she responds.`,
+We'll notify you as soon as she responds.
+
+Type *0* to return to the Main Menu.`,
     state: 'FAMILY_MAIN_MENU',
   };
 });

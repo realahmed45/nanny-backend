@@ -43,12 +43,29 @@ export const prettyTime = (t) => {
 };
 
 /** "9:00 AM – 11:00 AM" from a start time and a duration in hours. */
+/**
+ * "9:00 AM – 1:00 PM", and honest about the awkward cases.
+ *
+ * A 24-hour booking ends at the same clock time it started, so the plain
+ * range read "11:00 AM – 11:00 AM" — which looks like a mistake, or worse,
+ * like a booking of no length at all. Anything spanning a day or more says so
+ * instead. A range crossing midnight is marked too, so nobody reads an end
+ * time of 2:00 AM as being earlier the same morning.
+ */
 export const timeRange = (startTime, hours) => {
   if (!startTime) return '';
   const [h, m] = startTime.split(':').map(Number);
   const start = dayjs().hour(h).minute(m).second(0);
-  const end = start.add(hours || 0, 'hour');
-  return `${prettyTime(startTime)} – ${prettyTime(end.format('HH:mm'))}`;
+  const span = Number(hours) || 0;
+  const end = start.add(span, 'hour');
+
+  if (span >= 24) {
+    const days = Math.round((span / 24) * 10) / 10;
+    return `${prettyTime(startTime)} for ${days} full day${days === 1 ? '' : 's'} (${span} hours)`;
+  }
+
+  const nextDay = end.date() !== start.date();
+  return `${prettyTime(startTime)} – ${prettyTime(end.format('HH:mm'))}${nextDay ? ' (next day)' : ''}`;
 };
 
 /** Render a numbered menu from an array of labels. */

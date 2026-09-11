@@ -302,7 +302,7 @@ export async function bookingActionMenu(booking) {
 
     // Multi-day ongoing bookings may still be edited (with penalties).
     if (booking.isMultiDay) {
-      opts.push('Reschedule Booking', 'Change Address', 'Change Skills, Language or Budget', 'Change Nanny');
+      opts.push('Reschedule Booking', 'Change Address', 'Change Skills or Language', 'Change Nanny');
     }
     opts.push('Cancel Booking');
     return { text: menuText(opts), state: 'FB_ACTION_ONGOING' };
@@ -310,7 +310,7 @@ export async function bookingActionMenu(booking) {
 
   // --- Upcoming ---
   opts.push('Message Nanny', 'View Nanny Profile', 'Reschedule Booking', 'Change Address',
-    'Change Skills, Language or Budget', 'Change Nanny', 'Cancel Booking');
+    'Change Skills or Language', 'Change Nanny', 'Cancel Booking');
   if (booking.subStatus === BOOKING_SUBSTATUS.NANNY_CONFIRMED && liveWindowOpen) {
     opts.push('Start Sharing Live Location');
     if (booking.liveLocation?.nannySharing) opts.push("View Nanny's Live Location");
