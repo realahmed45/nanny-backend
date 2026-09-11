@@ -1029,7 +1029,22 @@ router.get('/nannies', wrap(async (req, res) => {
     return { ...n.toObject(), activeBookings: active, totalBookings: total, availability };
   }));
 
-  res.json(result);
+  /**
+   * Totals across every nanny, not just the page being looked at.
+   *
+   * The header counted the rows it had, so "400 registered · 22 verified" was
+   * really "22 of the 25 on this page" — a number that changed as you paged
+   * and never matched the truth. A summary that only describes the current
+   * page is worse than none, because it reads as a fact about the business.
+   */
+  const [verified, pending, suspended, rejected] = await Promise.all([
+    User.countDocuments({ role: USER_ROLE.NANNY, nannyStatus: NANNY_STATUS.VERIFIED }),
+    User.countDocuments({ role: USER_ROLE.NANNY, nannyStatus: NANNY_STATUS.PENDING_VERIFICATION }),
+    User.countDocuments({ role: USER_ROLE.NANNY, nannyStatus: NANNY_STATUS.SUSPENDED }),
+    User.countDocuments({ role: USER_ROLE.NANNY, nannyStatus: NANNY_STATUS.REJECTED }),
+  ]);
+
+  res.json({ ...result, counts: { verified, pending, suspended, rejected } });
 }));
 
 router.get('/nannies/:id', wrap(async (req, res) => {
@@ -1747,7 +1762,14 @@ router.get('/families', wrap(async (req, res) => {
     };
   }));
 
-  res.json(result);
+  // Across every family, not just the page on screen — see the nannies list
+  // above for why a page-scoped summary is worse than none.
+  const [active, blocked] = await Promise.all([
+    User.countDocuments({ role: USER_ROLE.FAMILY, blocked: { $ne: true } }),
+    User.countDocuments({ role: USER_ROLE.FAMILY, blocked: true }),
+  ]);
+
+  res.json({ ...result, counts: { active, blocked } });
 }));
 
 router.get('/families/:id', wrap(async (req, res) => {
