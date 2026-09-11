@@ -73,7 +73,8 @@ function loadMedia() {
     return { videos: [], photos: [] };
   }
 
-  const url = (f) => `${config.publicBaseUrl}/media/${f}`;
+  // Relative, so seeded profiles work on whatever host serves them.
+  const url = (f) => `/media/${f}`;
   const videos = files.filter((f) => /\.(mp4|mov|webm)$/i.test(f)).map(url);
   const photos = files.filter((f) => /\.(jpe?g|png|webp)$/i.test(f)).map(url);
   return { videos, photos };

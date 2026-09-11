@@ -72,7 +72,14 @@ export async function store(remoteUrl, { mediaType } = {}) {
   try {
     const name = safeName(remoteUrl, mediaType);
     const dest = path.join(ROOT, name);
-    const publicUrl = `${config.publicBaseUrl}${PUBLIC_PREFIX}/${name}`;
+    // Stored relative, not as a full URL.
+    //
+    // Baking the hostname in ties every record to wherever the server happened
+    // to be running when the file arrived — archive something locally and the
+    // live site serves a profile full of links to localhost. A path is correct
+    // on every host, and the browser resolves it against whatever is serving
+    // the page.
+    const publicUrl = `${PUBLIC_PREFIX}/${name}`;
 
     // Already have it — the same file re-sent, or a retry after a crash.
     if (await exists(dest)) return publicUrl;
