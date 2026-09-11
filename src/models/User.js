@@ -195,6 +195,39 @@ const UserSchema = new mongoose.Schema({
   cprCertified: { type: Boolean, default: false },
   residingAddress: String,
   residingMapUrl: String,
+  /**
+   * Her profile pictures — the headshots, as opposed to photos of her at work.
+   *
+   * Several are kept rather than one, for the same reason the videos are: she
+   * sends a better one months later, and the old one should not simply vanish
+   * in case the new one turns out worse. Same two gates as everything else,
+   * and the same review queue.
+   *
+   * Exactly one can be featured at a time, which is the difference from photos
+   * and videos: this is the picture families see beside her name, and a
+   * profile cannot have two faces. `profilePhotoUrl` stays as the resolved
+   * answer so everything already reading it keeps working.
+   */
+  profilePictures: [{
+    url: { type: String, required: true },
+    caption: String,
+    uploadedAt: { type: Date, default: Date.now },
+    approved: { type: Boolean, default: false },
+    approvedAt: Date,
+    featured: { type: Boolean, default: false },
+    featuredAt: Date,
+    rejectedAt: Date,
+    rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'AdminUser' },
+    rejectionReasons: [{ type: String }],
+    rejectionReason: { type: String, default: null },
+    rejectionDetail: String,
+  }],
+
+  /**
+   * The picture actually in use. Kept in step with whichever profilePicture is
+   * featured, so the many callers that only want "her photo" need not know the
+   * list exists.
+   */
   profilePhotoUrl: String,
   documents: [DocumentSchema],
   availability: { type: AvailabilitySchema, default: () => ({ days: [], blockedDates: [] }) },

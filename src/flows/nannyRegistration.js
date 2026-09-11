@@ -331,7 +331,22 @@ const availHoursHandler = async (ctx) => {
   user.cprCertified = !!ctx.get('cprCertified');
   user.residingAddress = ctx.get('residingAddress');
   user.residingMapUrl = ctx.get('residingMapUrl');
-  user.profilePhotoUrl = ctx.get('profilePhotoUrl');
+  // Her first profile picture. Recorded in the list as well as the single
+  // field, so a better one sent later has something to sit alongside rather
+  // than silently replacing the only copy we have.
+  const profilePhotoUrl = ctx.get('profilePhotoUrl');
+  user.profilePhotoUrl = profilePhotoUrl;
+  if (profilePhotoUrl) {
+    user.profilePictures = [{
+      url: profilePhotoUrl,
+      // Held back like everything else until someone has looked at it, but
+      // featured already: when it is approved it becomes her face, and there
+      // is nothing to choose between.
+      approved: false,
+      featured: true,
+      featuredAt: new Date(),
+    }];
+  }
   user.documents = ctx.get('documents', []);
 
   // Held back from families until someone has watched them. `introVideoUrl`

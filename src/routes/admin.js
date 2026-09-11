@@ -1276,10 +1276,11 @@ router.get('/media-queue', wrap(async (req, res) => {
     $or: [
       { videos: { $elemMatch: { approved: false, rejectedAt: null } } },
       { photos: { $elemMatch: { approved: false, rejectedAt: null } } },
+      { profilePictures: { $elemMatch: { approved: false, rejectedAt: null } } },
     ],
   })
     .select('fullName nickname phone nannyStatus age experienceYears hourlyRate '
-      + 'ratingAverage profilePhotoUrl videos photos lastSeenAt createdAt')
+      + 'ratingAverage profilePhotoUrl videos photos profilePictures lastSeenAt createdAt')
     .sort({ createdAt: -1 })
     .lean();
 
@@ -1299,16 +1300,21 @@ router.get('/media-queue', wrap(async (req, res) => {
     lastSeenAt: n.lastSeenAt,
     videos: pending(n.videos),
     photos: pending(n.photos),
+    profilePictures: pending(n.profilePictures),
     // What is already live, so a reviewer knows whether there is room to
     // feature this one before they tick the box.
     featuredVideos: (n.videos || []).filter((v) => v.approved && v.featured).length,
     featuredPhotos: (n.photos || []).filter((p) => p.approved && p.featured).length,
+    featuredProfilePictures: (n.profilePictures || []).filter((p) => p.approved && p.featured).length,
   }));
 
   res.json({
     items,
     total: items.length,
-    waiting: items.reduce((sum, n) => sum + n.videos.length + n.photos.length, 0),
+    waiting: items.reduce(
+      (sum, n) => sum + n.videos.length + n.photos.length + n.profilePictures.length,
+      0,
+    ),
     // Sent with the queue so the picker is defined in one place — a label the
     // dashboard invents itself would drift from what she is actually told.
     // `told` travels too, so the dashboard can show a reviewer the exact
@@ -1317,7 +1323,8 @@ router.get('/media-queue', wrap(async (req, res) => {
     reasons: Object.entries(REJECTION_REASONS).map(([value, r]) => ({
       value, label: r.label, told: r.told,
     })),
-    limits: { videos: MAX_FEATURED_VIDEOS, photos: MAX_FEATURED_PHOTOS },
+    // One profile picture at a time: it is the face beside her name.
+    limits: { videos: MAX_FEATURED_VIDEOS, photos: MAX_FEATURED_PHOTOS, profilePictures: 1 },
   });
 }));
 
@@ -1328,9 +1335,23 @@ router.get('/media-queue', wrap(async (req, res) => {
  * what was decided, and deleting it would let the same file be re-sent into a
  * queue that has already judged it.
  */
-router.post('/nannies/:id/:kind(videos|photos)/:mediaId/reject',
+/**
+ * The URL segment for each kind, and the field it lives in.
+ *
+ * The path is hyphenated because that is what a URL should look like; the
+ * field is camelCase because that is what the schema calls it. Mapping them
+ * here keeps the two from being confused at the call site — and stops a route
+ * reaching into an arbitrary field name taken from the URL.
+ */
+const MEDIA_FIELD = {
+  videos: 'videos',
+  photos: 'photos',
+  'profile-pictures': 'profilePictures',
+};
+
+router.post('/nannies/:id/:kind(videos|photos|profile-pictures)/:mediaId/reject',
   requireRole('admin', 'super_admin'), wrap(async (req, res) => {
-    const { kind } = req.params;
+    const kind = MEDIA_FIELD[req.params.kind];
     const nanny = await User.findOne({ _id: req.params.id, role: USER_ROLE.NANNY });
     if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
 
@@ -1376,7 +1397,9 @@ router.post('/nannies/:id/:kind(videos|photos)/:mediaId/reject',
     await notifyUser(
       nanny,
       M.mediaRejected({
-        kind: kind === 'videos' ? 'video' : 'photo',
+        // What she is told it was. A rejected headshot called a "photo"
+        // would have her looking through the wrong set of files.
+        kind: { videos: 'video', photos: 'photo', profilePictures: 'profile picture' }[kind],
         reasons: reasons.map((r) => REJECTION_REASONS[r].told).filter(Boolean),
         detail,
       }),
@@ -1481,6 +1504,137 @@ router.delete('/nannies/:id/photos/:photoId', requireRole('admin', 'super_admin'
 
   res.locals.auditLabel = nanny.nickname || nanny.fullName;
   res.json({ ok: true, photos: nanny.photos });
+}));
+
+/* ------------------------------------------------------------------ *
+ * Profile pictures
+ *
+ * Her headshots, as opposed to photos of her at work. Kept as a list for the
+ * same reason the videos are — a better one arrives months later, and the old
+ * one should not vanish in case the new one turns out worse.
+ *
+ * The one difference from photos and videos: exactly one can be featured.
+ * This is the picture beside her name, and a profile cannot have two faces.
+ * Featuring one therefore un-features the rest rather than being refused,
+ * which is what somebody clicking "use this one" means.
+ * ------------------------------------------------------------------ */
+
+/** Keep profilePhotoUrl in step with whichever picture is featured. */
+function syncProfilePhoto(nanny) {
+  const chosen = (nanny.profilePictures || []).find((p) => p.approved && p.featured);
+  // Falls back to any approved one rather than blanking her avatar: a profile
+  // with no face at all is worse than one showing an older picture.
+  const fallback = (nanny.profilePictures || []).find((p) => p.approved);
+  if (chosen) nanny.profilePhotoUrl = chosen.url;
+  else if (fallback) nanny.profilePhotoUrl = fallback.url;
+}
+
+router.post('/nannies/:id/profile-pictures', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const nanny = await User.findOne({ _id: req.params.id, role: USER_ROLE.NANNY });
+  if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
+
+  const url = String(req.body?.url || '').trim();
+  if (!/^https?:\/\//i.test(url)) {
+    return res.status(400).json({ error: 'A picture needs a valid http(s) URL' });
+  }
+
+  nanny.profilePictures = nanny.profilePictures || [];
+  const first = !nanny.profilePictures.some((p) => p.featured);
+
+  nanny.profilePictures.push({
+    url,
+    caption: String(req.body?.caption || '').slice(0, 200),
+    // Seen by the admin adding it. The first one becomes her picture straight
+    // away, since a nanny with no avatar at all helps nobody.
+    approved: true,
+    approvedAt: new Date(),
+    featured: first,
+    featuredAt: first ? new Date() : undefined,
+  });
+  syncProfilePhoto(nanny);
+  await nanny.save();
+
+  res.locals.auditLabel = nanny.nickname || nanny.fullName;
+  res.status(201).json({ ok: true, profilePictures: nanny.profilePictures, profilePhotoUrl: nanny.profilePhotoUrl });
+}));
+
+router.patch('/nannies/:id/profile-pictures/:pictureId', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const nanny = await User.findOne({ _id: req.params.id, role: USER_ROLE.NANNY });
+  if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
+
+  const picture = (nanny.profilePictures || []).id(req.params.pictureId);
+  if (!picture) return res.status(404).json({ error: 'Picture not found' });
+
+  res.locals.auditBefore = {
+    approved: picture.approved, featured: picture.featured, caption: picture.caption,
+  };
+  if (req.body?.caption !== undefined) picture.caption = String(req.body.caption).slice(0, 200);
+
+  if (req.body?.approved !== undefined) {
+    picture.approved = !!req.body.approved;
+    picture.approvedAt = picture.approved ? new Date() : undefined;
+    if (picture.approved) {
+      picture.rejectedAt = undefined;
+      picture.rejectedBy = undefined;
+      picture.rejectionReason = null;
+      picture.rejectionDetail = undefined;
+    } else {
+      picture.featured = false;
+      picture.featuredAt = undefined;
+    }
+  }
+
+  if (req.body?.featured !== undefined) {
+    const want = !!req.body.featured;
+    if (want && !picture.approved) {
+      return res.status(409).json({ error: 'Approve the picture before making it her profile photo' });
+    }
+    if (want) {
+      // One face only. Choosing a new picture replaces the old one rather
+      // than being refused, because that is what the click means.
+      for (const other of nanny.profilePictures) {
+        if (String(other._id) !== String(picture._id)) {
+          other.featured = false;
+          other.featuredAt = undefined;
+        }
+      }
+    }
+    picture.featured = want;
+    picture.featuredAt = want ? new Date() : undefined;
+  }
+
+  syncProfilePhoto(nanny);
+  await nanny.save();
+
+  res.locals.auditLabel = nanny.nickname || nanny.fullName;
+  res.json({ ok: true, profilePictures: nanny.profilePictures, profilePhotoUrl: nanny.profilePhotoUrl });
+}));
+
+router.delete('/nannies/:id/profile-pictures/:pictureId', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const nanny = await User.findOne({ _id: req.params.id, role: USER_ROLE.NANNY });
+  if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
+
+  const picture = (nanny.profilePictures || []).id(req.params.pictureId);
+  if (!picture) return res.status(404).json({ error: 'Picture not found' });
+
+  const wasFeatured = picture.featured;
+  res.locals.auditBefore = { url: picture.url, caption: picture.caption };
+  picture.deleteOne();
+
+  // Deleting the one in use promotes the next approved picture rather than
+  // leaving her without a face.
+  if (wasFeatured) {
+    const next = (nanny.profilePictures || []).find((p) => p.approved);
+    if (next) {
+      next.featured = true;
+      next.featuredAt = new Date();
+    }
+  }
+  syncProfilePhoto(nanny);
+  await nanny.save();
+
+  res.locals.auditLabel = nanny.nickname || nanny.fullName;
+  res.json({ ok: true, profilePictures: nanny.profilePictures, profilePhotoUrl: nanny.profilePhotoUrl });
 }));
 
 /** Approve a nanny and let her know over WhatsApp. */

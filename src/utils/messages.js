@@ -545,7 +545,7 @@ export function bookingSummary(b, {
   if (nanny) {
     lines.push('');
     lines.push(`👩 *${nannyDisplayName(nanny)}*`);
-    lines.push(`${starLine(nanny.ratingAverage)} | ${nanny.distanceKm ?? 2} km | ${money(b.hourlyRate ?? nanny.hourlyRate)}/hr | Experience ${nanny.experienceYears ?? 0} yrs`);
+    lines.push(`${starLine(nanny.ratingAverage)} | ${money(b.hourlyRate ?? nanny.hourlyRate)}/hr | Experience ${nanny.experienceYears ?? 0} yrs`);
   }
 
   lines.push('');
@@ -646,7 +646,7 @@ export const SEARCHING = 'Hang on I am searching for a perfect nanny.';
 export function nannyListing(nannies, { startIndex = 0, total = null } = {}) {
   const head = `I found *${total ?? nannies.length} available nannies*.\n`;
   const items = nannies.map((n, i) =>
-    `${startIndex + i + 1}. 👩 *${nannyDisplayName(n)}*\n   ${starLine(n.ratingAverage)} | ${n.distanceKm ?? 2} km | Experience ${n.experienceYears ?? 0} yrs`
+    `${startIndex + i + 1}. 👩 *${nannyDisplayName(n)}*\n   ${starLine(n.ratingAverage)} | Experience ${n.experienceYears ?? 0} yrs`
   ).join('\n\n');
   const nums = nannies.map((_, i) => startIndex + i + 1).join(',');
   const tail = `\n\nReply with ${nums} to view details\nType *NEXT* to view more profiles`;
@@ -686,7 +686,7 @@ export const NO_NANNIES = NO_NANNIES_ACTIONS;
 export function nannyProfile(n, { hourlyRate = null } = {}) {
   const lines = [
     `*${nannyDisplayName(n)}*`,
-    `${starLine(n.ratingAverage)} | ${n.distanceKm ?? 2} km | Experience ${n.experienceYears ?? 0} yrs.`,
+    `${starLine(n.ratingAverage)} | Experience ${n.experienceYears ?? 0} yrs.`,
     '',
     `*Age*: ${n.age ?? '-'}yr`,
     '',
