@@ -42,8 +42,29 @@ async function post(path, payload) {
  * Send a text message. Long bodies are split on the WhatsApp-safe boundary so
  * the long booking summaries in the script are never silently truncated.
  */
+/**
+ * Numbers that must never receive a message.
+ *
+ * 999 is not an assigned country code, so seeded accounts use it and nothing
+ * addressed there could reach a person. Dropping them here rather than only in
+ * the seed is the part that matters: this is the single point every outbound
+ * message passes through, so a test run, a broadcast, or a scheduler job
+ * sweeping every nanny cannot message anyone by mistake — whatever wrote the
+ * number, whenever.
+ */
+const UNROUTABLE = /^999/;
+
 export async function sendText(to, body, meta = {}) {
   const phone = normalizePhone(to);
+
+  if (UNROUTABLE.test(phone)) {
+    // Logged, not silent: a seeded account that should have been a real one is
+    // worth noticing, and the conversation still shows in the dashboard.
+    outbox.push({ to: phone, body: String(body ?? ''), at: new Date(), blocked: true });
+    await log('out', phone, String(body ?? ''), meta, null, null);
+    return [{ blocked: true, to: phone, reason: 'seeded test number' }];
+  }
+
   const chunks = splitMessage(String(body ?? '').trim());
   const results = [];
 

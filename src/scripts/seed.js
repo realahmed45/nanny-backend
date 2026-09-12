@@ -49,6 +49,21 @@ const COUNTS = {
   monthsForward: arg('forward', 3),
 };
 
+/**
+ * Phone numbers that cannot reach a human being.
+ *
+ * The old seed used 62811 and 62812 — real Telkomsel prefixes. Every one of
+ * those 1,400 numbers is a number somebody could actually own, and the bot
+ * sends real WhatsApp messages. A test run against seeded data was one step
+ * away from messaging strangers.
+ *
+ * 999 is not an assigned country code and never will be, so nothing here can
+ * be delivered anywhere. The role digit and the index keep them unique, which
+ * the unique index on role+phone requires.
+ */
+const FAKE_PREFIX = { nanny: '99910', family: '99920' };
+const fakePhone = (role, i) => `${FAKE_PREFIX[role]}${String(i).padStart(6, '0')}`;
+
 /** How many of each kind of media each nanny gets. */
 const PER_NANNY = { videos: 6, photos: 10, faces: 10, ids: 2 };
 
@@ -185,7 +200,7 @@ function buildNanny(i, media) {
 
   return {
     role: USER_ROLE.NANNY,
-    phone: `62811${String(100000 + i).slice(-6)}`,
+    phone: fakePhone('nanny', i),
     fullName: `${first} ${last}`,
     nickname: first,
     email: `${first.toLowerCase()}${i}@example.com`,
@@ -245,7 +260,7 @@ function buildFamily(i) {
 
   return {
     role: USER_ROLE.FAMILY,
-    phone: `62812${String(200000 + i).slice(-6)}`,
+    phone: fakePhone('family', i),
     fullName: `${first} ${last}`,
     email: `${first.toLowerCase()}${i}@example.com`,
     emailVerified: true,

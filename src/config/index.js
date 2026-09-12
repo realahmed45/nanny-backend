@@ -143,6 +143,19 @@ export const config = {
   displayPhoneOverride: process.env.DISPLAY_PHONE_OVERRIDE || '',
 
   /**
+   * Understanding what people meant, when the strict parser could not.
+   *
+   * Shares GROQ_API_KEY with voice transcription — one account, one key, and
+   * the free tier covers both comfortably. Switched on per-installation from
+   * the dashboard rather than by the key alone, so the key can be present for
+   * transcription while flexible replies stay off.
+   */
+  ai: {
+    key: process.env.GROQ_API_KEY || '',
+    model: process.env.AI_MODEL || 'llama-3.3-70b-versatile',
+  },
+
+  /**
    * Our own copy of every photo and video a nanny sends.
    *
    * Without this the profiles point at files on the WhatsApp provider's

@@ -275,6 +275,86 @@ function isStale(session) {
   return Date.now() - new Date(session.lastMessageAt).getTime() > STALE_AFTER_MS;
 }
 
+/**
+ * Did the handler understand, or did it just ask again?
+ *
+ * A handler that cannot read a reply returns the same prompt it sent last
+ * time, or an "I didn't understand" line. Comparing against the prompt is the
+ * only signal available without changing every handler to report failure —
+ * and changing sixty handlers to support an optional feature would be the
+ * wrong trade.
+ */
+function looksRejected(result, prompt) {
+  if (!result) return false;
+  const text = typeof result === 'string'
+    ? result
+    : Array.isArray(result) ? '' : (result.text || '');
+  if (!text) return false;
+
+  // A transition means it worked, whatever it said.
+  if (typeof result === 'object' && !Array.isArray(result) && result.state) return false;
+
+  if (/didn.t understand|couldn.t read|could not read|not sure what you meant/i.test(text)) return true;
+  return Boolean(prompt) && text.trim() === String(prompt).trim();
+}
+
+/**
+ * Second chance at a reply the strict parser turned down.
+ *
+ * The conversation is unchanged: same question, same options, same next step.
+ * All that happens is that "tomorrow morning" gets turned into a date before
+ * the handler sees it, instead of the customer being told to try again.
+ *
+ * Only runs when the dashboard has AI mode switched on, only after the normal
+ * parser has already failed, and never for media or commands. If anything at
+ * all goes wrong the original rejection stands, so this cannot make the bot
+ * worse than it is without it.
+ */
+async function retryWithAi(ctx, handler, prompt) {
+  if (ctx.mediaUrl || ctx.command) return null;
+  const said = String(ctx.text || '').trim();
+  if (!said) return null;
+
+  try {
+    const { getSettings } = await import('../services/settings.js');
+    const settings = await getSettings();
+    if (settings.conversationMode?.mode !== 'ai') return null;
+
+    const { interpret, isConfigured } = await import('../services/aiUnderstanding.js');
+    if (!isConfigured()) return null;
+
+    const question = String(prompt || '').slice(0, 600);
+
+    // The prompt usually lists its own options as "1. Something"; reusing them
+    // keeps the model answering in the vocabulary the handler expects.
+    const options = [...question.matchAll(/^\s*\d+\.\s*(.+)$/gm)].map((m) => m[1].trim());
+
+    const expect = options.length ? 'choice'
+      : /what time|time does/i.test(question) ? 'time'
+        : /date|when would|which day/i.test(question) ? 'date'
+          : /^\s*$/.test(question) ? 'text' : 'text';
+
+    const answer = await interpret({
+      message: said,
+      question,
+      expect,
+      options,
+      today: new Date().toISOString().slice(0, 10),
+    });
+    if (!answer || answer === said) return null;
+
+    // Re-run the same handler with the interpreted text. Nothing else about
+    // the context changes, so the handler cannot tell the difference and no
+    // handler needed modifying.
+    console.log(`[ai] read "${said}" as "${answer}" in ${ctx.session.state}`);
+    const retried = await callHandler(handler, { ...ctx, text: answer });
+    return looksRejected(retried, prompt) ? null : retried;
+  } catch (err) {
+    console.error(`[ai] retry failed: ${err.message}`);
+    return null;
+  }
+}
+
 export async function handleMessage({ phone: rawPhone, text = '', mediaUrl, mediaId, mediaType }) {
   const phone = normalizePhone(rawPhone);
   if (!phone) return [];
@@ -397,6 +477,22 @@ export async function handleMessage({ phone: rawPhone, text = '', mediaUrl, medi
       result = globalResult ?? (handler ? await callHandler(handler, ctx) : null);
     } else {
       result = handler ? await callHandler(handler, ctx) : null;
+    }
+
+    // The strict parser said no. In AI mode, try once to understand what they
+    // meant before telling them the bot did not.
+    if (!emergency && handler) {
+      // Some prompts are plain functions and some are async, so this cannot
+      // assume a promise — .catch() on a string is what broke every
+      // conversation the first time round.
+      let prompt = null;
+      if (handler.prompt) {
+        try { prompt = await handler.prompt(ctx); } catch { prompt = null; }
+      }
+      if (looksRejected(result, prompt)) {
+        const better = await retryWithAi(ctx, handler, prompt);
+        if (better) result = better;
+      }
     }
   } catch (err) {
     console.error(`[engine] handler error in state ${session.state}:`, err);

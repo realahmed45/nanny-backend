@@ -2980,6 +2980,10 @@ router.get('/settings', wrap(async (req, res) => {
     socialDiscount: { ...SOCIAL_DEFAULTS, ...(runtime.socialDiscount || {}) },
     accounts: { instagram: '', facebook: '', tiktok: '', ...(runtime.accounts || {}) },
     areas: runtime.areas || [],
+    conversationMode: { mode: runtime.conversationMode?.mode || 'structured' },
+    // Whether the key is even present, so the dashboard can say why the AI
+    // option will do nothing rather than letting it be switched on in vain.
+    aiConfigured: !!config.ai.key,
   });
 }));
 
@@ -2999,6 +3003,7 @@ const RUNTIME_SETTINGS = new Set([
   'calendar',
   'accounts',
   'areas',
+  'conversationMode',
 ]);
 
 /**
@@ -3069,6 +3074,22 @@ function validateSetting(key, value) {
         notes: String(a?.notes || '').slice(0, 300),
       };
     });
+  }
+
+  /**
+   * How the bot reads what people type.
+   *
+   * 'structured' is the original: strict parsers, exact answers. 'ai' keeps
+   * every question and every step exactly the same, and only adds a second
+   * attempt at reading a reply the strict parser rejected — so the structure
+   * is identical and the tolerance is different.
+   */
+  if (key === 'conversationMode') {
+    const mode = String(value?.mode || value || '').trim();
+    if (!['structured', 'ai'].includes(mode)) {
+      throw new Error('Conversation mode must be "structured" or "ai"');
+    }
+    return { mode };
   }
 
   if (key === 'accounts') {
