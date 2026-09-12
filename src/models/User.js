@@ -255,6 +255,24 @@ const UserSchema = new mongoose.Schema({
    * this is a list. Tokens are dropped when the push service says they are
    * dead rather than kept forever.
    */
+  /**
+   * Where her phone last said she was.
+   *
+   * One position, overwritten — not a trail. A history of everywhere a nanny
+   * has been is a thing we would then have to protect, justify and eventually
+   * hand to someone who asks for it; the only question this has to answer is
+   * "where is she now", and one row answers that.
+   *
+   * Families never read this. What a family sees during a booking is written
+   * on the booking itself, and only while she has sharing switched on for it.
+   */
+  lastLocation: {
+    lat: Number,
+    lng: Number,
+    accuracy: Number,
+    at: Date,
+  },
+
   pushTokens: [{
     token: { type: String, required: true },
     platform: { type: String, enum: ['android', 'ios', 'web'] },

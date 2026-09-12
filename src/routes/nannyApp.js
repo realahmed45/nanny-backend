@@ -405,7 +405,15 @@ router.get('/bookings/:id', wrap(async (req, res) => {
   }).populate('family', 'fullName').lean();
 
   if (!b) return res.status(404).json({ error: 'Booking not found' });
-  return res.json({ booking: { ...bookingSummary(b), serviceDays: b.serviceDays } });
+  return res.json({
+    booking: {
+      ...bookingSummary(b),
+      serviceDays: b.serviceDays,
+      // Only her own half of the sharing state. Whether the family is sharing
+      // back is theirs to know.
+      liveLocation: { nannySharing: !!b.liveLocation?.nannySharing },
+    },
+  });
 }));
 
 /** Requests waiting on her answer, with how long is left. */
@@ -555,6 +563,329 @@ router.post('/chats/:id/messages', wrap(async (req, res) => {
   }
 
   return res.json({ ok: true, redacted: safe.redacted });
+}));
+
+/* ------------------------------------------------------------------ *
+ * Her own profile and media
+ * ------------------------------------------------------------------ */
+
+/**
+ * Edit the parts of her profile she owns.
+ *
+ * Name, status, rate and verification are not in this list. Those are decided
+ * about her rather than by her, and an app that let her set her own verified
+ * badge would make the badge meaningless.
+ */
+router.patch('/me', wrap(async (req, res) => {
+  const b = req.body || {};
+  const text = (v, max) => String(v).trim().slice(0, max);
+
+  if (b.nickname !== undefined) req.nanny.nickname = text(b.nickname, 40);
+  if (b.email !== undefined) req.nanny.email = text(b.email, 120);
+  if (b.residingAddress !== undefined) req.nanny.residingAddress = text(b.residingAddress, 300);
+  if (Array.isArray(b.subjects)) {
+    req.nanny.subjects = b.subjects.slice(0, 20).map((x) => text(x, 60)).filter(Boolean);
+  }
+  if (b.cprCertified !== undefined) req.nanny.cprCertified = b.cprCertified === true;
+
+  if (b.age !== undefined) {
+    const age = Number(b.age);
+    if (!Number.isFinite(age) || age < 16 || age > 80) {
+      return res.status(400).json({ error: 'Age must be between 16 and 80' });
+    }
+    req.nanny.age = age;
+  }
+
+  if (b.experienceYears !== undefined) {
+    const yrs = Number(b.experienceYears);
+    if (!Number.isFinite(yrs) || yrs < 0 || yrs > 60) {
+      return res.status(400).json({ error: 'Experience must be between 0 and 60 years' });
+    }
+    req.nanny.experienceYears = yrs;
+  }
+
+  await req.nanny.save();
+  return res.json({ nanny: publicProfile(req.nanny) });
+}));
+
+/** Everything she has sent us, and where each item stands. */
+router.get('/media', wrap(async (req, res) => {
+  const shape = (m) => ({
+    id: m._id,
+    url: m.url,
+    caption: m.caption,
+    title: m.title,
+    uploadedAt: m.uploadedAt,
+    approved: !!m.approved,
+    featured: !!m.featured,
+    rejected: !!m.rejectedAt,
+    // She is told why, in the words the admin picked. A rejection with no
+    // reason just reads as the app being broken.
+    rejectionReasons: m.rejectionReasons || [],
+    rejectionDetail: m.rejectionDetail,
+    status: m.rejectedAt ? 'rejected' : m.approved ? 'approved' : 'pending',
+  });
+
+  return res.json({
+    videos: (req.nanny.videos || []).map(shape),
+    photos: (req.nanny.photos || []).map(shape),
+    profilePictures: (req.nanny.profilePictures || []).map(shape),
+    documents: (req.nanny.documents || []).map((d) => ({
+      id: d._id, type: d.type, url: d.url, uploadedAt: d.uploadedAt,
+    })),
+  });
+}));
+
+/** What may be sent, and what each one is called on the record. */
+const MEDIA_KINDS = {
+  video: { field: 'videos', exts: ['.mp4', '.mov', '.webm'] },
+  photo: { field: 'photos', exts: ['.jpg', '.jpeg', '.png', '.webp'] },
+  profile: { field: 'profilePictures', exts: ['.jpg', '.jpeg', '.png', '.webp'] },
+  id_front: { field: 'documents', exts: ['.jpg', '.jpeg', '.png', '.webp', '.pdf'] },
+  id_back: { field: 'documents', exts: ['.jpg', '.jpeg', '.png', '.webp', '.pdf'] },
+  certificate: { field: 'documents', exts: ['.jpg', '.jpeg', '.png', '.webp', '.pdf'] },
+};
+
+/**
+ * Upload from the phone.
+ *
+ * Arrives as base64 rather than multipart: it is one file at a time from a
+ * picker that already hands us the bytes, and it saves adding a file-upload
+ * middleware and its temp directory to a server that has no other use for one.
+ *
+ * Nothing uploaded here is visible to a family. It lands in the same review
+ * queue as anything sent over WhatsApp, unapproved, because these photos show
+ * other people's children and that gate is the entire point of it.
+ */
+router.post('/media', wrap(async (req, res) => {
+  const kind = String(req.body?.kind || '');
+  const spec = MEDIA_KINDS[kind];
+  if (!spec) return res.status(400).json({ error: 'Unknown upload type' });
+
+  const raw = String(req.body?.ext || '').toLowerCase();
+  const ext = raw.startsWith('.') ? raw : `.${raw}`;
+  if (!spec.exts.includes(ext)) {
+    return res.status(400).json({ error: `That file type is not accepted here (${spec.exts.join(', ')})` });
+  }
+
+  const base64 = String(req.body?.data || '').replace(/^data:[^,]+,/, '');
+  if (!base64) return res.status(400).json({ error: 'No file was attached' });
+
+  let buf;
+  try {
+    buf = Buffer.from(base64, 'base64');
+  } catch {
+    return res.status(400).json({ error: 'The file could not be read' });
+  }
+
+  const { storeBuffer } = await import('../services/mediaArchive.js');
+  let url;
+  try {
+    url = await storeBuffer(buf, { ext });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  const caption = String(req.body?.caption || '').trim().slice(0, 200);
+
+  if (spec.field === 'documents') {
+    // One of each kind. A second ID photo replaces the first rather than
+    // stacking, or the queue fills with four pictures of the same card.
+    req.nanny.documents = (req.nanny.documents || []).filter((d) => d.type !== kind);
+    req.nanny.documents.push({ type: kind, url, uploadedAt: new Date() });
+  } else {
+    req.nanny[spec.field] = req.nanny[spec.field] || [];
+    if (req.nanny[spec.field].some((m) => m.url === url)) {
+      return res.status(409).json({ error: 'You have already sent this one.' });
+    }
+    req.nanny[spec.field].push({
+      url,
+      ...(kind === 'video' ? { title: caption } : { caption }),
+      uploadedAt: new Date(),
+      approved: false,
+      featured: false,
+    });
+  }
+
+  req.nanny.markModified(spec.field);
+  await req.nanny.save();
+
+  return res.status(201).json({
+    ok: true,
+    url,
+    status: spec.field === 'documents' ? 'received' : 'pending',
+    message: spec.field === 'documents'
+      ? 'Received, thank you.'
+      : 'Sent for review. We will let you know once it is approved.',
+  });
+}));
+
+/**
+ * Withdraw something she has sent.
+ *
+ * Only while it is still waiting. Once approved it may already be on her
+ * public profile and in a family's chat, and pulling it out from under them
+ * is a conversation with us, not a button.
+ */
+router.delete('/media/:field/:id', wrap(async (req, res) => {
+  const field = ['videos', 'photos', 'profilePictures'].includes(req.params.field)
+    ? req.params.field : null;
+  if (!field) return res.status(400).json({ error: 'Unknown media type' });
+
+  const list = req.nanny[field] || [];
+  const item = list.find((m) => String(m._id) === String(req.params.id));
+  if (!item) return res.status(404).json({ error: 'Not found' });
+  if (item.approved) {
+    return res.status(409).json({
+      error: 'This one is already approved.',
+      detail: 'Message us on WhatsApp and we will take it down for you.',
+    });
+  }
+
+  req.nanny[field] = list.filter((m) => String(m._id) !== String(req.params.id));
+  req.nanny.markModified(field);
+  await req.nanny.save();
+  return res.json({ ok: true });
+}));
+
+/* ------------------------------------------------------------------ *
+ * Live location
+ * ------------------------------------------------------------------ */
+
+/**
+ * How long after a booking ends we keep listening.
+ *
+ * She is still walking to the road, waiting for a ride, or getting home from
+ * a house she has never been to before. The family stops seeing her when the
+ * booking ends; we keep the trail a little longer because that is the window
+ * in which something going wrong is our problem to answer for.
+ */
+const LOCATION_TAIL_MINUTES = 45;
+
+/**
+ * A position, dropped every ten minutes by the phone in her pocket.
+ *
+ * Two different things share this endpoint, deliberately. The steady
+ * background trail is ours — it answers "where was she" after the fact and
+ * nobody else reads it. The family-visible position is only attached to a
+ * booking that is running, and only while she has turned sharing on for it.
+ *
+ * Writing both from one call means the phone has one job and one schedule,
+ * rather than a background task that has to know which booking is live.
+ */
+router.post('/location', wrap(async (req, res) => {
+  const lat = Number(req.body?.lat);
+  const lng = Number(req.body?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    return res.status(400).json({ error: 'lat and lng are required' });
+  }
+
+  const at = new Date();
+  const accuracy = Number.isFinite(Number(req.body?.accuracy)) ? Number(req.body.accuracy) : undefined;
+
+  req.nanny.lastLocation = { lat, lng, accuracy, at };
+  await req.nanny.save();
+
+  // Which bookings, if any, the family should be seeing this on. A booking
+  // that ended an hour ago is not one of them, even if the phone is still
+  // sending: the tail is a fixed window, not "until she closes the app".
+  const cutoff = new Date(Date.now() - LOCATION_TAIL_MINUTES * 60_000);
+  const live = await Booking.find({
+    $or: [{ nanny: req.nanny._id }, { secondNanny: req.nanny._id }],
+    status: { $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING] },
+    'liveLocation.nannySharing': true,
+  }).select('serviceDays liveLocation').limit(10);
+
+  const shared = [];
+  for (const b of live) {
+    const running = (b.serviceDays || []).some((d) => {
+      if (d.status === SERVICE_DAY_STATUS.CANCELLED) return false;
+      if (!d.startAt || !d.endAt) return false;
+      return new Date(d.startAt) <= at && new Date(d.endAt) >= cutoff;
+    });
+    if (!running) continue;
+
+    b.liveLocation = {
+      ...(b.liveLocation?.toObject?.() ?? b.liveLocation ?? {}),
+      lastNannyLocation: `${lat},${lng}`,
+      updatedAt: at,
+    };
+    b.markModified('liveLocation');
+    await b.save();
+    shared.push(b._id);
+  }
+
+  return res.json({ ok: true, sharedWithBookings: shared, tailMinutes: LOCATION_TAIL_MINUTES });
+}));
+
+/**
+ * Turn family-visible sharing on or off for one booking.
+ *
+ * Separate from the background trail on purpose: she can stop a family seeing
+ * where she is without the app losing track of her shift.
+ */
+router.patch('/bookings/:id/location-sharing', wrap(async (req, res) => {
+  const on = req.body?.sharing !== false;
+  const b = await Booking.findOne({
+    _id: req.params.id,
+    $or: [{ nanny: req.nanny._id }, { secondNanny: req.nanny._id }],
+  });
+  if (!b) return res.status(404).json({ error: 'Booking not found' });
+
+  b.liveLocation = {
+    ...(b.liveLocation?.toObject?.() ?? b.liveLocation ?? {}),
+    nannySharing: on,
+    ...(on ? {} : { lastNannyLocation: undefined }),
+  };
+  b.markModified('liveLocation');
+  await b.save();
+
+  return res.json({ ok: true, sharing: on });
+}));
+
+/**
+ * When the phone should be tracking, and until when.
+ *
+ * The app asks on launch and after each shift rather than working the
+ * schedule out itself: the rule about the tail window lives here, with the
+ * bookings, and one copy of it is easier to trust than two.
+ */
+router.get('/location/schedule', wrap(async (req, res) => {
+  const now = new Date();
+  const soon = new Date(Date.now() + 24 * 3600_000);
+
+  const bookings = await Booking.find({
+    $or: [{ nanny: req.nanny._id }, { secondNanny: req.nanny._id }],
+    status: { $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING] },
+  }).select('bookingNumber serviceDays liveLocation').lean();
+
+  let trackUntil = null;
+  const windows = [];
+  for (const b of bookings) {
+    for (const d of b.serviceDays || []) {
+      if (d.status === SERVICE_DAY_STATUS.CANCELLED || !d.startAt || !d.endAt) continue;
+      const ends = new Date(new Date(d.endAt).getTime() + LOCATION_TAIL_MINUTES * 60_000);
+      if (ends < now || new Date(d.startAt) > soon) continue;
+      windows.push({
+        bookingId: b._id,
+        bookingNumber: b.bookingNumber,
+        startAt: d.startAt,
+        endAt: d.endAt,
+        stopAt: ends,
+        sharing: !!b.liveLocation?.nannySharing,
+      });
+      if (new Date(d.startAt) <= now && (!trackUntil || ends > trackUntil)) trackUntil = ends;
+    }
+  }
+
+  windows.sort((a, b2) => new Date(a.startAt) - new Date(b2.startAt));
+
+  return res.json({
+    intervalMinutes: 10,
+    tailMinutes: LOCATION_TAIL_MINUTES,
+    onShiftUntil: trackUntil,
+    windows: windows.slice(0, 20),
+  });
 }));
 
 /* ------------------------------------------------------------------ *

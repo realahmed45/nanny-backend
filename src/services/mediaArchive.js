@@ -108,6 +108,36 @@ export async function store(remoteUrl, { mediaType } = {}) {
   }
 }
 
+/**
+ * Write bytes we were handed directly, rather than fetched.
+ *
+ * The phone app uploads a photo it already holds; there is no remote URL to
+ * copy from. Unlike `store`, this throws on failure: an upload that silently
+ * did nothing would leave her looking at a success screen and a profile that
+ * never changed.
+ */
+export async function storeBuffer(buf, { ext = '.jpg' } = {}) {
+  if (!config.media.enabled) throw new Error('media archive is disabled');
+  if (!buf?.length) throw new Error('empty file');
+  if (buf.length > config.media.maxBytes) {
+    throw new Error(`File is ${Math.round(buf.length / 1e6)}MB, over the ${Math.round(config.media.maxBytes / 1e6)}MB limit`);
+  }
+
+  // Named by content, so the same picture sent twice is stored once.
+  const hash = crypto.createHash('sha1').update(buf).digest('hex').slice(0, 20);
+  const name = `${hash}${ext}`;
+  const dest = path.join(ROOT, name);
+  const publicUrl = `${PUBLIC_PREFIX}/${name}`;
+
+  if (await exists(dest)) return publicUrl;
+
+  await fs.mkdir(ROOT, { recursive: true });
+  const tmp = `${dest}.part`;
+  await fs.writeFile(tmp, buf);
+  await fs.rename(tmp, dest);
+  return publicUrl;
+}
+
 /** Copy several, keeping order. Failures fall back to their original URL. */
 export async function storeAll(urls = [], opts = {}) {
   return Promise.all(urls.map((u) => store(u, opts)));
@@ -168,4 +198,4 @@ export function mountMediaRoutes(app, express) {
   }));
 }
 
-export default { store, storeAll, mountMediaRoutes };
+export default { store, storeAll, storeBuffer, mountMediaRoutes };

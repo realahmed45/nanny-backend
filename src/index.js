@@ -39,6 +39,13 @@ export function createApp() {
         credentials: true,
       }
     : {}));
+  /**
+   * Uploads from the phone app arrive as base64 in the body, so that one route
+   * needs far more room than the rest of the API. The limit stays low
+   * everywhere else: a 64MB ceiling on every endpoint is a way to exhaust the
+   * server's memory with a request that does nothing.
+   */
+  app.use('/api/nanny/media', express.json({ limit: '72mb' }));
   app.use(express.json({ limit: '2mb' }));
 
   // Serve our own copies of nanny media. Read-only and long-cached: a stored
