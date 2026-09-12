@@ -52,6 +52,19 @@ const requestLimiter = rateLimit({
   ],
 });
 
+/**
+ * Sign-in is one step now, so this is the only brake on guessing numbers.
+ *
+ * Tight on purpose: a real nanny types her own number once and is in. Twenty
+ * attempts from one address in fifteen minutes is not someone signing in.
+ */
+const signInLimiter = rateLimit({
+  max: 20,
+  windowMs: 15 * 60_000,
+  lockMs: 30 * 60_000,
+  by: (req) => [`nanny-signin:ip:${req.ip}`],
+});
+
 const verifyLimiter = rateLimit({
   max: 8,
   windowMs: 15 * 60_000,
@@ -60,11 +73,92 @@ const verifyLimiter = rateLimit({
 });
 
 /**
- * Send a sign-in code over WhatsApp.
+ * The ways one Indonesian number gets written by hand.
  *
- * Always answers the same way, whether or not the number belongs to a nanny.
- * Saying "no account here" would turn this into a way to discover which
- * numbers are registered with us.
+ * She registered over WhatsApp, which gave us 6281234567890. Typing her own
+ * number into a box, she writes 0812-3456-7890 — that is how it is said and
+ * written here. Both are the same person, and "we could not find that number"
+ * for the version printed on her own paperwork is the kind of dead end that
+ * ends in a phone call to us.
+ *
+ * Only tried at sign-in, where a human is typing. Everywhere else the number
+ * comes from WhatsApp already in one shape, and guessing would be a way to
+ * match the wrong person.
+ */
+function phoneVariants(raw) {
+  const digits = normalizePhone(raw);
+  if (!digits) return [];
+
+  const out = new Set([digits]);
+
+  // 0812… is the local way of writing +62 812…
+  if (digits.startsWith('0')) out.add(`62${digits.slice(1)}`);
+  // …and the reverse, in case the record was stored the local way.
+  if (digits.startsWith('62')) out.add(`0${digits.slice(2)}`);
+
+  return [...out];
+}
+
+/**
+ * Sign in with the number or email she registered with.
+ *
+ * One field, no code, no password. She types what we already know her by and
+ * she is in.
+ *
+ * This trusts whoever holds the phone. A number is not a secret — it is on
+ * her WhatsApp, in a family's chat, on a piece of paper — so anyone who knows
+ * one can open her bookings, the addresses of the families she works for and
+ * what she has earned. That is the trade that was asked for, and it is worth
+ * writing down plainly rather than leaving to be discovered.
+ *
+ * Adding a code back is a small change: the OTP that used to be here is a few
+ * lines, and `/auth/verify` below still exists for it.
+ */
+router.post('/auth/sign-in', signInLimiter, wrap(async (req, res) => {
+  const raw = String(req.body?.identifier ?? req.body?.phone ?? req.body?.email ?? '').trim();
+  if (!raw) return res.status(400).json({ error: 'Enter your phone number or email' });
+
+  const looksLikeEmail = raw.includes('@');
+
+  // Email is matched case-insensitively and exactly; a phone goes through the
+  // same normaliser the rest of the system uses, so 0812…, +62812… and
+  // 62812… all find the same person.
+  const nanny = looksLikeEmail
+    ? await User.findOne({
+      role: USER_ROLE.NANNY,
+      email: new RegExp(`^${raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+    })
+    : await User.findOne({ role: USER_ROLE.NANNY, phone: { $in: phoneVariants(raw) } });
+
+  // Said plainly. With no code to send there is nothing to protect by being
+  // vague, and "check your number" is what she can actually act on.
+  if (!nanny) {
+    return res.status(404).json({
+      error: looksLikeEmail
+        ? 'We could not find that email. Check it, or try your phone number.'
+        : 'We could not find that number. Check it, or try the email you registered with.',
+    });
+  }
+
+  if (nanny.blocked) {
+    return res.status(403).json({ error: 'This account is closed. Please message us on WhatsApp.' });
+  }
+
+  nanny.lastSeenAt = new Date();
+  await nanny.save();
+
+  return res.json({
+    token: signNannyToken(nanny),
+    nanny: publicProfile(nanny),
+  });
+}));
+
+/**
+ * The old two-step sign-in, kept working.
+ *
+ * Nothing in the app calls these now. They are left in place because turning
+ * the code back on should be a change to one screen rather than to the server
+ * as well.
  */
 router.post('/auth/request-code', requestLimiter, wrap(async (req, res) => {
   const phone = normalizePhone(req.body?.phone || '');

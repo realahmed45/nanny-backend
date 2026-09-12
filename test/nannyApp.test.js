@@ -436,7 +436,93 @@ test('she can withdraw something still waiting, but not something approved', asy
 });
 
 /* ------------------------------------------------------------------ *
- * Signing in
+ * Signing in — one field, no code
+ * ------------------------------------------------------------------ */
+
+test('her phone number signs her in on its own', async () => {
+  await makeNanny('999100000050');
+  const res = await call('/auth/sign-in', {
+    method: 'POST', body: { identifier: '999100000050' },
+  });
+  assert.equal(res.status, 200);
+  assert.ok(res.data.token);
+  assert.equal(res.data.nanny.phone, '999100000050');
+});
+
+test('her email signs her in too, whatever case she types it in', async () => {
+  await makeNanny('999100000051', { email: 'Tessa@Example.com' });
+
+  const res = await call('/auth/sign-in', {
+    method: 'POST', body: { identifier: 'TESSA@example.COM' },
+  });
+  assert.equal(res.status, 200);
+  assert.ok(res.data.token);
+});
+
+test('a number written any of the usual ways finds the same person', async () => {
+  await makeNanny('6281234567890');
+
+  for (const typed of ['6281234567890', '+62 812 3456 7890', '081234567890']) {
+    const res = await call('/auth/sign-in', { method: 'POST', body: { identifier: typed } });
+    assert.equal(res.status, 200, );
+  }
+});
+
+test('an unknown number is told so plainly', async () => {
+  const res = await call('/auth/sign-in', {
+    method: 'POST', body: { identifier: '999100009999' },
+  });
+  assert.equal(res.status, 404);
+  assert.equal(res.data.token, undefined);
+  assert.match(res.data.error, /could not find/i);
+});
+
+test('a blocked nanny cannot sign in', async () => {
+  const { nanny } = await makeNanny('999100000052');
+  nanny.blocked = true;
+  await nanny.save();
+
+  const res = await call('/auth/sign-in', {
+    method: 'POST', body: { identifier: '999100000052' },
+  });
+  assert.equal(res.status, 403);
+  assert.equal(res.data.token, undefined);
+});
+
+test('an empty box is refused rather than signing in whoever comes first', async () => {
+  await makeNanny('999100000053');
+  const res = await call('/auth/sign-in', { method: 'POST', body: { identifier: '   ' } });
+  assert.equal(res.status, 400);
+  assert.equal(res.data.token, undefined);
+});
+
+test('a family number does not open the nanny app', async () => {
+  const { User } = await import('../src/models/index.js');
+  const { USER_ROLE } = await import('../src/utils/constants.js');
+  await User.create({
+    role: USER_ROLE.FAMILY, phone: '999200000050', fullName: 'A Family',
+  });
+
+  const res = await call('/auth/sign-in', {
+    method: 'POST', body: { identifier: '999200000050' },
+  });
+  assert.equal(res.status, 404);
+  assert.equal(res.data.token, undefined);
+});
+
+test('the token it hands back actually works', async () => {
+  await makeNanny('999100000054');
+  const signedIn = await call('/auth/sign-in', {
+    method: 'POST', body: { identifier: '999100000054' },
+  });
+
+  const me = await call('/me', { token: signedIn.data.token });
+  assert.equal(me.status, 200);
+  assert.equal(me.data.nanny.phone, '999100000054');
+});
+
+/* ------------------------------------------------------------------ *
+ * Signing in — the older two-step flow, still present
  * ------------------------------------------------------------------ */
 
 test('a sign-in code is sent, and the same answer comes back for an unknown number', async () => {
