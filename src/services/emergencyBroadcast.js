@@ -39,6 +39,35 @@ export async function findEmergencyCandidates(booking, { limit = 60 } = {}) {
   const req = booking.requirements || {};
   const rejected = (booking.rejectedNannies || []).map(String);
 
+  /**
+   * Anyone who has said, recently, that she could take a job right now.
+   *
+   * Being unbooked is not the same as being free: a nanny with a clear
+   * afternoon may be at the beach. Asking the people who put their hand up
+   * gets a faster yes and stops the other forty being messaged for nothing.
+   *
+   * Used as a preference, never a filter. When nobody has the switch on — a
+   * quiet morning, or before the app is in anyone's hands — the broadcast
+   * still goes to everyone available, because a family needing a nanny within
+   * the hour is worse served by a tidy rule than by a message.
+   */
+  const nowAvailable = new Set(
+    (await User.find({
+      role: USER_ROLE.NANNY,
+      emergencyAvailable: true,
+      $or: [
+        { emergencyAvailableUntil: null },
+        { emergencyAvailableUntil: { $gt: new Date() } },
+      ],
+    }).select('_id').lean()).map((n) => String(n._id)),
+  );
+
+  /** Hands-up first, everyone else after, order otherwise untouched. */
+  const handsUpFirst = (list) => [
+    ...list.filter((n) => nowAvailable.has(String(n._id))),
+    ...list.filter((n) => !nowAvailable.has(String(n._id))),
+  ];
+
   const strict = await findNannies({
     languages: req.languages || [],
     skills: req.skills || [],
@@ -50,7 +79,7 @@ export async function findEmergencyCandidates(booking, { limit = 60 } = {}) {
   });
 
   // Widen if a strict match would leave the family with nobody.
-  if (strict.length >= 3) return strict;
+  if (strict.length >= 3) return handsUpFirst(strict);
 
   const loose = await findNannies({
     serviceDays: booking.serviceDays || [],
@@ -61,7 +90,7 @@ export async function findEmergencyCandidates(booking, { limit = 60 } = {}) {
   });
 
   const seen = new Set(strict.map((n) => String(n._id)));
-  return [...strict, ...loose.filter((n) => !seen.has(String(n._id)))];
+  return handsUpFirst([...strict, ...loose.filter((n) => !seen.has(String(n._id)))]);
 }
 
 /**

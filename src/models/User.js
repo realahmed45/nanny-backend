@@ -231,6 +231,36 @@ const UserSchema = new mongoose.Schema({
   profilePhotoUrl: String,
   documents: [DocumentSchema],
   availability: { type: AvailabilitySchema, default: () => ({ days: [], blockedDates: [] }) },
+
+  /**
+   * Is she able to take a job in the next hour, right now?
+   *
+   * Distinct from `availability`, which is her usual working pattern, and from
+   * having no booking — a nanny with a free afternoon may still be at the
+   * beach. An emergency broadcast reaching forty people who are merely
+   * unbooked is forty messages and no nanny; reaching six who said "yes, I am
+   * free now" is the whole point of asking.
+   *
+   * It expires on its own. Someone who switches it on at breakfast and forgets
+   * is worse than someone who never switched it on: the booking is offered to
+   * her, she misses it, and a family waits while the clock runs.
+   */
+  emergencyAvailable: { type: Boolean, default: false, index: true },
+  emergencyAvailableUntil: Date,
+
+  /**
+   * Where to send a push notification, per device.
+   *
+   * A nanny signs in on a new phone without signing out of the old one, so
+   * this is a list. Tokens are dropped when the push service says they are
+   * dead rather than kept forever.
+   */
+  pushTokens: [{
+    token: { type: String, required: true },
+    platform: { type: String, enum: ['android', 'ios', 'web'] },
+    registeredAt: { type: Date, default: Date.now },
+    lastUsedAt: Date,
+  }],
   emergencyContacts: [EmergencyContactSchema],
   // Nannies the family saved after a booking, offered first when rebooking.
   favouriteNannies: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],

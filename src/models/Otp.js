@@ -5,7 +5,14 @@ const OtpSchema = new mongoose.Schema({
   phone: { type: String, index: true },
   email: String,
   code: String,
-  purpose: { type: String, enum: ['email_verification'], default: 'email_verification' },
+  // 'nanny_login' is the app's sign-in code, sent over WhatsApp rather than
+  // email: a nanny has no password and should not need one, and her number is
+  // already the thing that identifies her to us.
+  purpose: {
+    type: String,
+    enum: ['email_verification', 'nanny_login'],
+    default: 'email_verification',
+  },
   attempts: { type: Number, default: 0 },
   consumed: { type: Boolean, default: false },
   expiresAt: { type: Date },

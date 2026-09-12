@@ -7,6 +7,7 @@ import { connectDB } from './config/db.js';
 import { AdminUser } from './models/index.js';
 import webhookRoutes from './routes/webhook.js';
 import adminRoutes from './routes/admin.js';
+import nannyAppRoutes from './routes/nannyApp.js';
 import { startScheduler } from './jobs/scheduler.js';
 import { mountMediaRoutes } from './services/mediaArchive.js';
 import { isDryRun } from './providers/ultramsg.js';
@@ -73,6 +74,9 @@ export function createApp() {
 
   app.use('/webhook', webhookRoutes);
   app.use('/api/admin', adminRoutes);
+  // The phone app's door. Separate from the admin API because the tokens are
+  // separate: a nanny token opens her own records and nothing else.
+  app.use('/api/nanny', nannyAppRoutes);
 
   /**
    * Referral landing link.
