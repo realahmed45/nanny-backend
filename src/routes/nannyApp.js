@@ -643,7 +643,9 @@ const MEDIA_KINDS = {
   profile: { field: 'profilePictures', exts: ['.jpg', '.jpeg', '.png', '.webp'] },
   id_front: { field: 'documents', exts: ['.jpg', '.jpeg', '.png', '.webp', '.pdf'] },
   id_back: { field: 'documents', exts: ['.jpg', '.jpeg', '.png', '.webp', '.pdf'] },
-  certificate: { field: 'documents', exts: ['.jpg', '.jpeg', '.png', '.webp', '.pdf'] },
+  // Named to match the document enum on the record; a type outside it fails
+  // validation on save, which would surface as a mystery 500 at upload time.
+  cpr_certificate: { field: 'documents', exts: ['.jpg', '.jpeg', '.png', '.webp', '.pdf'] },
 };
 
 /**
