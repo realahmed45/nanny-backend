@@ -436,41 +436,42 @@ test('she can withdraw something still waiting, but not something approved', asy
 });
 
 /* ------------------------------------------------------------------ *
- * Signing in — one field, no code
+ * Signing in — email only, no code
  * ------------------------------------------------------------------ */
 
-test('her phone number signs her in on its own', async () => {
-  await makeNanny('999100000050');
+test('her email signs her in on its own', async () => {
+  await makeNanny('999100000050', { email: 'tessa@example.com' });
   const res = await call('/auth/sign-in', {
-    method: 'POST', body: { identifier: '999100000050' },
+    method: 'POST', body: { email: 'tessa@example.com' },
   });
   assert.equal(res.status, 200);
   assert.ok(res.data.token);
-  assert.equal(res.data.nanny.phone, '999100000050');
 });
 
-test('her email signs her in too, whatever case she types it in', async () => {
+test('the case she types it in does not matter', async () => {
   await makeNanny('999100000051', { email: 'Tessa@Example.com' });
 
   const res = await call('/auth/sign-in', {
-    method: 'POST', body: { identifier: 'TESSA@example.COM' },
+    method: 'POST', body: { email: 'TESSA@example.COM' },
   });
   assert.equal(res.status, 200);
   assert.ok(res.data.token);
 });
 
-test('a number written any of the usual ways finds the same person', async () => {
-  await makeNanny('6281234567890');
+test('a phone number is refused, and says to use the email', async () => {
+  await makeNanny('999100000052', { email: 'tessa2@example.com' });
 
-  for (const typed of ['6281234567890', '+62 812 3456 7890', '081234567890']) {
-    const res = await call('/auth/sign-in', { method: 'POST', body: { identifier: typed } });
-    assert.equal(res.status, 200, );
-  }
+  const res = await call('/auth/sign-in', {
+    method: 'POST', body: { email: '999100000052' },
+  });
+  assert.equal(res.status, 400);
+  assert.equal(res.data.token, undefined);
+  assert.match(res.data.error, /email address, not your phone/i);
 });
 
-test('an unknown number is told so plainly', async () => {
+test('an unknown email is told so plainly', async () => {
   const res = await call('/auth/sign-in', {
-    method: 'POST', body: { identifier: '999100009999' },
+    method: 'POST', body: { email: 'nobody@example.com' },
   });
   assert.equal(res.status, 404);
   assert.equal(res.data.token, undefined);
@@ -478,47 +479,75 @@ test('an unknown number is told so plainly', async () => {
 });
 
 test('a blocked nanny cannot sign in', async () => {
-  const { nanny } = await makeNanny('999100000052');
+  const { nanny } = await makeNanny('999100000053', { email: 'blocked@example.com' });
   nanny.blocked = true;
   await nanny.save();
 
   const res = await call('/auth/sign-in', {
-    method: 'POST', body: { identifier: '999100000052' },
+    method: 'POST', body: { email: 'blocked@example.com' },
   });
   assert.equal(res.status, 403);
   assert.equal(res.data.token, undefined);
 });
 
 test('an empty box is refused rather than signing in whoever comes first', async () => {
-  await makeNanny('999100000053');
-  const res = await call('/auth/sign-in', { method: 'POST', body: { identifier: '   ' } });
+  await makeNanny('999100000054', { email: 'someone@example.com' });
+  const res = await call('/auth/sign-in', { method: 'POST', body: { email: '   ' } });
   assert.equal(res.status, 400);
   assert.equal(res.data.token, undefined);
 });
 
-test('a family number does not open the nanny app', async () => {
+test("a family's email does not open the nanny app", async () => {
   const { User } = await import('../src/models/index.js');
   const { USER_ROLE } = await import('../src/utils/constants.js');
   await User.create({
-    role: USER_ROLE.FAMILY, phone: '999200000050', fullName: 'A Family',
+    role: USER_ROLE.FAMILY,
+    phone: '999200000050',
+    fullName: 'A Family',
+    email: 'family@example.com',
   });
 
   const res = await call('/auth/sign-in', {
-    method: 'POST', body: { identifier: '999200000050' },
+    method: 'POST', body: { email: 'family@example.com' },
+  });
+  assert.equal(res.status, 404);
+  assert.equal(res.data.token, undefined);
+});
+
+test('one nanny cannot sign in as another by a near-miss address', async () => {
+  await makeNanny('999100000055', { email: 'tessa@example.com' });
+
+  // A regex built from user input is the risk here: '.' means "any character"
+  // unless it is escaped, so this address must not match tessa@example.com.
+  const res = await call('/auth/sign-in', {
+    method: 'POST', body: { email: 'tessa@exampleXcom' },
+  });
+  assert.equal(res.status, 404);
+  assert.equal(res.data.token, undefined);
+});
+
+test('a wildcard typed into the box matches nobody', async () => {
+  await makeNanny('999100000056', { email: 'tessa3@example.com' });
+
+  // It contains an @, so it reaches the lookup rather than being turned away
+  // for its shape. What matters is that the lookup treats it as text: the
+  // regex is built from user input, and unescaped this would match everyone.
+  const res = await call('/auth/sign-in', {
+    method: 'POST', body: { email: '.*@.*' },
   });
   assert.equal(res.status, 404);
   assert.equal(res.data.token, undefined);
 });
 
 test('the token it hands back actually works', async () => {
-  await makeNanny('999100000054');
+  await makeNanny('999100000057', { email: 'works@example.com' });
   const signedIn = await call('/auth/sign-in', {
-    method: 'POST', body: { identifier: '999100000054' },
+    method: 'POST', body: { email: 'works@example.com' },
   });
 
   const me = await call('/me', { token: signedIn.data.token });
   assert.equal(me.status, 200);
-  assert.equal(me.data.nanny.phone, '999100000054');
+  assert.equal(me.data.nanny.email, 'works@example.com');
 });
 
 /* ------------------------------------------------------------------ *

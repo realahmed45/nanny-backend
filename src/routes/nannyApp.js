@@ -73,70 +73,45 @@ const verifyLimiter = rateLimit({
 });
 
 /**
- * The ways one Indonesian number gets written by hand.
+ * Sign in with the email she registered with.
  *
- * She registered over WhatsApp, which gave us 6281234567890. Typing her own
- * number into a box, she writes 0812-3456-7890 — that is how it is said and
- * written here. Both are the same person, and "we could not find that number"
- * for the version printed on her own paperwork is the kind of dead end that
- * ends in a phone call to us.
+ * One field, no code, no password. Email only — a phone number is not accepted
+ * here even though we hold one, because two ways in is two things to explain
+ * and two things that can be wrong when she is standing outside a house
+ * waiting to start.
  *
- * Only tried at sign-in, where a human is typing. Everywhere else the number
- * comes from WhatsApp already in one shape, and guessing would be a way to
- * match the wrong person.
- */
-function phoneVariants(raw) {
-  const digits = normalizePhone(raw);
-  if (!digits) return [];
-
-  const out = new Set([digits]);
-
-  // 0812… is the local way of writing +62 812…
-  if (digits.startsWith('0')) out.add(`62${digits.slice(1)}`);
-  // …and the reverse, in case the record was stored the local way.
-  if (digits.startsWith('62')) out.add(`0${digits.slice(2)}`);
-
-  return [...out];
-}
-
-/**
- * Sign in with the number or email she registered with.
+ * This trusts whoever knows the address. An email is not a secret, so anyone
+ * who has one can open her bookings, the addresses of the families she works
+ * for, and what she has earned. That is the trade that was asked for, and it
+ * is worth writing down plainly rather than leaving to be discovered.
  *
- * One field, no code, no password. She types what we already know her by and
- * she is in.
- *
- * This trusts whoever holds the phone. A number is not a secret — it is on
- * her WhatsApp, in a family's chat, on a piece of paper — so anyone who knows
- * one can open her bookings, the addresses of the families she works for and
- * what she has earned. That is the trade that was asked for, and it is worth
- * writing down plainly rather than leaving to be discovered.
- *
- * Adding a code back is a small change: the OTP that used to be here is a few
- * lines, and `/auth/verify` below still exists for it.
+ * Adding a code back is a small change: `/auth/verify` below still exists.
  */
 router.post('/auth/sign-in', signInLimiter, wrap(async (req, res) => {
-  const raw = String(req.body?.identifier ?? req.body?.phone ?? req.body?.email ?? '').trim();
-  if (!raw) return res.status(400).json({ error: 'Enter your phone number or email' });
+  const email = String(req.body?.email ?? req.body?.identifier ?? '').trim();
 
-  const looksLikeEmail = raw.includes('@');
+  if (!email) return res.status(400).json({ error: 'Enter your email address' });
 
-  // Email is matched case-insensitively and exactly; a phone goes through the
-  // same normaliser the rest of the system uses, so 0812…, +62812… and
-  // 62812… all find the same person.
-  const nanny = looksLikeEmail
-    ? await User.findOne({
-      role: USER_ROLE.NANNY,
-      email: new RegExp(`^${raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
-    })
-    : await User.findOne({ role: USER_ROLE.NANNY, phone: { $in: phoneVariants(raw) } });
+  // Caught here rather than by the lookup failing, so someone typing their
+  // number out of habit is told what to do instead of "we could not find it".
+  if (!email.includes('@')) {
+    return res.status(400).json({
+      error: 'Please enter your email address, not your phone number.',
+    });
+  }
 
-  // Said plainly. With no code to send there is nothing to protect by being
-  // vague, and "check your number" is what she can actually act on.
+  // Matched exactly but ignoring case, since a keyboard capitalises the first
+  // letter and the address is the same address either way.
+  const nanny = await User.findOne({
+    role: USER_ROLE.NANNY,
+    email: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+  });
+
+  // Said plainly. With no code to send there is nothing left to protect by
+  // being vague, and "check the address" is what she can actually act on.
   if (!nanny) {
     return res.status(404).json({
-      error: looksLikeEmail
-        ? 'We could not find that email. Check it, or try your phone number.'
-        : 'We could not find that number. Check it, or try the email you registered with.',
+      error: 'We could not find that email. Check it, or message us on WhatsApp.',
     });
   }
 
