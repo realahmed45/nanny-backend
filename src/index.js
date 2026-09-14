@@ -61,6 +61,67 @@ export function createApp() {
    * database from failing the whole deploy — so a health check that always
    * said "ok" would hide exactly the state this exists to report.
    */
+  /**
+   * Why email is failing, from the server's own network.
+   *
+   * A mail provider that rejects the server but accepts a laptop is the
+   * hardest kind of failure to chase: everything looks configured, the health
+   * check says "live", and the only visible symptom is that nobody receives a
+   * code. This asks the provider directly and repeats exactly what it said.
+   *
+   * Behind the admin token, since the reply names the host and the login.
+   */
+  app.get('/diag/email', async (req, res) => {
+    const token = String(req.query.key || '');
+    if (!config.admin.diagKey || token !== config.admin.diagKey) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
+    const { activeProvider, isDryRun } = await import('./providers/email.js');
+    const provider = activeProvider();
+
+    const out = {
+      provider,
+      dryRun: isDryRun(),
+      smtp: {
+        host: config.smtp.host || '(unset)',
+        port: config.smtp.port,
+        user: config.smtp.user ? `${config.smtp.user.slice(0, 4)}…${config.smtp.user.slice(-18)}` : '(unset)',
+        // Length only — enough to catch a truncated or empty paste without
+        // putting the secret in a response.
+        passLength: config.smtp.pass ? config.smtp.pass.length : 0,
+        from: config.smtp.from || '(unset)',
+      },
+      resendKeySet: !!config.resend.apiKey,
+    };
+
+    if (provider !== 'smtp') {
+      out.note = provider === 'resend'
+        ? 'RESEND_API_KEY is still set, so SMTP settings are ignored. Delete it.'
+        : 'No mail provider configured; codes are only logged.';
+      return res.json(out);
+    }
+
+    try {
+      const nodemailer = (await import('nodemailer')).default;
+      const transporter = nodemailer.createTransport({
+        host: config.smtp.host,
+        port: config.smtp.port,
+        secure: config.smtp.secure,
+        auth: config.smtp.user ? { user: config.smtp.user, pass: config.smtp.pass } : undefined,
+        connectionTimeout: 20_000,
+      });
+      await transporter.verify();
+      out.smtpLogin = 'ok';
+    } catch (err) {
+      out.smtpLogin = 'failed';
+      // Verbatim. A paraphrased provider error is one more thing to doubt.
+      out.smtpError = String(err.message).split('\n')[0];
+    }
+
+    return res.json(out);
+  });
+
   app.get('/health', (req, res) => {
     // 0 disconnected, 1 connected, 2 connecting, 3 disconnecting.
     const DB_STATE = ['disconnected', 'connected', 'connecting', 'disconnecting'];

@@ -14,6 +14,9 @@ export const config = {
   admin: {
     email: process.env.ADMIN_EMAIL || 'admin@mynanny.com',
     password: process.env.ADMIN_PASSWORD || 'admin123',
+    // Guards the email diagnostic. Unset means the endpoint does not exist,
+    // so it cannot be probed on a server that never needed it.
+    diagKey: process.env.DIAG_KEY || '',
   },
 
   ultramsg: {
