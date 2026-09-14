@@ -48,6 +48,22 @@ export async function clearDb() {
   const { collections } = mongoose.connection;
   await Promise.all(Object.values(collections).map((c) => c.deleteMany({})));
   outbox.length = 0;
+  await setEmailVerification(true);
+}
+
+/**
+ * Whether registration asks for an email and a code.
+ *
+ * Tests turn it on, because most of them drive the full registration and the
+ * email steps are part of what they cover. Production defaults to off — a mail
+ * provider that stops delivering would otherwise block every signup — so a
+ * test that wants the short path switches it back.
+ */
+export async function setEmailVerification(enabled) {
+  // Through the service rather than the model, so the cache is dropped the
+  // same way a dashboard change would drop it.
+  const { setSetting } = await import('../src/services/settings.js');
+  await setSetting('emailVerification', { enabled });
 }
 
 /**

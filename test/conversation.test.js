@@ -1,7 +1,7 @@
 import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import dayjs from 'dayjs';
-import { setupDb, teardownDb, clearDb, say, latestOtp, messagesTo, outbox } from './helpers.js';
+import { setupDb, teardownDb, clearDb, say, latestOtp, messagesTo, outbox, setEmailVerification } from './helpers.js';
 
 const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
@@ -1775,4 +1775,62 @@ test('nanny availability blocking prevents matching on that date', async () => {
   assert.equal(cb.request.startDate, target, 'the requested date is captured');
   assert.deepEqual(cb.request.children.map((c) => c.name), ['Emma'], 'children are captured');
   assert.ok(cb.request.skills.length, 'skills are captured');
+});
+
+/* ------------------------------------------------------------------ *
+ * Registration without email verification
+ *
+ * The production default. A mail provider that stops delivering would
+ * otherwise hold up every signup at a code that never arrives.
+ * ------------------------------------------------------------------ */
+
+test('with email verification off, a nanny registers on her name alone', async () => {
+  await setEmailVerification(false);
+  const phone = '999300000010';
+
+  await say(phone, 'nanny');
+  await say(phone, '2');
+  const reply = await say(phone, 'Siti Rahayu');
+
+  // Straight into the profile, with no email asked for on the way.
+  assert.doesNotMatch(reply, /email/i);
+  assert.match(reply, /call you/i);
+
+  const { User } = await import('../src/models/index.js');
+  const user = await User.findOne({ phone });
+  assert.ok(user, 'the account should exist');
+  assert.equal(user.fullName, 'Siti Rahayu');
+  // Never claim an address was confirmed when nobody was asked for one.
+  assert.equal(user.emailVerified, false);
+});
+
+test('with email verification off, a family registers on its name alone', async () => {
+  await setEmailVerification(false);
+  const phone = '999300000011';
+
+  await say(phone, 'hi');
+  await say(phone, '1');
+  const reply = await say(phone, 'Sarah Jones');
+
+  assert.doesNotMatch(reply, /email/i);
+
+  const { User } = await import('../src/models/index.js');
+  const user = await User.findOne({ phone });
+  assert.ok(user, 'the account should exist');
+  assert.equal(user.registrationComplete, true);
+});
+
+test('turning it back on restores the email step', async () => {
+  await setEmailVerification(true);
+  const phone = '999300000012';
+
+  await say(phone, 'nanny');
+  await say(phone, '2');
+  const reply = await say(phone, 'Dewi Putri');
+
+  assert.match(reply, /email/i);
+
+  // No account until the code is confirmed.
+  const { User } = await import('../src/models/index.js');
+  assert.equal(await User.findOne({ phone }), null);
 });
