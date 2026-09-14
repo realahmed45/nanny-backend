@@ -2981,6 +2981,9 @@ router.get('/settings', wrap(async (req, res) => {
     accounts: { instagram: '', facebook: '', tiktok: '', ...(runtime.accounts || {}) },
     areas: runtime.areas || [],
     conversationMode: { mode: runtime.conversationMode?.mode || 'structured' },
+    // Off unless switched on. Verifying an address nobody can receive mail at
+    // stops every registration dead, so the safe default is to not ask.
+    emailVerification: { enabled: runtime.emailVerification?.enabled === true },
     // Whether the key is even present, so the dashboard can say why the AI
     // option will do nothing rather than letting it be switched on in vain.
     aiConfigured: !!config.ai.key,
@@ -3004,6 +3007,7 @@ const RUNTIME_SETTINGS = new Set([
   'accounts',
   'areas',
   'conversationMode',
+  'emailVerification',
 ]);
 
 /**
@@ -3090,6 +3094,21 @@ function validateSetting(key, value) {
       throw new Error('Conversation mode must be "structured" or "ai"');
     }
     return { mode };
+  }
+
+  /**
+   * Whether registration asks for an email and a code at all.
+   *
+   * Off means the bot skips both questions entirely — no address asked for,
+   * no code sent, nothing to wait for. On restores the original two steps.
+   *
+   * It exists as a switch because the failure it guards against is total: a
+   * mail provider that silently stops delivering takes every new nanny and
+   * every new family with it, and waiting for a redeploy to turn the step off
+   * means losing all of them in the meantime.
+   */
+  if (key === 'emailVerification') {
+    return { enabled: value?.enabled === true || value === true };
   }
 
   if (key === 'accounts') {

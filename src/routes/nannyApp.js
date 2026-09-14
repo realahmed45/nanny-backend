@@ -73,45 +73,60 @@ const verifyLimiter = rateLimit({
 });
 
 /**
- * Sign in with the email she registered with.
+ * The ways one Indonesian number gets written by hand.
  *
- * One field, no code, no password. Email only — a phone number is not accepted
- * here even though we hold one, because two ways in is two things to explain
- * and two things that can be wrong when she is standing outside a house
- * waiting to start.
+ * She registered over WhatsApp, which gave us 6281234567890. Typing her own
+ * number into a box, she writes 0812-3456-7890 — that is how it is written
+ * here, and being told "we could not find that number" for the version on her
+ * own paperwork is a dead end that ends in a phone call to us.
  *
- * This trusts whoever knows the address. An email is not a secret, so anyone
- * who has one can open her bookings, the addresses of the families she works
- * for, and what she has earned. That is the trade that was asked for, and it
- * is worth writing down plainly rather than leaving to be discovered.
+ * Only tried at sign-in, where a person is typing. Everywhere else the number
+ * arrives from WhatsApp already in one shape, and guessing there would be a
+ * way to match the wrong person.
+ */
+function phoneVariants(raw) {
+  const digits = normalizePhone(raw);
+  if (!digits) return [];
+
+  const out = new Set([digits]);
+  if (digits.startsWith('0')) out.add(`62${digits.slice(1)}`);
+  if (digits.startsWith('62')) out.add(`0${digits.slice(2)}`);
+  return [...out];
+}
+
+/**
+ * Sign in with the phone number she registered with.
+ *
+ * One field, no code, no password. The number is the account — it is what she
+ * talks to us on, and the only thing she is certain to know.
+ *
+ * This trusts whoever holds the number. A phone number is not a secret, so
+ * anyone who has one can open her bookings, the addresses of the families she
+ * works for, and what she has earned. That is the trade that was asked for,
+ * and it is worth writing down plainly rather than leaving to be discovered.
  *
  * Adding a code back is a small change: `/auth/verify` below still exists.
  */
 router.post('/auth/sign-in', signInLimiter, wrap(async (req, res) => {
-  const email = String(req.body?.email ?? req.body?.identifier ?? '').trim();
+  const raw = String(req.body?.phone ?? req.body?.identifier ?? req.body?.email ?? '').trim();
 
-  if (!email) return res.status(400).json({ error: 'Enter your email address' });
+  if (!raw) return res.status(400).json({ error: 'Enter your phone number' });
 
-  // Caught here rather than by the lookup failing, so someone typing their
-  // number out of habit is told what to do instead of "we could not find it".
-  if (!email.includes('@')) {
-    return res.status(400).json({
-      error: 'Please enter your email address, not your phone number.',
-    });
+  const variants = phoneVariants(raw);
+  if (!variants.length || variants[0].length < 8) {
+    return res.status(400).json({ error: 'That does not look like a phone number.' });
   }
 
-  // Matched exactly but ignoring case, since a keyboard capitalises the first
-  // letter and the address is the same address either way.
   const nanny = await User.findOne({
     role: USER_ROLE.NANNY,
-    email: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+    phone: { $in: variants },
   });
 
   // Said plainly. With no code to send there is nothing left to protect by
-  // being vague, and "check the address" is what she can actually act on.
+  // being vague, and "check the number" is what she can actually act on.
   if (!nanny) {
     return res.status(404).json({
-      error: 'We could not find that email. Check it, or message us on WhatsApp.',
+      error: 'We could not find that number. Check it, or message us on WhatsApp.',
     });
   }
 

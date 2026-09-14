@@ -16,17 +16,30 @@ import * as M from '../utils/messages.js';
  * Account creation
  * ------------------------------------------------------------------ */
 
-on('NANNY_REG_NAME', makeNameHandler('NANNY_REG_EMAIL'));
+/**
+ * Where registration lands once the account exists.
+ *
+ * Shared by both routes in — with an email code and without — so she sees the
+ * same thing either way and there is one copy to keep right.
+ */
+const onNannyRegistered = async (ctx, user) => {
+  const firstName = (user.fullName || '').split(' ')[0];
+  return [
+    { text: `✅ Welcome to My Nanny, ${firstName}!\n\nLet's complete your nanny profile.` },
+    { text: M.NANNY_ASK_NICKNAME, state: 'NR_NICKNAME', user: user._id },
+  ];
+};
+
+// With email verification off, the name step finishes registration on its own
+// and the two states below are simply never reached.
+on('NANNY_REG_NAME', makeNameHandler('NANNY_REG_EMAIL', {
+  role: USER_ROLE.NANNY,
+  onVerified: onNannyRegistered,
+}));
 on('NANNY_REG_EMAIL', makeEmailHandler('NANNY_REG_OTP'));
 on('NANNY_REG_OTP', makeOtpHandler({
   role: USER_ROLE.NANNY,
-  onVerified: async (ctx, user) => {
-    const firstName = (user.fullName || '').split(' ')[0];
-    return [
-      { text: `✅ Your account has been verified.\n\nWelcome to My Nanny, ${firstName}!\n\nLet's complete your nanny profile.` },
-      { text: M.NANNY_ASK_NICKNAME, state: 'NR_NICKNAME', user: user._id },
-    ];
-  },
+  onVerified: onNannyRegistered,
 }));
 
 on('NANNY_REG_RESUME', async (ctx) => {

@@ -213,12 +213,84 @@ export async function startRegistration(ctx, role) {
   return { text: M.ASK_FULL_NAME, state: role === USER_ROLE.NANNY ? 'NANNY_REG_NAME' : 'FAMILY_REG_NAME' };
 }
 
-/** Shared handler body for the "what's your name" step. */
-export function makeNameHandler(nextState) {
+/**
+ * Is registration asking for an email at all?
+ *
+ * Off by default. Asking someone to confirm an address they cannot receive
+ * mail at stops the registration dead, and a mail provider that quietly stops
+ * delivering takes every new nanny and family with it. It is switched on from
+ * the dashboard once mail is known to be working.
+ */
+export async function emailVerificationOn() {
+  try {
+    const { getSetting } = await import('../services/settings.js');
+    const setting = await getSetting('emailVerification');
+    return setting?.enabled === true;
+  } catch {
+    // A settings lookup that fails must not block a signup.
+    return false;
+  }
+}
+
+/**
+ * Create or update the account, and continue.
+ *
+ * Shared by both paths — with a code and without — so the account ends up
+ * identical either way, and the referral is credited in one place rather than
+ * two that can drift.
+ */
+export async function completeRegistration(ctx, role, { emailVerified }) {
+  let user = await User.findOne({ phone: ctx.phone, role });
+  if (!user) {
+    user = await User.create({
+      role,
+      phone: ctx.phone,
+      fullName: ctx.get('fullName'),
+      email: ctx.get('email'),
+      emailVerified,
+      referralCode: makeReferralCode(ctx.get('fullName')),
+    });
+  } else {
+    user.fullName = ctx.get('fullName') || user.fullName;
+    user.email = ctx.get('email') || user.email;
+    // Never downgrade someone already verified: turning the step off later
+    // should not undo what was confirmed while it was on.
+    if (emailVerified) user.emailVerified = true;
+    if (!user.referralCode) user.referralCode = makeReferralCode(user.fullName);
+    await user.save();
+  }
+
+  ctx.session.user = user._id;
+  ctx.session.role = role;
+  ctx.user = user;
+
+  // The account now exists, so a referral captured on the first message can
+  // finally be credited. Never fatal: a signup must not fail over it.
+  await applyReferral(ctx, user).catch((err) => {
+    console.error('[referral] could not attribute:', err.message);
+  });
+
+  return user;
+}
+
+/**
+ * Shared handler body for the "what's your name" step.
+ *
+ * When email verification is off this is the whole of registration: the
+ * account is made here and the flow carries straight on, with no address
+ * asked for and no code to wait for.
+ */
+export function makeNameHandler(nextState, { role, onVerified } = {}) {
   const handler = async (ctx) => {
     const name = clean(ctx.text);
     if (name.length < 2) return 'Please tell me your full name.';
     ctx.set('fullName', name);
+
+    if (role && onVerified && !(await emailVerificationOn())) {
+      const user = await completeRegistration(ctx, role, { emailVerified: false });
+      return onVerified(ctx, user);
+    }
+
     return { text: M.ASK_EMAIL(name.split(' ')[0]), state: nextState };
   };
   handler.prompt = () => M.ASK_FULL_NAME;
@@ -290,34 +362,7 @@ export function makeOtpHandler({ role, onVerified }) {
     record.consumed = true;
     await record.save();
 
-    let user = await User.findOne({ phone: ctx.phone, role });
-    if (!user) {
-      user = await User.create({
-        role,
-        phone: ctx.phone,
-        fullName: ctx.get('fullName'),
-        email: ctx.get('email'),
-        emailVerified: true,
-        referralCode: makeReferralCode(ctx.get('fullName')),
-      });
-    } else {
-      user.fullName = ctx.get('fullName') || user.fullName;
-      user.email = ctx.get('email') || user.email;
-      user.emailVerified = true;
-      if (!user.referralCode) user.referralCode = makeReferralCode(user.fullName);
-      await user.save();
-    }
-
-    ctx.session.user = user._id;
-    ctx.session.role = role;
-    ctx.user = user;
-
-    // The account now exists, so a referral captured on the first message
-    // can finally be credited. Never fatal: a signup must not fail over it.
-    await applyReferral(ctx, user).catch((err) => {
-      console.error('[referral] could not attribute:', err.message);
-    });
-
+    const user = await completeRegistration(ctx, role, { emailVerified: true });
     return onVerified(ctx, user);
   };
   handler.prompt = () => M.ASK_OTP;
@@ -336,4 +381,7 @@ on('COMMANDS_HELP', async (ctx) => ({
   state: mainMenuState(ctx.session.role),
 }));
 
-export default { generateOtp, issueOtp, makeNameHandler, makeEmailHandler, makeOtpHandler, makeReferralCode };
+export default {
+  generateOtp, issueOtp, makeNameHandler, makeEmailHandler, makeOtpHandler,
+  makeReferralCode, emailVerificationOn, completeRegistration,
+};

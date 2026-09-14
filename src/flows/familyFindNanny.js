@@ -23,20 +23,33 @@ const ORDINALS = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seven
  * Registration (family)
  * ------------------------------------------------------------------ */
 
-on('FAMILY_REG_NAME', makeNameHandler('FAMILY_REG_EMAIL'));
+/**
+ * Where registration lands once the account exists.
+ *
+ * Shared by both routes in — with an email code and without — so the family
+ * sees the same thing either way.
+ */
+const onFamilyRegistered = async (ctx, user) => {
+  user.registrationComplete = true;
+  await user.save();
+  const firstName = (user.fullName || '').split(' ')[0];
+  // Registration is entered from "Find a Nanny", so continue into that flow.
+  return [
+    { text: M.ACCOUNT_VERIFIED(firstName) },
+    { text: `${M.FIND_NANNY_INTRO}\n\n${M.ASK_LOCATION}`, state: 'FF_LOCATION', user: user._id },
+  ];
+};
+
+// With email verification off, the name step finishes registration on its own
+// and the two states below are simply never reached.
+on('FAMILY_REG_NAME', makeNameHandler('FAMILY_REG_EMAIL', {
+  role: USER_ROLE.FAMILY,
+  onVerified: onFamilyRegistered,
+}));
 on('FAMILY_REG_EMAIL', makeEmailHandler('FAMILY_REG_OTP'));
 on('FAMILY_REG_OTP', makeOtpHandler({
   role: USER_ROLE.FAMILY,
-  onVerified: async (ctx, user) => {
-    user.registrationComplete = true;
-    await user.save();
-    const firstName = (user.fullName || '').split(' ')[0];
-    // Registration is entered from "Find a Nanny", so continue into that flow.
-    return [
-      { text: M.ACCOUNT_VERIFIED(firstName) },
-      { text: `${M.FIND_NANNY_INTRO}\n\n${M.ASK_LOCATION}`, state: 'FF_LOCATION', user: user._id },
-    ];
-  },
+  onVerified: onFamilyRegistered,
 }));
 
 on('FAMILY_REG_RESUME', async (ctx) => ({
