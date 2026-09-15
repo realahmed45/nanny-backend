@@ -286,17 +286,70 @@ function isStale(session) {
  */
 function looksRejected(result, prompt) {
   if (!result) return false;
+
+  // A transition means the answer was accepted, whatever it said on the way.
+  if (Array.isArray(result)) {
+    if (result.some((item) => item && typeof item === 'object' && item.state)) return false;
+  } else if (typeof result === 'object' && result.state) {
+    return false;
+  }
+
   const text = typeof result === 'string'
     ? result
-    : Array.isArray(result) ? '' : (result.text || '');
+    : Array.isArray(result)
+      ? result.map((i) => (typeof i === 'string' ? i : i?.text || '')).join('\n')
+      : (result.text || '');
   if (!text) return false;
 
-  // A transition means it worked, whatever it said.
-  if (typeof result === 'object' && !Array.isArray(result) && result.state) return false;
+  // No transition, so the handler stayed put. That is either a rejection or a
+  // menu redrawing itself, and the two have to be told apart: handing a menu
+  // to the AI would have it chatting at someone who simply mistyped an option.
+  //
+  // Three signals, any of which means "this was turned down":
+  //
+  //   - it says so, in any of the wordings the handlers actually use
+  //   - it is the prompt again, verbatim
+  //   - it is short and imperative — "Please give the age as a number of
+  //     years" — which is what a handler writes when correcting someone
+  //
+  // A menu fails all three: it is long, it lists options, and it does not ask
+  // for anything again.
+  // Said in so many words: turned down, whatever else it looks like.
+  if (REJECTION_WORDING.test(text)) return true;
 
-  if (/didn.t understand|couldn.t read|could not read|not sure what you meant/i.test(text)) return true;
-  return Boolean(prompt) && text.trim() === String(prompt).trim();
+  // A menu redrawing itself is left alone, and this has to be checked before
+  // "is it the prompt again", because for a menu those are the same string.
+  // Handing a menu to the AI means chatting at someone who simply mistyped an
+  // option number, when showing them the options again is the right answer.
+  if ((text.match(/^\s*\d+[.)]\s/gm) || []).length >= 2) return false;
+
+  if (prompt && text.trim() === String(prompt).trim()) return true;
+
+  // Short, and asking for something: a correction.
+  return text.length <= 220 && /please|try again|must be|should be|example/i.test(text);
 }
+
+/**
+ * How handlers say no, in their own words.
+ *
+ * Collected from the messages rather than guessed: each of these appears in a
+ * real rejection somewhere in the flow, and matching only "didn't understand"
+ * meant the AI was never reached for most of the bot.
+ */
+const REJECTION_WORDING = new RegExp([
+  "didn.t understand",
+  "couldn.t read",
+  "could not read",
+  "not sure what you meant",
+  "doesn.t look like",
+  "does not look like",
+  "doesn.t match",
+  "that is not",
+  "that.s not",
+  "invalid",
+  "sorry, i",
+].join('|'), 'i');
+
 
 /**
  * Second chance at a reply the strict parser turned down.

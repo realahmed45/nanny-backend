@@ -1808,8 +1808,10 @@ test('with email verification off, a family registers on its name alone', async 
   await setEmailVerification(false);
   const phone = '999300000011';
 
-  await say(phone, 'hi');
-  await say(phone, '1');
+  // "nanny" is the trigger word; anything else is ignored at START.
+  await say(phone, 'nanny');
+  await say(phone, '1');   // I'm a family
+  await say(phone, '1');   // Find a Nanny -> asks for a name
   const reply = await say(phone, 'Sarah Jones');
 
   assert.doesNotMatch(reply, /email/i);

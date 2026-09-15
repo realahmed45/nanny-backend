@@ -122,6 +122,62 @@ export function createApp() {
     return res.json(out);
   });
 
+  /**
+   * Is the AI actually working, and if not, what did the provider say?
+   *
+   * A failed AI call is designed to be invisible — it falls back to the strict
+   * parser and the conversation carries on — which is right for a customer and
+   * useless for working out why nothing has changed. This asks the provider
+   * from the server's own network and repeats its answer verbatim.
+   *
+   * Open, because it reveals nothing but whether a key is set and what the
+   * model said. The key itself is never returned.
+   */
+  app.get('/diag/ai', async (req, res) => {
+    const { isConfigured, converse } = await import('./services/aiConversation.js');
+    const { getSettings } = await import('./services/settings.js');
+
+    const settings = await getSettings().catch(() => ({}));
+
+    const out = {
+      keySet: isConfigured(),
+      model: config.ai.model,
+      conversationMode: settings.conversationMode?.mode || 'structured',
+    };
+
+    if (!out.keySet) {
+      out.problem = 'No GROQ_API_KEY (or transcription key) is set, so every AI call is skipped.';
+      return res.json(out);
+    }
+
+    if (out.conversationMode !== 'ai') {
+      out.problem = 'AI mode is off in the dashboard, so the AI is never asked anything.';
+    }
+
+    // A real call, so the answer is what would actually happen in a
+    // conversation rather than what ought to.
+    const started = Date.now();
+    const reply = await converse({
+      message: 'do you have anyone who can cook?',
+      question: 'Which area are you in?',
+      options: [],
+      role: 'customer',
+      history: [],
+    });
+    out.tookMs = Date.now() - started;
+
+    if (reply) {
+      out.working = true;
+      out.sampleReply = reply;
+    } else {
+      out.working = false;
+      out.problem = (out.problem ? `${out.problem} ` : '')
+        + 'The call returned nothing. The server log line starting "[ai]" has the provider\'s exact response.';
+    }
+
+    return res.json(out);
+  });
+
   app.get('/health', (req, res) => {
     // 0 disconnected, 1 connected, 2 connecting, 3 disconnecting.
     const DB_STATE = ['disconnected', 'connected', 'connecting', 'disconnecting'];
