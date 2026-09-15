@@ -288,6 +288,7 @@ function looksRejected(result, prompt) {
   if (!result) return false;
 
   // A transition means the answer was accepted, whatever it said on the way.
+  // This is the only signal that is never ambiguous.
   if (Array.isArray(result)) {
     if (result.some((item) => item && typeof item === 'object' && item.state)) return false;
   } else if (typeof result === 'object' && result.state) {
@@ -301,54 +302,32 @@ function looksRejected(result, prompt) {
       : (result.text || '');
   if (!text) return false;
 
-  // No transition, so the handler stayed put. That is either a rejection or a
-  // menu redrawing itself, and the two have to be told apart: handing a menu
-  // to the AI would have it chatting at someone who simply mistyped an option.
+  // No transition and something came back, so the handler stayed where it was
+  // and asked again. That is a rejection.
   //
-  // Three signals, any of which means "this was turned down":
-  //
-  //   - it says so, in any of the wordings the handlers actually use
-  //   - it is the prompt again, verbatim
-  //   - it is short and imperative — "Please give the age as a number of
-  //     years" — which is what a handler writes when correcting someone
-  //
-  // A menu fails all three: it is long, it lists options, and it does not ask
-  // for anything again.
-  // Said in so many words: turned down, whatever else it looks like.
-  if (REJECTION_WORDING.test(text)) return true;
-
-  // A menu redrawing itself is left alone, and this has to be checked before
-  // "is it the prompt again", because for a menu those are the same string.
-  // Handing a menu to the AI means chatting at someone who simply mistyped an
-  // option number, when showing them the options again is the right answer.
-  if ((text.match(/^\s*\d+[.)]\s/gm) || []).length >= 2) return false;
-
-  if (prompt && text.trim() === String(prompt).trim()) return true;
-
-  // Short, and asking for something: a correction.
-  return text.length <= 220 && /please|try again|must be|should be|example/i.test(text);
+  // It is tempting to except anything listing numbered options, on the grounds
+  // that a redrawn main menu is a fair answer to a mistyped option number. But
+  // most questions in this flow list options — languages, skills, how many
+  // children — and excepting them all meant the AI was never consulted for any
+  // of them, which is most of the bot. So the exception is narrow: only a
+  // navigation menu, recognised by the wording it actually uses.
+  return !isNavigationMenu(text);
 }
 
 /**
- * How handlers say no, in their own words.
+ * A menu of places to go, as opposed to a question that happens to have
+ * options.
  *
- * Collected from the messages rather than guessed: each of these appears in a
- * real rejection somewhere in the flow, and matching only "didn't understand"
- * meant the AI was never reached for most of the bot.
+ * "What would you like to do?" is navigation. "Which languages can you speak?"
+ * is a question, and somebody who replies to it with a question of their own
+ * deserves an answer rather than the same list again.
  */
-const REJECTION_WORDING = new RegExp([
-  "didn.t understand",
-  "couldn.t read",
-  "could not read",
-  "not sure what you meant",
-  "doesn.t look like",
-  "does not look like",
-  "doesn.t match",
-  "that is not",
-  "that.s not",
-  "invalid",
-  "sorry, i",
-].join('|'), 'i');
+function isNavigationMenu(text) {
+  if ((text.match(/^\s*\d+[.)]\s/gm) || []).length < 2) return false;
+  return /what would you like to do|main menu|how can I help/i.test(text);
+}
+
+
 
 
 /**
