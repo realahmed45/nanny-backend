@@ -12,6 +12,19 @@ const SessionSchema = new mongoose.Schema({
 
   state: { type: String, default: 'START' },
   data: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
+
+  /**
+   * The last few turns, for the AI reply to refer back to.
+   *
+   * Capped at six and overwritten in place. It exists so a follow-up question
+   * has something to point at; keeping more would turn every session into a
+   * conversation log nobody asked us to store.
+   */
+  aiHistory: [{
+    from: { type: String, enum: ['user', 'bot'] },
+    text: String,
+    _id: false,
+  }],
   stack: { type: [String], default: [] },
 
   // Pagination for listings (nannies, bookings, etc.)

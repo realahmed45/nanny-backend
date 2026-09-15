@@ -155,7 +155,12 @@ export const config = {
    */
   ai: {
     key: process.env.GROQ_API_KEY || '',
-    model: process.env.AI_MODEL || 'llama-3.3-70b-versatile',
+    // Groq retired llama-3.3-70b-versatile in August 2026; every call to it
+    // now returns 404 model_not_found, which is invisible from the outside
+    // because a failed call just falls back to the strict parser. This is
+    // their named replacement, and it stays overridable so the next
+    // retirement is an environment variable rather than a deploy.
+    model: process.env.AI_MODEL || 'openai/gpt-oss-120b',
   },
 
   /**

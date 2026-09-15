@@ -266,12 +266,16 @@ function afterStartDate(ctx, { confirm = true } = {}) {
     ctx.set('startTime', startTime);
 
     if (ctx.get('isMultiDay')) {
-      return [...steps, { text: M.emergencyStartsNow(startTime) }, houseRules,
+      return [...steps,
+        { text: M.emergencyStartsNow(startTime) },
+        { text: M.EMERGENCY_CALL_PROMISE },
+        houseRules,
         { text: M.ASK_END_DATE_EMERGENCY, state: 'FF_END_DATE' }];
     }
     return [
       ...steps,
       { text: M.emergencyStartsNow(startTime) },
+      { text: M.EMERGENCY_CALL_PROMISE },
       houseRules,
       { text: M.ASK_DURATION, state: 'FF_DURATION' },
     ];
@@ -786,6 +790,15 @@ const childMedicalHandler = async (ctx) => {
   if (!raw) return M.ASK_CHILD_MEDICAL(ctx.get('currentChild')?.name || 'the child');
   const child = { ...ctx.get('currentChild'), medicalNotes: isNone(raw) ? '' : raw };
   ctx.set('currentChild', child);
+
+  // Only when they actually told us something. Thanking someone for typing
+  // "None" is the kind of hollow politeness that makes a bot feel like a bot.
+  if (child.medicalNotes) {
+    return [
+      { text: M.THANKS_FOR_CHILD_INFO },
+      { text: M.ASK_CHILD_DIET(child.name), state: 'FF_CHILD_DIET' },
+    ];
+  }
   return { text: M.ASK_CHILD_DIET(child.name), state: 'FF_CHILD_DIET' };
 };
 childMedicalHandler.prompt = (ctx) => M.ASK_CHILD_MEDICAL(ctx.get('currentChild')?.name || 'the child');

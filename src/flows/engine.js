@@ -301,13 +301,20 @@ function looksRejected(result, prompt) {
 /**
  * Second chance at a reply the strict parser turned down.
  *
- * The conversation is unchanged: same question, same options, same next step.
- * All that happens is that "tomorrow morning" gets turned into a date before
- * the handler sees it, instead of the customer being told to try again.
+ * Two attempts, in order:
+ *
+ *   1. Read it as an answer. "tomorrow morning" becomes a date, "the second
+ *      one" becomes 2, and the handler runs again none the wiser. The
+ *      conversation is unchanged — same question, same step, same result.
+ *
+ *   2. If it was not an answer at all — a question, a worry, a joke — reply to
+ *      it properly and ask the question again. This is what stops the bot
+ *      repeating itself at someone who just asked whether we have anyone who
+ *      can cook.
  *
  * Only runs when the dashboard has AI mode switched on, only after the normal
- * parser has already failed, and never for media or commands. If anything at
- * all goes wrong the original rejection stands, so this cannot make the bot
+ * parser has already failed, and never for media or commands. Every failure
+ * path leaves the original rejection standing, so this cannot make the bot
  * worse than it is without it.
  */
 async function retryWithAi(ctx, handler, prompt) {
@@ -320,7 +327,7 @@ async function retryWithAi(ctx, handler, prompt) {
     const settings = await getSettings();
     if (settings.conversationMode?.mode !== 'ai') return null;
 
-    const { interpret, isConfigured } = await import('../services/aiUnderstanding.js');
+    const { extract, converse, isConfigured } = await import('../services/aiConversation.js');
     if (!isConfigured()) return null;
 
     const question = String(prompt || '').slice(0, 600);
@@ -332,27 +339,59 @@ async function retryWithAi(ctx, handler, prompt) {
     const expect = options.length ? 'choice'
       : /what time|time does/i.test(question) ? 'time'
         : /date|when would|which day/i.test(question) ? 'date'
-          : /^\s*$/.test(question) ? 'text' : 'text';
+          : 'text';
 
-    const answer = await interpret({
+    /* --- 1. Was it an answer after all? --- */
+    const answer = await extract({
       message: said,
       question,
       expect,
       options,
       today: new Date().toISOString().slice(0, 10),
     });
-    if (!answer || answer === said) return null;
 
-    // Re-run the same handler with the interpreted text. Nothing else about
-    // the context changes, so the handler cannot tell the difference and no
-    // handler needed modifying.
-    console.log(`[ai] read "${said}" as "${answer}" in ${ctx.session.state}`);
-    const retried = await callHandler(handler, { ...ctx, text: answer });
-    return looksRejected(retried, prompt) ? null : retried;
+    if (answer && answer !== said) {
+      // Re-run the same handler with the interpreted text. Nothing else about
+      // the context changes, so the handler cannot tell the difference and no
+      // handler needed modifying.
+      console.log(`[ai] read "${said}" as "${answer}" in ${ctx.session.state}`);
+      const retried = await callHandler(handler, { ...ctx, text: answer });
+      if (!looksRejected(retried, prompt)) return retried;
+    }
+
+    /* --- 2. It was not an answer. Talk to them. --- */
+    //
+    // The state is deliberately left alone. Whatever was being asked is still
+    // being asked, so their next message arrives at the same handler and the
+    // sequence of steps is exactly what it was.
+    const reply = await converse({
+      message: said,
+      question,
+      options,
+      role: ctx.session.role === 'nanny' ? 'nanny' : 'customer',
+      history: recentTurns(ctx),
+    });
+
+    if (!reply) return null;
+
+    console.log(`[ai] answered "${said.slice(0, 40)}" conversationally in ${ctx.session.state}`);
+    return [{ text: reply }];
   } catch (err) {
     console.error(`[ai] retry failed: ${err.message}`);
     return null;
   }
+}
+
+/**
+ * The last few turns, so a follow-up question means something.
+ *
+ * Without this "what about the other one?" has no referent and the reply is
+ * confidently about nothing. Kept short: it is context for one reply, not a
+ * transcript.
+ */
+function recentTurns(ctx) {
+  const turns = ctx.session?.aiHistory;
+  return Array.isArray(turns) ? turns.slice(-6) : [];
 }
 
 export async function handleMessage({ phone: rawPhone, text = '', mediaUrl, mediaId, mediaType }) {
@@ -502,8 +541,31 @@ export async function handleMessage({ phone: rawPhone, text = '', mediaUrl, medi
   }
 
   const outbound = await applyResult(session, result, ctx);
+  rememberTurn(session, text, outbound);
   await session.save();
   return outbound;
+}
+
+/**
+ * A few turns of conversation, kept on the session.
+ *
+ * Only so a follow-up question has a referent — "what about the other one?"
+ * means nothing on its own. Six turns, overwritten in place: this is context
+ * for the next reply, not a transcript, and a conversation log that grew
+ * forever would be both a storage problem and a privacy one.
+ */
+function rememberTurn(session, said, replies) {
+  const said_ = String(said || '').trim();
+  if (!said_) return;
+
+  const history = Array.isArray(session.aiHistory) ? session.aiHistory : [];
+  history.push({ from: 'user', text: said_.slice(0, 300) });
+
+  const last = (replies || []).filter(Boolean).at(-1);
+  if (last) history.push({ from: 'bot', text: String(last).slice(0, 300) });
+
+  session.aiHistory = history.slice(-6);
+  session.markModified('aiHistory');
 }
 
 async function callHandler(handler, ctx) {

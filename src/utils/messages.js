@@ -518,6 +518,27 @@ export const INVALID_CHILD_AGE =
 export const LONG_ANSWER_HINT =
   "Write as much detail as you'd like here! We recommend drafting your text elsewhere and pasting it in, or you can simply send us a voice message.";
 
+/**
+ * Said once, after the start date of an emergency booking.
+ *
+ * Someone asking for a nanny in the next hour is not in a state to wonder
+ * whether a form went through. Telling her a person is about to ring is the
+ * difference between waiting and worrying.
+ */
+export const EMERGENCY_CALL_PROMISE =
+  '\u{1F4DE} Someone from our team will call you within the hour to confirm everything and '
+  + 'make sure a nanny is on her way.\n\nPlease keep your phone nearby.';
+
+/**
+ * Acknowledging what a parent just told us about their child.
+ *
+ * These two questions are the hardest ones we ask — allergies, medication,
+ * what a child cannot eat. Answering into silence and being handed the next
+ * question reads as nobody having read it.
+ */
+export const THANKS_FOR_CHILD_INFO =
+  '\u{1F64F} Thank you for telling us. We will make sure your nanny knows.';
+
 export const ASK_CHILD_MEDICAL = (name) =>
   `Does ${name} have any allergies, medical conditions, or special care needs? Please tell us about them. _Example: Peanut allergy, asthma, epilepsy, medication, etc._\n\n${LONG_ANSWER_HINT}\n\nif none then type *None*`;
 export const ASK_CHILD_DIET = (name) =>

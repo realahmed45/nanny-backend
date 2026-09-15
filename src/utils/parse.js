@@ -275,10 +275,29 @@ export function parseDate(text, reference = new Date()) {
     }
   }
 
+  // A date typed without a space: 13sep, sep13, 3rdmarch.
+  //
+  // Everything below is built on dayjs format strings, all of which expect a
+  // separator, so "13sep" reaches the end and is rejected as nonsense. People
+  // type it constantly — on a phone keyboard the space is an extra tap — and
+  // being told "that is not a date" for something perfectly clear is the kind
+  // of dead end that loses a booking.
+  //
+  // Only a digit against a letter is split, so nothing that was already
+  // parseable is touched.
+  // Ordinals come off first. Stripping them after the split would leave
+  // "3rdmarch" as "3 rdmarch", which is not a month.
+  const spaced = t
+    .replace(/(\d{1,2})(st|nd|rd|th)/g, '$1 ')
+    .replace(/(\d)([a-z]{3,})/g, '$1 $2')
+    .replace(/([a-z]{3,})(\d)/g, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim();
+
   // People type as much of the month as they feel like -- aug, augu, augus,
   // august -- so expand any unambiguous prefix to the full name first.
   // dayjs also matches month names case-sensitively, hence the title casing.
-  const expanded = t.replace(/[a-z]{3,}/g, (word) => {
+  const expanded = spaced.replace(/[a-z]{3,}/g, (word) => {
     const hits = MONTH_NAMES.filter((m) => m.startsWith(word));
     return hits.length === 1 ? hits[0] : word;
   });
