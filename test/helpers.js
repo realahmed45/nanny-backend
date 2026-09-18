@@ -8,6 +8,20 @@ dotenv.config();
 process.env.ULTRAMSG_INSTANCE_ID = '';
 process.env.ULTRAMSG_TOKEN = '';
 
+// And the same for email, for the same reason plus a worse one: with real
+// SMTP settings in .env every test that issues a verification code opened a
+// live connection to the mail provider. That is seconds of waiting per test,
+// mail sent to made-up addresses, and — once the timeouts start overlapping
+// with the next test's reset — failures that look like logic bugs and are not.
+process.env.SMTP_HOST = '';
+process.env.SMTP_USER = '';
+process.env.SMTP_PASS = '';
+process.env.RESEND_API_KEY = '';
+
+// No AI either. A test that reaches the model is slow, costs money, and gives
+// a different answer each run; the tests that do want it stub the endpoint.
+process.env.GROQ_API_KEY = '';
+
 const { outbox } = await import('../src/providers/ultramsg.js');
 
 let mongod;
@@ -48,7 +62,18 @@ export async function clearDb() {
   const { collections } = mongoose.connection;
   await Promise.all(Object.values(collections).map((c) => c.deleteMany({})));
   outbox.length = 0;
+
+  // Runtime settings live in the database, so wiping the collections drops
+  // them — but the settings service caches, and a test that switched a mode on
+  // would otherwise leave it on for every test that ran after it.
   await setEmailVerification(true);
+  await setConversationMode('structured');
+}
+
+/** Which way the bot reads replies. Tests that want AI mode ask for it. */
+export async function setConversationMode(mode) {
+  const { setSetting } = await import('../src/services/settings.js');
+  await setSetting('conversationMode', { mode });
 }
 
 /**

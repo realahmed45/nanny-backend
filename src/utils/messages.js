@@ -968,6 +968,12 @@ Our team will review your documents and verification details.
 
 Your profile will become available to families once approved.`;
 
+export const NANNY_PROFILE_SUBMITTED_AUTO = `✅ Your profile has been submitted.
+
+We're reviewing your details now — this usually takes about *5 minutes*.
+
+We'll message you the moment your profile is live.`;
+
 export const NANNY_VERIFIED = `🎉 *Congratulations!*
 
 Your profile has been *verified successfully*! ✅

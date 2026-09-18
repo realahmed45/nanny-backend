@@ -135,7 +135,7 @@ export async function createBooking({ family, nanny, draft }) {
  * Recalculate totals after an edit (duration, dates, repeat days or rate).
  * Preserves the status and confirmation codes of days that already happened.
  */
-export function recalcServiceDays(booking, changes = {}) {
+export async function recalcServiceDays(booking, changes = {}) {
   const merged = {
     startDate: changes.startDate ?? booking.startDate,
     endDate: changes.endDate ?? booking.endDate,
@@ -148,7 +148,15 @@ export function recalcServiceDays(booking, changes = {}) {
   const completed = booking.serviceDays.filter(
     (d) => d.status === SERVICE_DAY_STATUS.COMPLETED || d.status === SERVICE_DAY_STATUS.CANCELLED
   );
-  const fresh = buildServiceDays(merged).filter(
+  // The calendar is what makes a Nyepi date get skipped and a surcharged day
+  // cost more. Rebuilding without it silently repriced every day at the flat
+  // rate — dropping the surcharge the family owed — and put working days back
+  // on dates the island is closed, sending a nanny to a booking that cannot
+  // happen.
+  const { getCalendar } = await import('./calendar.js');
+  const calendar = await getCalendar().catch(() => null);
+
+  const fresh = buildServiceDays({ ...merged, calendar }).filter(
     (nd) => !completed.some((cd) => cd.date === nd.date)
   );
 
@@ -232,6 +240,18 @@ export function syncBookingStatus(booking) {
 
 /** Apply a cancellation and record the refund/compensation breakdown. */
 export async function cancelBooking(booking, { cancelledBy, reason, at = new Date(), dayIds = null }) {
+  // Cancelling an already-cancelled booking must not refund a second time.
+  //
+  // Two paths can reach the same booking at once: the family confirming a
+  // cancellation they had open, and the replacement sweep cancelling it for
+  // them. Both computed a full refund against days the other had not yet
+  // written, and `refundDue` accumulates — so two refund rows were raised for
+  // one booking, and an admin approving both paid the family twice.
+  if (booking.status === BOOKING_STATUS.CANCELLED) {
+    return booking.cancellationBreakdown
+      || { perDay: [], totalRefund: 0, totalNannyCompensation: 0 };
+  }
+
   const breakdown = computeCancellationRefund(booking, { cancelledBy, at, dayIds });
 
   for (const day of booking.serviceDays) {
@@ -300,33 +320,25 @@ export async function markNannyCancelled(booking, { at = new Date(), reason } = 
  * before the booking becomes active again.
  */
 export async function assignReplacement(booking, nanny) {
+  // The price is the platform's, set from the pricing table at booking time,
+  // and it does not depend on who takes the job — which is exactly what the
+  // family is told on the screen before this runs.
+  //
+  // This used to re-price the remaining days off `nanny.hourlyRate`. That is
+  // her *payout* rate, not the rate charged, and the two are deliberately
+  // different: the platform marks up. So a replacement whose payout was lower
+  // than the charge — the ordinary case — refunded the family a large sum they
+  // were never owed and rewrote the booking total downward, while a payout
+  // above the charge billed them for a difference that did not exist.
   const remaining = booking.remainingDays();
-  const remainingHours = remaining.reduce((s, d) => s + (d.hours || 0), 0);
-  const oldRate = booking.hourlyRate || 0;
-  const newRate = nanny.hourlyRate || 0;
-  const difference = round2((newRate - oldRate) * remainingHours);
 
   booking.nanny = nanny._id;
-  for (const d of remaining) {
-    d.nanny = nanny._id;
-    if (newRate !== oldRate) d.amount = round2(newRate * (d.hours || 0));
-  }
+  for (const d of remaining) d.nanny = nanny._id;
   booking.markModified('serviceDays');
 
-  if (difference > 0) {
-    booking.additionalDue = difference;
-    booking.status = BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT;
-    booking.subStatus = undefined;
-  } else {
-    booking.additionalDue = 0;
-    booking.hourlyRate = newRate;
-    booking.totalAmount = round2(
-      booking.completedDays().reduce((s, d) => s + (d.amount || 0), 0) +
-      remaining.reduce((s, d) => s + (d.amount || 0), 0)
-    );
-  }
+  booking.additionalDue = 0;
   await booking.save();
-  return { difference, requiresPayment: difference > 0 };
+  return { difference: 0, requiresPayment: false };
 }
 
 export default {

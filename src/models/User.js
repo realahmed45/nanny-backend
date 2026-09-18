@@ -283,6 +283,15 @@ const UserSchema = new mongoose.Schema({
   // Nannies the family saved after a booking, offered first when rebooking.
   favouriteNannies: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   nannyStatus: { type: String, enum: Object.values(NANNY_STATUS), default: NANNY_STATUS.PENDING_VERIFICATION, index: true },
+
+  /**
+   * When the automatic approval falls due, set at registration while the
+   * auto-verify switch is on. The sweep approves her once this passes.
+   *
+   * Stored rather than kept in a timer so a restart cannot strand a nanny
+   * in the queue forever: the next sweep still finds her.
+   */
+  autoVerifyAt: { type: Date, index: true },
   rejectionReason: String,
   backgroundCheckPassed: { type: Boolean, default: false },
   ratingAverage: { type: Number, default: 0 },

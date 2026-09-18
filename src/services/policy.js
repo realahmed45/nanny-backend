@@ -46,7 +46,18 @@ export function multiDaySplit(hoursBefore) {
 export function computeCancellationRefund(booking, opts = {}) {
   const at = opts.at ? new Date(opts.at) : new Date();
   const cancelledBy = opts.cancelledBy || CANCELLED_BY.FAMILY;
-  const isMultiDay = (booking.serviceDays || []).length > 1;
+  // Which table applies is decided by the days actually being cancelled, not
+  // by how long the booking originally was. Counting every day — completed and
+  // already-cancelled included — meant a two-day booking whose first day was
+  // finished still used the multi-day table for the one day left. At 40 hours'
+  // notice that is 0% instead of the 50% the single-day table gives, so the
+  // family lost half a day's price to a booking that was, by then, one day.
+  const affected = (booking.serviceDays || []).filter((d) => {
+    if (d.status === 'completed' || d.status === 'cancelled') return false;
+    if (opts.dayIds && !opts.dayIds.map(String).includes(String(d._id))) return false;
+    return true;
+  });
+  const isMultiDay = affected.length > 1;
 
   const perDay = [];
   let totalRefund = 0;

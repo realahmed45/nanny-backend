@@ -1,7 +1,10 @@
 import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import dayjs from 'dayjs';
-import { setupDb, teardownDb, clearDb, say, latestOtp, messagesTo, outbox, setEmailVerification } from './helpers.js';
+import {
+  setupDb, teardownDb, clearDb, say, latestOtp, messagesTo, outbox,
+  setEmailVerification, setConversationMode,
+} from './helpers.js';
 
 const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
@@ -1835,4 +1838,151 @@ test('turning it back on restores the email step', async () => {
   // No account until the code is confirmed.
   const { User } = await import('../src/models/index.js');
   assert.equal(await User.findOne({ phone }), null);
+});
+
+/* ------------------------------------------------------------------ *
+ * AI mode
+ *
+ * The question these answer is not "is the model any good" — it is whether
+ * the engine ever reaches it, which is what was broken twice. The provider is
+ * stubbed so the test is about the wiring and nothing else.
+ * ------------------------------------------------------------------ */
+
+/** Stand in for Groq, and record what the engine asked it. */
+function stubGroq() {
+  const realFetch = globalThis.fetch;
+  const calls = [];
+
+  process.env.GROQ_API_KEY = 'test-key';
+  globalThis.fetch = async (url, opts) => {
+    if (String(url).includes('groq.com')) {
+      const body = JSON.parse(opts.body);
+      // The extraction call asks for a couple of dozen tokens; the written
+      // reply asks for far more. That is the cleanest way to tell them apart.
+      const kind = body.max_tokens <= 24 ? 'extract' : 'converse';
+      calls.push(kind);
+      return new Response(JSON.stringify({
+        choices: [{
+          message: {
+            content: kind === 'extract' ? 'unclear' : 'AI ANSWERED THIS',
+          },
+        }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return realFetch(url, opts);
+  };
+
+  return {
+    calls,
+    async restore() {
+      globalThis.fetch = realFetch;
+      delete process.env.GROQ_API_KEY;
+      // The mode has to go back too. node --test runs every file in one
+      // process, so a mode left switched on here reaches tests in other files
+      // — which then take an AI path with no key and fail for reasons that
+      // have nothing to do with what they are testing.
+      await setConversationMode('structured');
+    },
+  };
+}
+
+/** Walk a nanny registration as far as the languages question. */
+async function toLanguages(phone) {
+  await say(phone, 'nanny');
+  await say(phone, '2');
+  await say(phone, 'Maria Test');
+  await say(phone, 'Maria');
+  await say(phone, '28');
+  await say(phone, '5');
+}
+
+test('with AI off, an off-script question just gets the question again', async () => {
+  await setEmailVerification(false);
+  const phone = '999500000100';
+  await toLanguages(phone);
+
+  const reply = await say(phone, 'what languages do most families want?');
+  assert.match(reply, /which languages can you speak/i);
+});
+
+test('with AI on, an off-script question gets an answer', async () => {
+  await setEmailVerification(false);
+  await setConversationMode('ai');
+  const groq = stubGroq();
+
+  try {
+    const phone = '999500000101';
+    await toLanguages(phone);
+
+    const reply = await say(phone, 'what languages do most families want?');
+
+    // A question that happens to list options is still a question. Excluding
+    // anything with numbered options is what stopped the AI being reached for
+    // most of the bot.
+    assert.match(reply, /AI ANSWERED THIS/);
+    assert.deepEqual(groq.calls, ['extract', 'converse']);
+  } finally {
+    await groq.restore();
+  }
+});
+
+test('the conversation stays exactly where it was while the AI talks', async () => {
+  await setEmailVerification(false);
+  await setConversationMode('ai');
+  const groq = stubGroq();
+
+  try {
+    const phone = '999500000102';
+    await toLanguages(phone);
+
+    const { Session } = await import('../src/models/index.js');
+    const before = (await Session.findOne({ phone }).lean())?.state;
+
+    await say(phone, 'sorry what was the question');
+    const after = (await Session.findOne({ phone }).lean())?.state;
+    assert.equal(after, before, 'the step must not move while chatting');
+
+    // And the normal answer still works straight afterwards.
+    const reply = await say(phone, '1,2');
+    assert.doesNotMatch(reply, /AI ANSWERED THIS/);
+    const moved = (await Session.findOne({ phone }).lean())?.state;
+    assert.notEqual(moved, before, 'a valid answer must still move the flow on');
+  } finally {
+    await groq.restore();
+  }
+});
+
+test('a valid answer never reaches the AI', async () => {
+  await setEmailVerification(false);
+  await setConversationMode('ai');
+  const groq = stubGroq();
+
+  try {
+    await toLanguages('999500000103');
+    // Every step of that registration was a valid answer, so the model should
+    // not have been asked anything at all.
+    assert.deepEqual(groq.calls, []);
+  } finally {
+    await groq.restore();
+  }
+});
+
+test('a mistyped option at the main menu redraws the menu rather than chatting', async () => {
+  await setEmailVerification(false);
+  await setConversationMode('ai');
+  const groq = stubGroq();
+
+  try {
+    const phone = '999500000104';
+    await say(phone, 'nanny');
+    await say(phone, '1');
+
+    const reply = await say(phone, '99');
+
+    // Showing the options again is the right answer to a wrong option number.
+    assert.match(reply, /what would you like to do/i);
+    assert.deepEqual(groq.calls, []);
+  } finally {
+    await groq.restore();
+  }
 });

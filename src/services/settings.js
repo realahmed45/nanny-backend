@@ -13,6 +13,11 @@ const TTL_MS = 30_000;
 /** Defaults used until an admin overrides them. */
 export const DEFAULTS = {
   voiceTranscription: true,
+  // When on, a nanny who finishes registration is verified there and then
+  // instead of waiting for someone to approve her by hand. Off by default:
+  // skipping the document check is a deliberate choice, not something to
+  // inherit silently.
+  autoVerifyNannies: null,
   // Set in the dashboard; see services/pricing.js for the shape.
   pricing: null,
   referralDiscount: null,

@@ -3,6 +3,7 @@ import dayjs from 'dayjs';
 import { Booking, User, Session } from '../models/index.js';
 import {
   BOOKING_STATUS, BOOKING_SUBSTATUS, SERVICE_DAY_STATUS, CANCELLED_BY,
+  USER_ROLE, NANNY_STATUS,
 } from '../utils/constants.js';
 import { syncBookingStatus, cancelBooking } from '../services/booking.js';
 import { computeCancellationRefund } from '../services/policy.js';
@@ -44,7 +45,13 @@ export async function processResponseTimeouts(now = new Date()) {
     if (isChange) {
       // The original booking survives; the family may now change nanny.
       booking.pendingChange = undefined;
-      booking.subStatus = BOOKING_SUBSTATUS.NANNY_CONFIRMED;
+      // Only claim a confirmed nanny if there still is one. She may have
+      // cancelled the booking outright while this change request was open,
+      // which clears `nanny` and moves the booking to awaiting-replacement.
+      // Overwriting that leaves a booking claiming a nanny it does not have:
+      // the family loses the replacement menu and the auto-cancel sweep
+      // stops seeing it, so it strands with no nanny and no refund.
+      if (booking.nanny) booking.subStatus = BOOKING_SUBSTATUS.NANNY_CONFIRMED;
       await booking.save();
     } else {
       if (nannyId && !booking.rejectedNannies.some((id) => String(id) === String(nannyId))) {
@@ -168,6 +175,21 @@ export async function processReplacementDeadlines(now = new Date()) {
         await refundBooking(booking, {
           amount: breakdown.totalRefund, breakdown,
           reason: 'No replacement selected',
+        });
+      }
+
+      // The nanny who worked the earlier days still has to be paid for them.
+      // Every other cancellation path queues this; only the sweep did not, so
+      // a nanny whose booking ended here was never paid for work she had
+      // already delivered. `booking.nanny` is cleared when she steps away, so
+      // the payout goes to the nanny the booking recorded as being replaced.
+      const owedTo = booking.replacementOfNanny;
+      if (breakdown.totalNannyCompensation > 0 && owedTo) {
+        await queuePayout(booking, {
+          nannyId: owedTo,
+          amount: breakdown.totalNannyCompensation,
+          isFinal: true,
+          notes: 'Compensation for completed days (no replacement selected)',
         });
       }
       await notifyUser(booking.family, `🔴 *Booking Cancelled – No Replacement Selected*
@@ -326,6 +348,72 @@ ${err.message}
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * Automatic nanny verification
+ * ------------------------------------------------------------------ */
+
+/**
+ * Approve nannies whose scheduled auto-verification has come due.
+ *
+ * Registration stamps `autoVerifyAt` while the switch is on and leaves her in
+ * the queue; this is what actually approves her. Doing it here rather than
+ * with a timer at registration means a restart cannot strand anyone — the next
+ * sweep still finds her.
+ *
+ * The switch is read on every pass, so turning it off stops approvals that
+ * were already scheduled but have not yet fallen due.
+ */
+export async function processAutoVerifications(now = new Date()) {
+  const { getSetting } = await import('../services/settings.js');
+  let enabled = false;
+  try {
+    enabled = (await getSetting('autoVerifyNannies'))?.enabled === true;
+  } catch {
+    return 0;
+  }
+  if (!enabled) return 0;
+
+  const due = await User.find({
+    role: USER_ROLE.NANNY,
+    nannyStatus: NANNY_STATUS.PENDING_VERIFICATION,
+    autoVerifyAt: { $ne: null, $lte: now },
+  });
+
+  let approved = 0;
+  for (const nanny of due) {
+    // Exactly what an admin approval does, so an auto-verified nanny is
+    // indistinguishable from a hand-checked one everywhere downstream.
+    nanny.nannyStatus = NANNY_STATUS.VERIFIED;
+    nanny.backgroundCheckPassed = true;
+    nanny.rejectionReason = undefined;
+    nanny.documents = (nanny.documents || []).map((d) => ({
+      ...(typeof d.toObject === 'function' ? d.toObject() : d),
+      verified: true,
+    }));
+    nanny.autoVerifyAt = undefined;
+    // eslint-disable-next-line no-await-in-loop
+    await nanny.save();
+
+    // Drop her onto the main menu so the message she gets lands somewhere she
+    // can act on, rather than in the holding state she was parked in.
+    // eslint-disable-next-line no-await-in-loop
+    const session = await Session.findOne({ phone: nanny.phone });
+    if (session && session.state === 'NANNY_PENDING_VERIFICATION') {
+      session.state = 'NANNY_MAIN_MENU';
+      session.data = {};
+      // eslint-disable-next-line no-await-in-loop
+      await session.save();
+    }
+
+    // eslint-disable-next-line no-await-in-loop
+    await notifyUser(nanny, `${M.NANNY_VERIFIED}\n\n${M.NANNY_MAIN_MENU}`).catch(() => {});
+    approved += 1;
+  }
+
+  if (approved) console.log('[verify] auto-approved', approved, 'nanny profile(s)');
+  return approved;
+}
+
 let tasks = [];
 
 export function startScheduler() {
@@ -334,6 +422,9 @@ export function startScheduler() {
   // Every minute: response timeouts and service day transitions.
   tasks.push(cron.schedule('* * * * *', () => guard('responseTimeouts', processResponseTimeouts)));
   tasks.push(cron.schedule('* * * * *', () => guard('serviceDays', processServiceDayTransitions)));
+  // Minute granularity is enough for a five-minute delay, and it keeps a
+  // restart from leaving anyone waiting longer than one extra minute.
+  tasks.push(cron.schedule('* * * * *', () => guard('autoVerify', processAutoVerifications)));
 
   // Every 15 minutes: replacement deadlines and reminders.
   tasks.push(cron.schedule('*/15 * * * *', () => guard('replacements', processReplacementDeadlines)));

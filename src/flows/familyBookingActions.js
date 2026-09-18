@@ -246,7 +246,7 @@ async function confirmReschedule(ctx, booking, changes) {
     changes.endDate = changes.startDate;
   }
 
-  const { serviceDays, totalAmount } = recalcServiceDays(booking, changes);
+  const { serviceDays, totalAmount } = await recalcServiceDays(booking, changes);
   const affected = serviceDays.filter((d) => d.status === SERVICE_DAY_STATUS.SCHEDULED);
   const penaltyInfo = computeReschedulePenalty(booking, booking.remainingDays().map((d) => d._id));
   const difference = round2(totalAmount - (booking.totalAmount || 0));
@@ -281,8 +281,12 @@ on('FB_RESCHEDULE_CONFIRM', async (ctx) => {
   }
 
   const pending = ctx.get('pendingReschedule') || {};
+  // The penalty and the "X of 3 free" count are both keyed off this, so it is
+  // incremented where the change actually takes effect (applyPendingChange),
+  // not here. Counting requests meant a nanny declining three times burned all
+  // three free reschedules and charged the family a penalty on the fourth —
+  // the first one that would have changed anything.
   booking.pendingChange = { kind: 'reschedule', ...pending };
-  booking.rescheduleCount = (booking.rescheduleCount || 0) + 1;
 
   // Spec: the assigned nanny gets 2 hours to accept an existing-booking change.
   if (booking.nanny) {
@@ -321,7 +325,8 @@ export async function applyPendingChange(booking) {
   if (!change) return booking;
 
   if (change.kind === 'reschedule') {
-    const { serviceDays, totalAmount, merged } = recalcServiceDays(booking, change);
+    const previousTotal = booking.totalAmount || 0;
+    const { serviceDays, totalAmount, merged } = await recalcServiceDays(booking, change);
     booking.serviceDays = serviceDays;
     booking.totalAmount = totalAmount;
     booking.startDate = merged.startDate;
@@ -330,6 +335,26 @@ export async function applyPendingChange(booking) {
     booking.hoursPerDay = merged.hoursPerDay;
     booking.repeatDays = merged.repeatDays;
     booking.markModified('serviceDays');
+
+    // The reschedule is real now, so it counts against the free allowance.
+    booking.rescheduleCount = (booking.rescheduleCount || 0) + 1;
+
+    // The confirmation screen quotes an additional payment, a refund and a
+    // penalty. None of them were ever applied: the total moved and nothing
+    // else did, so a family who doubled their hours was never billed for them
+    // and a family who shortened the booking never got their money back.
+    const penaltyInfo = computeReschedulePenalty(booking);
+    const difference = round2((totalAmount - previousTotal) + (penaltyInfo.penalty || 0));
+
+    if (difference > 0) {
+      booking.additionalDue = round2((booking.additionalDue || 0) + difference);
+      booking.status = BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT;
+    } else if (difference < 0) {
+      await refundBooking(booking, {
+        amount: Math.abs(difference),
+        reason: 'Reschedule reduced the booking',
+      });
+    }
   } else if (change.kind === 'address') {
     booking.address = change.address;
   } else if (change.kind === 'requirements') {

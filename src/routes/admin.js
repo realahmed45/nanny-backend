@@ -2984,6 +2984,9 @@ router.get('/settings', wrap(async (req, res) => {
     // Off unless switched on. Verifying an address nobody can receive mail at
     // stops every registration dead, so the safe default is to not ask.
     emailVerification: { enabled: runtime.emailVerification?.enabled === true },
+    // Same shape and the same safe default: a nanny is only skipped past the
+    // document check when someone has explicitly asked for that.
+    autoVerifyNannies: { enabled: runtime.autoVerifyNannies?.enabled === true },
     // Whether the key is even present, so the dashboard can say why the AI
     // option will do nothing rather than letting it be switched on in vain.
     aiConfigured: !!config.ai.key,
@@ -3008,6 +3011,7 @@ const RUNTIME_SETTINGS = new Set([
   'areas',
   'conversationMode',
   'emailVerification',
+  'autoVerifyNannies',
 ]);
 
 /**
@@ -3108,6 +3112,11 @@ function validateSetting(key, value) {
    * means losing all of them in the meantime.
    */
   if (key === 'emailVerification') {
+    return { enabled: value?.enabled === true || value === true };
+  }
+
+  // Same coercion: the dashboard may send either a bare boolean or {enabled}.
+  if (key === 'autoVerifyNannies') {
     return { enabled: value?.enabled === true || value === true };
   }
 

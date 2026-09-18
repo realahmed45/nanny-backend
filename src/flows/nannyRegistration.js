@@ -12,6 +12,15 @@ import { money } from '../utils/format.js';
 import { store } from '../services/mediaArchive.js';
 import * as M from '../utils/messages.js';
 
+/**
+ * How long an automatically-approved nanny waits before she goes live.
+ *
+ * Not zero on purpose. An instant approval tells her nobody looked, and it
+ * leaves no window to pull an obviously bad profile before families can see
+ * it. Five minutes reads as a real review and still feels immediate.
+ */
+const AUTO_VERIFY_DELAY_MS = 5 * 60 * 1000;
+
 /* ------------------------------------------------------------------ *
  * Account creation
  * ------------------------------------------------------------------ */
@@ -194,7 +203,16 @@ on('NR_CPR', cprHandler);
 /** Document upload steps all share the same shape. */
 function docStep(state, type, nextPrompt, nextState) {
   const handler = async (ctx) => {
-    if (!ctx.mediaUrl) return `📎 Please attach the document as an image or file.`;
+    // She may not have the document to hand, or the upload may not be getting
+    // through. Without a way past this step her only exit resets the session
+    // and loses everything she has typed so far. A missing document is chased
+    // at verification; a lost registration is not recoverable.
+    if (ctx.command === 'SKIP' || ctx.command === 'NONE' || DONE_WORDS.test(String(ctx.text || '').trim())) {
+      return { text: nextPrompt, state: nextState };
+    }
+    if (!ctx.mediaUrl) {
+      return `📎 Please attach the document as an image or file.\n\nIf you do not have it right now, reply *skip* and we will ask for it later.`;
+    }
     // Archived like everything else: an ID or certificate is the evidence a
     // nanny was verified, and losing it means the check never happened.
     const url = await store(ctx.mediaUrl, { mediaType: ctx.mediaType });
@@ -229,7 +247,19 @@ mapHandler.prompt = () => M.NANNY_ASK_MAP;
 on('NR_MAP', mapHandler);
 
 const photoHandler = async (ctx) => {
-  if (!ctx.mediaUrl) return `📎 Please attach your profile photo.`;
+  // The photo matters — it is what families see first — but it cannot be the
+  // thing that ends a registration. An upload that will not go through used to
+  // leave her with no way out except a reset that discarded everything she had
+  // already typed. She can add it later from her profile.
+  if (ctx.command === 'SKIP' || ctx.command === 'NONE' || DONE_WORDS.test(String(ctx.text || '').trim())) {
+    return [
+      { text: '👍 No problem — you can add your photo later from *My Profile*.' },
+      { text: M.NANNY_ASK_VIDEO, state: 'NR_VIDEO' },
+    ];
+  }
+  if (!ctx.mediaUrl) {
+    return `📎 Please attach your profile photo.\n\nIf you cannot send it now, reply *skip* and add it later from your profile.`;
+  }
   ctx.set('profilePhotoUrl', await store(ctx.mediaUrl, { mediaType: ctx.mediaType }));
   return { text: M.NANNY_ASK_VIDEO, state: 'NR_VIDEO' };
 };
@@ -385,9 +415,38 @@ const availHoursHandler = async (ctx) => {
     maxHoursPerDay: DURATION_OPTIONS[choice - 1],
     blockedDates: [],
   };
-  user.nannyStatus = NANNY_STATUS.PENDING_VERIFICATION;
   user.registrationComplete = true;
+
+  // With auto-verify on, a finished profile is approved on the spot rather
+  // than queued for someone to review. It is a deliberate operator choice —
+  // it skips the document check — so it is read fresh here rather than
+  // assumed, and a failed lookup falls back to the manual queue.
+  let autoVerify = false;
+  try {
+    const { getSetting } = await import('../services/settings.js');
+    autoVerify = (await getSetting('autoVerifyNannies'))?.enabled === true;
+  } catch {
+    autoVerify = false;
+  }
+
+  // She waits in the queue either way. With auto-verify on, the approval is
+  // scheduled rather than immediate: instant approval reads as nobody having
+  // looked, and the short wait leaves room to catch an obviously bad profile
+  // before it goes live.
+  user.nannyStatus = NANNY_STATUS.PENDING_VERIFICATION;
+  user.autoVerifyAt = autoVerify
+    ? new Date(Date.now() + AUTO_VERIFY_DELAY_MS)
+    : undefined;
   await user.save();
+
+  if (autoVerify) {
+    return {
+      text: M.NANNY_PROFILE_SUBMITTED_AUTO,
+      state: 'NANNY_PENDING_VERIFICATION',
+      resetData: true,
+      clearStack: true,
+    };
+  }
 
   return {
     text: M.NANNY_PROFILE_SUBMITTED,

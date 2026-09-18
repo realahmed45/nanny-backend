@@ -308,7 +308,11 @@ const awaitProofHandler = async (ctx) => {
     proof: { url: ctx.mediaUrl, mediaId: ctx.mediaId, note: clean(ctx.text) },
   });
 
-  booking.status = BOOKING_STATUS.PENDING_PAYMENT;
+  // A top-up must stay in PENDING_ADDITIONAL_PAYMENT. Stomping it to
+  // PENDING_PAYMENT took the booking out of the branch that offers "Pay Now",
+  // so a family whose proof was later rejected had money still owed and no way
+  // left in the menu to pay it.
+  if (!isAdditional) booking.status = BOOKING_STATUS.PENDING_PAYMENT;
   await booking.save();
 
   return [

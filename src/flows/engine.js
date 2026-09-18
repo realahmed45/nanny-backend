@@ -368,7 +368,12 @@ async function retryWithAi(ctx, handler, prompt) {
     // keeps the model answering in the vocabulary the handler expects.
     const options = [...question.matchAll(/^\s*\d+\.\s*(.+)$/gm)].map((m) => m[1].trim());
 
-    const expect = options.length ? 'choice'
+    // A question inviting several answers needs several back. Asking for one
+    // number turns "I can cook and look after newborns" into a single skill,
+    // silently dropping the other — worse than not understanding at all.
+    const multi = /select multiple|separated by commas|e\.g\. 1 2 3|choose all/i.test(question);
+
+    const expect = options.length ? (multi ? 'multi' : 'choice')
       : /what time|time does/i.test(question) ? 'time'
         : /date|when would|which day/i.test(question) ? 'date'
           : 'text';
@@ -407,7 +412,12 @@ async function retryWithAi(ctx, handler, prompt) {
     if (!reply) return null;
 
     console.log(`[ai] answered "${said.slice(0, 40)}" conversationally in ${ctx.session.state}`);
-    return [{ text: reply }];
+    // Already in the bot's voice; rewriting it again would only blur it.
+    ctx.aiAnswered = true;
+    // converse() returns the separate WhatsApp messages the reply should
+    // arrive as, so each becomes its own node rather than one wall of text.
+    const bodies = Array.isArray(reply) ? reply : [reply];
+    return bodies.map((text) => ({ text }));
   } catch (err) {
     console.error(`[ai] retry failed: ${err.message}`);
     return null;
@@ -572,10 +582,109 @@ export async function handleMessage({ phone: rawPhone, text = '', mediaUrl, medi
     };
   }
 
-  const outbound = await applyResult(session, result, ctx);
+  let outbound = await applyResult(session, result, ctx);
+
+  // In AI mode the next question is put in the bot's own words too, not just
+  // the error case. Without this the bot answers warmly when someone goes off
+  // script and then snaps back to a numbered list for the very next step,
+  // which is more jarring than being consistently mechanical.
+  outbound = await rephraseOutbound(outbound, ctx, text);
+
   rememberTurn(session, text, outbound);
   await session.save();
   return outbound;
+}
+
+/**
+ * Is this message safe to put in the bot's own words?
+ *
+ * Only free-text questions are. Everything else is left exactly as written,
+ * for reasons that are each a bug waiting to happen:
+ *
+ *   - A message listing options is how somebody knows what to type. The model
+ *     drops the "⭐" off a rating scale or renumbers a list, and the answer it
+ *     invites no longer matches what the handler accepts — the conversation
+ *     dead-ends and there is no way for her to tell why.
+ *   - Money, bank details and booking numbers must arrive digit for digit. A
+ *     rewritten total is not a wording problem.
+ *   - Confirmations, menus and anything with formatting are structure, not
+ *     conversation.
+ *
+ * That leaves the plain questions — "What's your age?", "Where do you need
+ * childcare?" — which is where a form feels most like a form, and where
+ * nothing downstream depends on the exact wording.
+ */
+function safeToRephrase(text) {
+  // Options, ratings, or any numbered or bulleted list.
+  if (/^\s*[\d\u2b50\u25cf\u2022-]/m.test(text)) return false;
+  if (/\b\d+\s*[.)\u2013-]\s/.test(text)) return false;
+
+  // Money, banking, references.
+  if (/\bRp\s?[\d.,]|total|bank|account|transfer|booking\s*#|\bIDR\b/i.test(text)) return false;
+
+  // Commands and formatting are instructions, not prose.
+  if (/\*[A-Z]{2,}\*|type \*|reply \*/i.test(text)) return false;
+
+  // Long messages are summaries and notices, not questions.
+  if (text.length > 220) return false;
+
+  // Finally: it has to actually be a question.
+  return text.includes('?');
+}
+
+/**
+ * Say the bot's outgoing question in its own voice.
+ *
+ * Only the last message is rewritten. A step often sends two or three — a
+ * confirmation, then a note, then the question — and rewriting all of them
+ * would turn three short messages into three paragraphs. The question is the
+ * one that reads like a form.
+ *
+ * Every failure path returns the messages untouched, so a slow or unhappy
+ * model costs nothing but the original wording.
+ */
+async function rephraseOutbound(outbound, ctx, said) {
+  if (!Array.isArray(outbound) || !outbound.length) return outbound;
+  if (ctx.mediaUrl) return outbound;
+
+  try {
+    const { getSettings } = await import('../services/settings.js');
+    const settings = await getSettings();
+    if (settings.conversationMode?.mode !== 'ai') return outbound;
+
+    const { rephrase, isConfigured } = await import('../services/aiConversation.js');
+    if (!isConfigured()) return outbound;
+
+    const last = String(outbound.at(-1) || '');
+    if (!last.trim()) return outbound;
+
+    // Already conversational: this is the AI's own reply coming back through.
+    if (ctx.aiAnswered) return outbound;
+
+    if (!safeToRephrase(last)) return outbound;
+
+    const better = await rephrase({
+      question: last,
+      options: [],
+      role: ctx.session.role === 'nanny' ? 'nanny' : 'customer',
+      history: recentTurns(ctx),
+      justSaid: said,
+    });
+
+    if (!better) return outbound;
+
+    // rephrase() hands back the separate messages the question should arrive
+    // as, so the single body it replaces is spliced out and they take its
+    // place — assigning the array into the slot would put "[object Array]"
+    // on the wire.
+    const parts = Array.isArray(better) ? better : [better];
+    const copy = [...outbound];
+    copy.splice(copy.length - 1, 1, ...parts);
+    return copy;
+  } catch (err) {
+    console.error(`[ai] rephrase failed: ${err.message}`);
+    return outbound;
+  }
 }
 
 /**

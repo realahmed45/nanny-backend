@@ -84,7 +84,19 @@ async function ask({ system, user, maxTokens, timeout, temperature }) {
     }
 
     const data = await res.json();
-    return String(data.choices?.[0]?.message?.content || '').trim() || null;
+    const choice = data.choices?.[0];
+    const content = String(choice?.message?.content || '').trim();
+    if (!content) return null;
+
+    // Stopped because it ran out of room, not because it had finished. The
+    // reply is a sentence cut in half — usually losing the question at the end
+    // of it, which is the one part that has to be there.
+    if (choice.finish_reason === 'length') {
+      console.error('[ai] reply hit the token limit and was cut off; using the original wording');
+      return null;
+    }
+
+    return content;
   } catch (err) {
     if (err.name !== 'TimeoutError') console.error(`[ai] call failed: ${err.message}`);
     return null;
@@ -136,11 +148,13 @@ export async function extract({ message, question, expect, options = [], today }
   const user = `Question asked: ${question}${optionList}\n\nTheir reply: "${text}"\n\n${shape}`;
 
   const answer = await ask({
-    system, user, maxTokens: 24, timeout: EXTRACT_TIMEOUT_MS, temperature: 0,
+    system, user, maxTokens: 300, timeout: EXTRACT_TIMEOUT_MS, temperature: 0,
   });
 
   if (!answer || /^unclear$/i.test(answer)) return null;
-  // A model that starts explaining itself has not answered.
+  // A model that starts explaining itself has not answered. The budget is
+  // large because this model reasons before replying; the answer it settles on
+  // still has to be a few characters.
   if (answer.length > 40 || /\s{2,}|\n/.test(answer)) return null;
 
   return answer.replace(/^["'`]|["'`.]$/g, '').trim();
@@ -149,16 +163,6 @@ export async function extract({ message, question, expect, options = [], today }
 /* ------------------------------------------------------------------ *
  * Replying like a person
  * ------------------------------------------------------------------ */
-
-/** What the bot may say about the business, so it cannot invent terms. */
-const FACTS = [
-  'We are Nanny in Paradise, a nanny booking service in Bali, Indonesia.',
-  'Families book nannies through WhatsApp. Prices are in Indonesian Rupiah.',
-  'Every nanny is interviewed, ID-checked and verified by our team before she appears.',
-  'Bookings can be for one day or many, and there is an emergency option for urgent care.',
-  'Payment is by bank transfer and confirmed by our team.',
-  'A family and a nanny never exchange phone numbers; messages are passed through us.',
-].join(' ');
 
 /**
  * Answer what they actually said, then ask the question again.
@@ -192,20 +196,28 @@ export async function converse({
     .join('\n');
 
   const system = [
-    'You are the assistant for Nanny in Paradise, replying on WhatsApp.',
+    VOICE,
     `You are talking to a ${role === 'nanny' ? 'nanny who works with us' : 'family looking for childcare'}.`,
     '',
     'FACTS YOU MAY USE:',
     FACTS,
     '',
-    'RULES:',
-    '1. Reply to what they actually said, warmly and briefly. Two or three sentences at most.',
-    '2. Then ask the current question again, in your own words, so the booking can carry on.',
-    '3. NEVER invent prices, nanny names, dates, availability or promises.',
-    '   If you do not know, say our team will confirm it.',
-    '4. If they ask something you cannot answer, say so plainly and offer to have someone call them.',
-    '5. No markdown, no bullet points, no emoji spam. Plain WhatsApp text.',
-    '6. Never ask them to email or phone anyone. Everything happens here.',
+    'YOUR TASK:',
+    '1. Reply to what they actually said, warmly and briefly.',
+    '2. Then ask the current question again, in your own words, so the booking',
+    '   can carry on. A friendly reply that forgets to ask is a dead end.',
+    '3. If they asked something you cannot answer, say so plainly and offer to',
+    '   have someone from the team call them.',
+    '4. If the question has options, include them exactly as numbered.',
+    '',
+    'SHAPE OF YOUR REPLY:',
+    'Send the answer and the question as separate messages, split by a --- line.',
+    'Two messages is usually right. Three at most.',
+    '',
+    'Example of the shape (not the words):',
+    'Yes, every nanny is interviewed and ID-checked before she appears. 😊',
+    '---',
+    'So which languages would you like her to speak?',
   ].join('\n');
 
   const user = [
@@ -220,7 +232,10 @@ export async function converse({
   const reply = await ask({
     system,
     user,
-    maxTokens: 220,
+    // Generous on purpose: this model thinks before it writes, and the
+    // reasoning comes out of the same budget. Too tight and every reply
+    // ends mid-sentence.
+    maxTokens: 700,
     timeout: CHAT_TIMEOUT_MS,
     // A little warmth, but not enough to start improvising facts.
     temperature: 0.4,
@@ -232,7 +247,198 @@ export async function converse({
   // prompt is better than a wall of text.
   if (reply.length > 700) return null;
 
-  return reply;
+  // Arrives as one string with --- between the parts; the caller wants the
+  // separate WhatsApp messages it is meant to become.
+  const parts = splitForWhatsApp(reply);
+  return parts.length ? parts : null;
 }
 
-export default { extract, converse, isConfigured };
+/* ------------------------------------------------------------------ *
+ * Saying the next question in its own words
+ * ------------------------------------------------------------------ */
+
+/**
+ * The bot's voice, used by everything that writes a sentence.
+ *
+ * Kept in one place so warmth does not drift between the two paths — answering
+ * a question and asking the next one — and so the rules about not inventing
+ * anything are stated once.
+ */
+const VOICE = [
+  'You are the assistant for Nanny in Paradise, a nanny booking service in Bali.',
+  'You speak on WhatsApp: warm, brief, and human. Never robotic.',
+  '',
+  'HOW YOU WRITE ON WHATSAPP:',
+  '- Short messages. One thought per message, the way a person texts.',
+  '- A long paragraph is wrong here. Break it into separate messages instead.',
+  '- Separate messages with a line containing only ---',
+  '- Never more than 3 messages. Keep each under 250 characters.',
+  '- Answer first. The question you need answered goes last, in its own message.',
+  '',
+  'FORMATTING (WhatsApp, not markdown):',
+  '- *bold* is single asterisks. Use it for the one thing that matters most.',
+  '- _italic_ is single underscores. Use it rarely.',
+  '- Never use **double asterisks**, # headings, or - dashes as bullets.',
+  '- In a list, put each item on its own line. Numbered options stay numbered.',
+  '- Leave a blank line between a sentence and a list so both are easy to read.',
+  '- One or two emoji per message, only where they help. Never a row of them.',
+  '',
+  'NEVER:',
+  '- Invent prices, nanny names, dates, availability or promises.',
+  '- Ask anyone to email or phone. Everything happens in this chat.',
+  '- Repeat a question word for word if you have just asked it.',
+].join('\n');
+
+/* ------------------------------------------------------------------ *
+ * Turning one AI reply into WhatsApp-shaped messages
+ * ------------------------------------------------------------------ */
+
+/**
+ * Tidy the formatting a model reaches for out of habit.
+ *
+ * It is trained on markdown, so it writes **bold** and "- item" no matter what
+ * the prompt says. WhatsApp renders neither: the asterisks show up as
+ * asterisks. Rather than hope the instruction sticks, translate the output.
+ */
+function toWhatsAppMarkup(text) {
+  return String(text || '')
+    // **bold** and __bold__ are markdown; WhatsApp bold is a single asterisk.
+    .replace(/\*\*(.+?)\*\*/g, '*$1*')
+    .replace(/__(.+?)__/g, '*$1*')
+    // Headings have no meaning here; keep the words, drop the hashes.
+    .replace(/^#{1,6}\s*/gm, '')
+    // Bullets written as - or * become a middle dot, which survives WhatsApp
+    // intact and does not collide with its bold syntax.
+    .replace(/^[ \t]*[-*][ \t]+/gm, '\u00b7 ')
+    // Three or more blank lines is always a formatting accident.
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * Split one reply into the separate WhatsApp messages it should arrive as.
+ *
+ * The model is asked to mark the breaks with a --- line. When it does, honour
+ * that. When it does not — and it often does not — fall back to paragraph
+ * breaks, so a wall of text still arrives as something readable.
+ *
+ * Capped at MAX_BUBBLES: a phone buzzing six times for one answer is worse
+ * than one slightly long message.
+ */
+const MAX_BUBBLES = 3;
+const MAX_BUBBLE_CHARS = 400;
+
+export function splitForWhatsApp(reply) {
+  const clean = toWhatsAppMarkup(reply);
+  if (!clean) return [];
+
+  let parts = clean.includes('---')
+    ? clean.split(/^\s*-{3,}\s*$/m)
+    : clean.split(/\n{2,}/);
+
+  parts = parts.map((p) => p.trim()).filter(Boolean);
+  if (!parts.length) return [];
+
+  // Anything past the cap is folded back into the last message rather than
+  // dropped, so no part of the answer is silently lost.
+  if (parts.length > MAX_BUBBLES) {
+    const keep = parts.slice(0, MAX_BUBBLES - 1);
+    keep.push(parts.slice(MAX_BUBBLES - 1).join('\n\n'));
+    parts = keep;
+  }
+
+  // A "short message" that runs to a screenful defeats the point, but cutting
+  // mid-sentence is worse than leaving it long, so this only rejoins.
+  return parts.map((p) => (p.length > MAX_BUBBLE_CHARS ? p : p));
+}
+
+/** What the bot may say about the business, so it cannot invent terms. */
+const FACTS = [
+  'We are Nanny in Paradise, a nanny booking service in Bali, Indonesia.',
+  'Families book nannies through WhatsApp. Prices are in Indonesian Rupiah.',
+  'Every nanny is interviewed, ID-checked and verified by our team before she appears.',
+  'Bookings can be for one day or many, and there is an emergency option for urgent care.',
+  'Payment is by bank transfer and confirmed by our team.',
+  'A family and a nanny never exchange phone numbers; messages are passed through us.',
+].join(' ');
+
+/**
+ * Put the next question in the bot's own words.
+ *
+ * This is what makes AI mode a conversation rather than a form with a helpful
+ * error message. Without it the bot answers warmly when someone goes off
+ * script, then snaps straight back to a numbered list for the next step —
+ * which is more jarring than being consistently mechanical.
+ *
+ * The options are kept, and kept numbered. They are how she answers, and
+ * hiding them to sound casual would leave her guessing what to type. What
+ * changes is everything around them.
+ *
+ * Returns null on any doubt, and null means the original prompt is sent
+ * unchanged — so a bad rewrite is never worse than no rewrite.
+ */
+export async function rephrase({ question, options = [], role = 'customer', history = [], justSaid }) {
+  const text = String(question || '').trim();
+  if (!text || text.length > 900) return null;
+
+  // Nothing to gain from rewriting a bare confirmation or a one-word prompt.
+  if (text.length < 25) return null;
+
+  const optionList = options.length
+    ? `\n\nThese are the options, and they must appear in your reply exactly as numbered:\n${
+      options.map((o, i) => `${i + 1}. ${o}`).join('\n')}`
+    : '';
+
+  const recent = history.slice(-4)
+    .map((h) => `${h.from === 'user' ? 'Them' : 'You'}: ${h.text}`)
+    .join('\n');
+
+  const system = [
+    VOICE,
+    '',
+    'FACTS YOU MAY USE:',
+    FACTS,
+    '',
+    'YOUR TASK:',
+    'You are given the next question the booking needs answered, written in a',
+    'plain, form-like way. Rewrite it so it sounds like you asking, not a form.',
+    'Keep the exact meaning. Keep every option, numbered exactly as given.',
+    'Do not answer it yourself. Do not add questions of your own.',
+  ].join('\n');
+
+  const user = [
+    recent ? `Recent conversation:\n${recent}\n` : '',
+    justSaid ? `They just told you: "${String(justSaid).slice(0, 200)}"\n` : '',
+    `The question to ask, as written by the system:\n"""\n${text}\n"""${optionList}`,
+    '',
+    justSaid
+      ? 'Acknowledge briefly what they just said, then ask the question in your own words.'
+      : 'Ask the question in your own words.',
+  ].join('\n');
+
+  const reply = await ask({
+    system, user, maxTokens: 700, timeout: CHAT_TIMEOUT_MS, temperature: 0.4,
+  });
+
+  if (!reply) return null;
+  if (reply.length > 900) return null;
+
+  // If the question had options, they must have survived. A rewrite that
+  // dropped them leaves her with no idea what to type.
+  if (options.length) {
+    const kept = options.filter((_, i) => reply.includes(String(i + 1))).length;
+    if (kept < options.length) return null;
+  }
+
+  const parts = splitForWhatsApp(reply);
+  if (!parts.length) return null;
+
+  // A numbered list split across two messages is unusable — she sees "1. Yes"
+  // arrive without the question that gave it meaning. So when the question
+  // carries options, it stays whole however the model chose to break it up.
+  if (options.length) return [parts.join('\n\n')];
+
+  return parts;
+}
+
+export default { extract, converse, rephrase, isConfigured };

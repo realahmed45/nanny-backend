@@ -268,7 +268,13 @@ on('NANNY_DECLINE_REASON', async (ctx) => {
   if (isChange) {
     // Spec: the original booking stands; the family may now pick someone else.
     booking.pendingChange = undefined;
-    booking.subStatus = BOOKING_SUBSTATUS.NANNY_CONFIRMED;
+    // Only claim a confirmed nanny if there still is one. She may have
+    // cancelled the booking outright while this change request was open,
+    // which clears `nanny` and moves the booking to awaiting-replacement.
+    // Overwriting that leaves a booking claiming a nanny it does not have:
+    // the family loses the replacement menu and the auto-cancel sweep
+    // stops seeing it, so it strands with no nanny and no refund.
+    if (booking.nanny) booking.subStatus = BOOKING_SUBSTATUS.NANNY_CONFIRMED;
     await booking.save();
   } else {
     if (nannyId && !booking.rejectedNannies.some((id) => String(id) === String(nannyId))) {

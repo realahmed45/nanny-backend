@@ -147,6 +147,22 @@ const addressHandler = async (ctx) => {
 addressHandler.prompt = () => M.ASK_ADDRESS;
 on('FF_ADDRESS', addressHandler);
 
+/**
+ * Where the conversation goes once an address has been captured.
+ *
+ * Normally on to the schedule questions. But an emergency booking that came
+ * back here only to correct its address has already answered all of those, so
+ * it rejoins its own flow instead of starting the schedule again.
+ */
+function afterAddressCaptured(ctx) {
+  if (ctx.get('fixingEmergencyAddress')) {
+    ctx.set('fixingEmergencyAddress', false);
+    const steps = afterStartDate(ctx);
+    return Array.isArray(steps) ? steps : [steps];
+  }
+  return { text: M.ASK_FREQUENCY, state: 'FF_FREQUENCY' };
+}
+
 const saveAddressHandler = async (ctx) => {
   const yes = parseYesNo(ctx.text);
   if (yes === null) return M.ASK_SAVE_ADDRESS;
@@ -155,7 +171,7 @@ const saveAddressHandler = async (ctx) => {
     ctx.set('address', {
       mapUrl: ctx.get('mapUrl'), addressLine: ctx.get('addressLine'),
     });
-    return { text: M.ASK_FREQUENCY, state: 'FF_FREQUENCY' };
+    return afterAddressCaptured(ctx);
   }
   return { text: M.ASK_ADDRESS_LABEL, state: 'FF_ADDRESS_LABEL' };
 };
@@ -176,10 +192,8 @@ const addressLabelHandler = async (ctx) => {
     await user.save();
   }
   ctx.set('address', address);
-  return [
-    { text: M.ADDRESS_SAVED },
-    { text: M.ASK_FREQUENCY, state: 'FF_FREQUENCY' },
-  ];
+  const next = afterAddressCaptured(ctx);
+  return [{ text: M.ADDRESS_SAVED }, ...(Array.isArray(next) ? next : [next])];
 };
 addressLabelHandler.prompt = () => M.ASK_ADDRESS_LABEL;
 on('FF_ADDRESS_LABEL', addressLabelHandler);
@@ -411,11 +425,51 @@ const emergencyLocationHandler = async (ctx) => {
   }
 
   // Changing it re-uses the ordinary location questions, which already know
-  // how to save an address and label it.
+  // how to save an address and label it. The flag marks this as a detour: the
+  // ordinary path continues into "how often do you need a nanny?", which would
+  // re-ask the frequency and start date she has already given — and answering
+  // the emergency question a second time silently drops the emergency flag and
+  // its surcharge from a request that already has a callback promised.
+  ctx.set('fixingEmergencyAddress', true);
   return { text: M.ASK_LOCATION, state: 'FF_LOCATION' };
 };
 emergencyLocationHandler.prompt = (ctx) => M.confirmEmergencyLocation(emergencyAddressLine(ctx));
 on('FF_EMERGENCY_LOCATION', emergencyLocationHandler);
+
+/**
+ * The step that follows the end date.
+ *
+ * A booking that starts and ends on the same day cannot repeat, so asking
+ * which weekdays it repeats on is a question with exactly one sensible answer
+ * — and a wrong answer builds a booking with no service days at all. For a
+ * single day we fill the repeat day in from the date itself and go straight on
+ * to the time.
+ */
+function afterEndDate(ctx, confirmations) {
+  const startDate = ctx.get('startDate');
+  const endDate = ctx.get('endDate');
+  const singleDay = startDate && endDate && startDate === endDate;
+
+  if (!singleDay) {
+    return [...confirmations, { text: M.ASK_REPEAT_DAYS, state: 'FF_REPEAT_DAYS' }];
+  }
+
+  // repeatDays is a list of weekday NAMES everywhere else in the flow —
+  // parseWeekdays returns them from the WEEKDAYS table, and buildServiceDays
+  // matches on them — so derive the name rather than a number.
+  ctx.set('repeatDays', [dayjs(startDate).format('dddd')]);
+
+  return [
+    ...confirmations,
+    {
+      text: M.importantFamilyInfo({
+        isEmergency: ctx.get('isEmergency'),
+        surcharge: ctx.get('emergencySurcharge'),
+      }),
+    },
+    { text: M.ASK_START_TIME, state: 'FF_START_TIME' },
+  ];
+}
 
 const endDateHandler = async (ctx) => {
   const emergency = ctx.get('isEmergency');
@@ -428,10 +482,7 @@ const endDateHandler = async (ctx) => {
   // have already promised them.
   if (emergency && (parseChoice(said, 2) === 2 || /^(unknown|dont know|don't know|not sure|no idea)$/.test(said))) {
     ctx.merge({ endDate: ctx.get('startDate'), endDateUnknown: true });
-    return [
-      { text: M.END_DATE_UNKNOWN_CONFIRMED },
-      { text: M.ASK_REPEAT_DAYS, state: 'FF_REPEAT_DAYS' },
-    ];
+    return afterEndDate(ctx, [{ text: M.END_DATE_UNKNOWN_CONFIRMED }]);
   }
   // Option 1 is "I will type it", so ask rather than treat it as a date.
   if (emergency && parseChoice(said, 2) === 1 && said.length <= 2) {
@@ -452,10 +503,7 @@ const endDateHandler = async (ctx) => {
     return `A booking can run for up to ${config.booking.maxDurationMonths} months, so the latest end date is *${maxEnd.format('D MMMM YYYY')}*.\n\nPlease choose an earlier date.`;
   }
   ctx.set('endDate', date);
-  return [
-    { text: M.endDateConfirmed(date) },
-    { text: M.ASK_REPEAT_DAYS, state: 'FF_REPEAT_DAYS' },
-  ];
+  return afterEndDate(ctx, [{ text: M.endDateConfirmed(date) }]);
 };
 endDateHandler.prompt = (ctx) => (ctx.get('isEmergency')
   ? M.ASK_END_DATE_EMERGENCY
@@ -957,6 +1005,12 @@ const editMenuHandler = async (ctx) => {
   // "Repeat on" only applies to multi-day bookings.
   if (choice === 3 && !ctx.get('isMultiDay')) {
     return `This is a single-day booking, so there are no repeat days.\n\n${M.EDIT_MENU}`;
+  }
+  // Subjects only exist for a tutoring booking. Without this the family is
+  // asked which subjects to teach for a booking that has no tutoring, the
+  // answer goes nowhere, and re-editing skills wipes it again.
+  if (choice === 7 && !(ctx.get('skills') || []).includes('Tutoring')) {
+    return `This booking does not include tutoring, so there are no subjects to set.\n\n${M.EDIT_MENU}`;
   }
   return routes[choice];
 };
