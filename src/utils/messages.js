@@ -752,10 +752,17 @@ export function nannyProfile(n, { hourlyRate = null } = {}) {
 
   // Only what was picked for the profile. A nanny sends whatever she likes
   // over months; the family sees the selection, not the archive.
+  // Named, not linked. The files themselves follow as real WhatsApp media,
+  // so a family sees the photo or plays the video in the chat instead of
+  // being handed a URL to open in a browser.
   const media = featuredMedia(n);
   if (media.length) {
-    lines.push('', '*📸 Photos & Videos*');
-    media.forEach((m, i) => lines.push(`${i + 1}. ${m.caption || m.title || (m.kind === 'video' ? 'Video' : 'Photo')}\n   ${m.url}`));
+    const videos = media.filter((m) => m.kind === 'video').length;
+    const photos = media.length - videos;
+    const parts = [];
+    if (photos) parts.push(`${photos} photo${photos > 1 ? 's' : ''}`);
+    if (videos) parts.push(`${videos} video${videos > 1 ? 's' : ''}`);
+    lines.push('', `*📸 ${parts.join(' and ')}* below.`);
   }
   return lines.join('\n');
 }

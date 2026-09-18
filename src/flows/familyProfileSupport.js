@@ -89,6 +89,7 @@ const favouritesHandler = async (ctx) => {
   ctx.set('selectedNannyId', String(nanny._id));
   return {
     text: `${M.nannyProfile(nanny)}\n\n1. Book this nanny\n2. Remove from favourites\n\nType *Back* to go back.`,
+    media: M.featuredMedia(nanny),
     state: 'FP_FAVOURITE_ACTIONS',
   };
 };

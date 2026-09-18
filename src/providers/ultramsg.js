@@ -89,13 +89,48 @@ export async function sendText(to, body, meta = {}) {
   return results;
 }
 
+/**
+ * Turn a stored media path into something WhatsApp can actually fetch.
+ *
+ * Media is archived under a relative path so the dashboard keeps working
+ * whatever host it is served from. UltraMsg cannot use that: it downloads the
+ * file from our server, so it needs an absolute public URL. Anything already
+ * absolute is passed straight through.
+ *
+ * Returns null when there is no usable public address, so the caller can skip
+ * the send rather than hand the provider a localhost link it will never reach.
+ */
+export function publicMediaUrl(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) return raw;
+
+  const base = String(config.publicBaseUrl || '').replace(/\/+$/, '');
+  if (!base || /localhost|127\.0\.0\.1/i.test(base)) return null;
+
+  return `${base}/${raw.replace(/^\/+/, '')}`;
+}
+
 export async function sendImage(to, imageUrl, caption = '') {
   const phone = normalizePhone(to);
+  const url = publicMediaUrl(imageUrl);
+  if (!url) throw new Error(`no public URL for image ${imageUrl} (set PUBLIC_BASE_URL)`);
   if (dry()) {
-    outbox.push({ to: phone, image: imageUrl, body: caption, at: new Date() });
+    outbox.push({ to: phone, image: url, body: caption, at: new Date() });
     return { dry: true };
   }
-  return post('messages/image', { to: phone, image: imageUrl, caption });
+  return post('messages/image', { to: phone, image: url, caption });
+}
+
+export async function sendVideo(to, videoUrl, caption = '') {
+  const phone = normalizePhone(to);
+  const url = publicMediaUrl(videoUrl);
+  if (!url) throw new Error(`no public URL for video ${videoUrl} (set PUBLIC_BASE_URL)`);
+  if (dry()) {
+    outbox.push({ to: phone, video: url, body: caption, at: new Date() });
+    return { dry: true };
+  }
+  return post('messages/video', { to: phone, video: url, caption });
 }
 
 export async function sendDocument(to, documentUrl, filename = 'document.pdf', caption = '') {

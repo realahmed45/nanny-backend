@@ -927,7 +927,10 @@ on('FF_OTHER_INSTRUCTIONS', otherInstructionsHandler);
 /** Build a booking-shaped preview object from the session draft. */
 export function draftToBooking(ctx, { hourlyRate = null } = {}) {
   const d = ctx.session.data || {};
-  const rate = hourlyRate ?? d.hourlyRate ?? 0;
+  // The caller passes the rate from the admin pricing table. Falling back to
+  // whatever sat in the draft risked previewing a price that was never the
+  // configured one.
+  const rate = hourlyRate ?? 0;
   const serviceDays = buildServiceDays({
     startDate: d.startDate,
     endDate: d.isMultiDay ? d.endDate : d.startDate,
@@ -1376,7 +1379,7 @@ const listingHandler = async (ctx) => {
 
   ctx.set('selectedNannyId', String(nanny._id));
   return [
-    { text: M.nannyProfile(nanny) },
+    { text: M.nannyProfile(nanny), media: M.featuredMedia(nanny) },
     { text: M.NANNY_PROFILE_ACTIONS, state: 'FF_NANNY_PROFILE' },
   ];
 };

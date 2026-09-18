@@ -1,5 +1,5 @@
 import { Session, User, MessageLog } from '../models/index.js';
-import { sendText, normalizePhone } from '../providers/ultramsg.js';
+import { sendText, sendImage, sendVideo, normalizePhone } from '../providers/ultramsg.js';
 import { detectCommand, isStartWord } from '../utils/parse.js';
 import { USER_ROLE } from '../utils/constants.js';
 import config from '../config/index.js';
@@ -750,6 +750,34 @@ async function applyResult(session, result, ctx) {
         await sendText(session.phone, node.text, { role: session.role, state: session.state });
       } catch (err) {
         console.error(`[engine] send failed to ${session.phone}: ${err.message}`);
+      }
+    }
+
+    // Approved photos and videos are sent as real WhatsApp media, after the
+    // text they belong to. They used to be pasted into the message as bare
+    // links: a family had to leave the chat and open each one in a browser,
+    // and a link to a file the provider had expired just showed as broken.
+    // A failure here is logged and skipped — a photo that will not send must
+    // never cost the family the profile it belongs to.
+    for (const item of node.media || []) {
+      if (!item?.url) continue;
+      try {
+        if (item.kind === 'video') {
+          await sendVideo(session.phone, item.url, item.caption || '');
+        } else {
+          await sendImage(session.phone, item.url, item.caption || '');
+        }
+      } catch (err) {
+        // Falling back to a link is better than the family getting nothing.
+        console.error(`[engine] media send failed to ${session.phone}: ${err.message}`);
+        const link = String(item.url || '');
+        if (link) {
+          await sendText(
+            session.phone,
+            `${item.caption || (item.kind === 'video' ? 'Video' : 'Photo')}: ${link}`,
+            { role: session.role, state: session.state },
+          ).catch(() => {});
+        }
       }
     }
   }

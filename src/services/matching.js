@@ -72,7 +72,11 @@ export async function findNannies({
     registrationComplete: true,
   };
 
-  if (budgetMax) query.hourlyRate = { $gte: 0, $lte: budgetMax };
+  // Deliberately NOT filtered by the nanny's hourlyRate. That field is her
+  // payout, not what the family is charged — the price comes from the admin
+  // pricing table and is identical whoever takes the booking. Filtering on it
+  // hid perfectly affordable nannies for being paid more, on a budget the
+  // family was never actually spending.
   if (cpr === CPR_REQUIREMENT.REQUIRED) query.cprCertified = true;
   if (skills.length) query['skills.name'] = { $all: skills };
   if (languages.length) query['languages.name'] = { $all: languages };
@@ -91,10 +95,13 @@ export async function findNannies({
     available.push(n);
   }
 
+  // Rating, then distance, then experience. Her payout rate is not a
+  // tie-breaker: it does not change the family's price, so ordering by it
+  // would rank nannies on something the family never sees or pays.
   available.sort((a, b) =>
     (b.ratingAverage || 0) - (a.ratingAverage || 0) ||
     (a.distanceKm ?? 99) - (b.distanceKm ?? 99) ||
-    (a.hourlyRate || 0) - (b.hourlyRate || 0)
+    (b.experienceYears || 0) - (a.experienceYears || 0)
   );
 
   return available.slice(0, limit);
