@@ -79,7 +79,15 @@ export async function approveTransfer(payment, { adminId = null, note = '' } = {
     booking.paidAmount = round2((booking.paidAmount || 0) + (payment.amount || 0));
     booking.paymentStatus = PAYMENT_STATUS.COMPLETED;
     if (payment.kind === 'additional') {
-      booking.totalAmount = round2((booking.totalAmount || 0) + (payment.amount || 0));
+      // `totalAmount` is NOT increased here.
+      //
+      // A top-up only ever arises from a reschedule, and `applyPendingChange`
+      // has already recalculated the booking to its new total — the top-up is
+      // the difference it asked the family to pay, not an extra charge on top
+      // of it. Adding it again inflated every rescheduled booking by the
+      // difference, so the invoice and the rate card disagreed forever after.
+      //
+      // Only the outstanding balance is cleared.
       booking.additionalDue = 0;
     }
     await booking.save();
@@ -269,14 +277,90 @@ export async function markPayoutPaid(payout, { adminId = null, proof = {}, note 
   return { success: true, payout };
 }
 
-/** Earnings owed to a nanny for one completed service day (incl. overtime). */
-export function dayEarnings(booking, day) {
-  return round2((day.amount || 0) + (day.overtimeAmount || 0));
+/**
+ * Earnings owed to a nanny for one completed service day.
+ *
+ * Two completely separate numbers meet here, and confusing them is what made
+ * this function wrong for so long:
+ *
+ *   day.amount     — what the FAMILY was charged. Comes from the platform's
+ *                    rate card (children, holiday multiplier, discounts).
+ *                    Nothing to do with the nanny.
+ *   nannyHourlyRate — what SHE is paid. Her own asking rate, agreed with the
+ *                    office when she registers. Admin-side only; a family
+ *                    never sees it and it never affects what they pay.
+ *
+ * The difference between them is the platform's commission.
+ *
+ * This used to return `day.amount`, paying every nanny the entire sum the
+ * family had paid and leaving the business with nothing on any booking.
+ *
+ * `nannyHourlyRate` is passed in rather than read here because the caller
+ * already has the nanny loaded, and a stale rate must never be used: the rate
+ * is captured onto the booking when it is created, so a later change to her
+ * profile cannot retroactively alter what she is owed for work already done.
+ *
+ * Overtime is paid at the same hourly rate, using the rounded hours the policy
+ * settled on (15 min becomes half an hour, 45 becomes a full one).
+ */
+export function dayEarnings(booking, day, nannyHourlyRate) {
+  const rate = Number(nannyHourlyRate ?? booking?.nannyHourlyRate ?? 0);
+
+  // No agreed rate means we cannot say what she is owed. Falling back to the
+  // family price is exactly the bug this replaced, and guessing a number is
+  // worse than showing zero and having someone notice.
+  if (!rate || rate <= 0) {
+    console.error(
+      `[payments] booking ${booking?.bookingNumber || booking?._id}: no nanny rate recorded; `
+      + 'earnings for this day are 0 until an admin sets one',
+    );
+    return 0;
+  }
+
+  const hours = Number(day.hours ?? booking?.hoursPerDay ?? 0);
+  const overtimeHours = Number(day.overtimeHours || 0);
+
+  return round2(rate * (hours + overtimeHours));
+}
+
+/**
+ * What the platform keeps on one completed day: the family price minus her pay.
+ *
+ * Kept next to `dayEarnings` so the two can never drift apart — the commission
+ * is defined as the difference, not as its own rate, so it cannot disagree
+ * with what was actually charged and actually paid.
+ */
+export function dayCommission(booking, day, nannyHourlyRate) {
+  const charged = round2((day.amount || 0) + (day.overtimeAmount || 0));
+  const paid = dayEarnings(booking, day, nannyHourlyRate);
+  return round2(charged - paid);
+}
+
+/**
+ * Which agreed rate applies to whoever actually worked this day.
+ *
+ * A booking can be worked by more than one person: the two nannies on a 24h
+ * booking, or a replacement taking over mid-booking. Each service day records
+ * who worked it, and they are not all on the same salary — so paying everyone
+ * `booking.nannyHourlyRate` would quietly overpay some and underpay others.
+ *
+ * The day's own nanny wins when it is set, because it survives a replacement.
+ * `secondNannyRate` is used when the day belongs to the second nanny, and the
+ * primary rate is the fallback for everything else.
+ */
+export function rateForDay(booking, day) {
+  const dayNanny = String(day?.nanny?._id || day?.nanny || '');
+  const second = String(booking?.secondNanny?._id || booking?.secondNanny || '');
+
+  if (dayNanny && second && dayNanny === second && booking.secondNannyHourlyRate) {
+    return booking.secondNannyHourlyRate;
+  }
+  return booking?.nannyHourlyRate || 0;
 }
 
 export default {
   recordTransfer, approveTransfer, rejectTransfer,
   refundBooking, completeRefund,
   queuePayout, releaseDuePayouts, markPayoutPaid,
-  nextMonday, dayEarnings,
+  nextMonday, dayEarnings, dayCommission, rateForDay,
 };

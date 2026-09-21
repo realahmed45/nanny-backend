@@ -13,7 +13,7 @@ import {
 } from '../utils/parse.js';
 import { findNannies } from '../services/matching.js';
 import { buildServiceDays } from '../services/booking.js';
-import { computeBookingAmount } from '../services/policy.js';
+import { round2 } from '../services/policy.js';
 import { emergencySurcharge } from '../services/settings.js';
 import * as M from '../utils/messages.js';
 
@@ -924,13 +924,29 @@ on('FF_OTHER_INSTRUCTIONS', otherInstructionsHandler);
  * Summary + edit
  * ------------------------------------------------------------------ */
 
-/** Build a booking-shaped preview object from the session draft. */
-export function draftToBooking(ctx, { hourlyRate = null } = {}) {
+/**
+ * Build a booking-shaped preview object from the session draft.
+ *
+ * Async because the preview loads the same holiday calendar the real booking
+ * uses. It previously did not, and quoted `rate x hours x days` while
+ * `createBooking` summed each day — so a booking crossing a Nyepi eve or a
+ * public holiday showed the family one total on the summary screen and
+ * charged a different one on the transfer instructions.
+ */
+export async function draftToBooking(ctx, { hourlyRate = null } = {}) {
   const d = ctx.session.data || {};
   // The caller passes the rate from the admin pricing table. Falling back to
   // whatever sat in the draft risked previewing a price that was never the
   // configured one.
   const rate = hourlyRate ?? 0;
+
+  // Same calendar as createBooking, so surcharged and closed days are priced
+  // identically in the quote and on the invoice. A calendar that cannot be
+  // loaded falls back to null, which prices every day at the standard rate —
+  // exactly what the real booking does in that situation.
+  const { getCalendar } = await import('../services/calendar.js');
+  const calendar = await getCalendar().catch(() => null);
+
   const serviceDays = buildServiceDays({
     startDate: d.startDate,
     endDate: d.isMultiDay ? d.endDate : d.startDate,
@@ -938,6 +954,7 @@ export function draftToBooking(ctx, { hourlyRate = null } = {}) {
     hoursPerDay: d.hoursPerDay,
     repeatDays: d.isMultiDay ? d.repeatDays : [],
     hourlyRate: rate,
+    calendar,
   });
   return {
     isMultiDay: !!d.isMultiDay,
@@ -964,12 +981,14 @@ export function draftToBooking(ctx, { hourlyRate = null } = {}) {
     // The pair is chosen in order; the first is the booking's `nanny`.
     secondNanny: (d.selectedNannyIds || [])[1],
     hourlyRate: rate,
-    totalAmount: computeBookingAmount({ hourlyRate: rate, hoursPerDay: d.hoursPerDay, days: serviceDays.length }),
+    // Summed from the days, exactly as createBooking does, so a holiday
+    // multiplier shows up in the quote instead of appearing at payment time.
+    totalAmount: round2(serviceDays.reduce((sum, day) => sum + (day.amount || 0), 0)),
   };
 }
 
 export async function showSummary(ctx, { updated = false } = {}) {
-  const preview = draftToBooking(ctx);
+  const preview = await draftToBooking(ctx);
   const title = updated ? '*Updated Booking Summary*' : '*Booking Summary*';
   return [
     { text: M.bookingSummary(preview, { title }) },
@@ -1193,7 +1212,7 @@ export async function searchNannies(ctx) {
 }
 
 async function holdForAgentReview(ctx) {
-  const preview = draftToBooking(ctx);
+  const preview = await draftToBooking(ctx);
   return [
     { text: M.bookingSummary(preview, { title: '*Booking Summary*' }) },
     { text: M.AGENT_REVIEW_PENDING, state: 'FF_AWAITING_AGENT' },
@@ -1210,7 +1229,7 @@ on('FF_AWAITING_AGENT', awaitingAgentHandler);
 
 export async function runNannySearch(ctx) {
   const d = ctx.session.data || {};
-  const preview = draftToBooking(ctx);
+  const preview = await draftToBooking(ctx);
 
   const nannies = await findNannies({
     languages: d.languages || [],

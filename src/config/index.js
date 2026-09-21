@@ -3,6 +3,37 @@ dotenv.config();
 
 const int = (v, d) => (v === undefined || v === '' ? d : parseInt(v, 10));
 
+const isProduction = (process.env.NODE_ENV || 'development') === 'production';
+
+/**
+ * A secret that must never keep its development default in production.
+ *
+ * `jwtSecret` signs admin sessions and `ADMIN_PASSWORD` opens the dashboard,
+ * which holds every family's address and phone number. Both had a convenient
+ * fallback — `dev-secret`, `admin123` — that made local work easy and would
+ * have silently secured a live server with a password published in this
+ * repository if the environment variable were ever missing or misspelled.
+ *
+ * Locally the fallback stands, because there is nothing to protect and
+ * demanding configuration to run the tests helps nobody. In production a
+ * missing value stops the process at boot: a server that will not start is a
+ * problem someone fixes in minutes, while one running on `admin123` is a
+ * breach nobody notices.
+ */
+function requiredSecret(name, devFallback) {
+  const value = process.env[name];
+  if (value && value !== devFallback) return value;
+
+  if (isProduction) {
+    throw new Error(
+      `[config] ${name} is not set (or is still the development default). `
+      + 'Refusing to start in production: this secret protects the admin '
+      + 'dashboard and every family record in it. Set it and restart.',
+    );
+  }
+  return devFallback;
+}
+
 export const config = {
   env: process.env.NODE_ENV || 'development',
   port: int(process.env.PORT, 4000),
@@ -10,10 +41,10 @@ export const config = {
 
   mongoUri: process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/mynanny',
 
-  jwtSecret: process.env.JWT_SECRET || 'dev-secret',
+  jwtSecret: requiredSecret('JWT_SECRET', 'dev-secret'),
   admin: {
     email: process.env.ADMIN_EMAIL || 'admin@mynanny.com',
-    password: process.env.ADMIN_PASSWORD || 'admin123',
+    password: requiredSecret('ADMIN_PASSWORD', 'admin123'),
     // Guards the email diagnostic. Unset means the endpoint does not exist,
     // so it cannot be probed on a server that never needed it.
     diagKey: process.env.DIAG_KEY || '',

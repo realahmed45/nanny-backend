@@ -73,7 +73,7 @@ export async function showPreBookingSummary(ctx, nanny) {
     children: (ctx.get('children') || []).length || 1,
   });
 
-  const preview = draftToBooking(ctx, { hourlyRate: pricing.hourlyRate });
+  const preview = await draftToBooking(ctx, { hourlyRate: pricing.hourlyRate });
   return [
     { text: M.bookingSummary(preview, { title: '*Booking Summary*', nanny }) },
     { text: M.PAY_FIRST_NOTICE(nannyDisplayName(nanny)), state: 'FF_PAY_CONFIRM' },
@@ -268,6 +268,13 @@ async function beginTransfer(ctx) {
       endDate: ctx.get('isMultiDay') ? ctx.get('endDate') : ctx.get('startDate'),
       repeatDays: ctx.get('isMultiDay') ? ctx.get('repeatDays') : [],
       address: ctx.get('address') || { mapUrl: ctx.get('mapUrl'), addressLine: ctx.get('addressLine') },
+      // A 24-hour booking is covered by two nannies working in shifts. The
+      // family picks both, and both are priced and paid for — but only
+      // `selectedNannyIds` is ever written to the session, so without this
+      // line createBooking looked for a `secondNanny` that was never there
+      // and silently saved a two-nanny booking with one nanny on it. She was
+      // never notified, never scheduled and never paid.
+      secondNanny: (ctx.get('selectedNannyIds') || [])[1],
     },
   });
 

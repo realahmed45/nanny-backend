@@ -117,6 +117,45 @@ const SHAPES = {
 };
 
 /**
+ * Does the extracted answer match the shape the question asked for?
+ *
+ * Each case is a real failure mode of a model that was asked politely and
+ * answered in its own format anyway. The out-of-range option number is the
+ * dangerous one: it looks like a valid choice to everything downstream.
+ */
+function matchesShape(value, expect, optionCount) {
+  switch (expect) {
+    case 'choice': {
+      if (!/^\d+$/.test(value)) return false;
+      const n = Number(value);
+      return n >= 1 && (!optionCount || n <= optionCount);
+    }
+    case 'multi': {
+      if (!/^\d+(\s*,\s*\d+)*$/.test(value)) return false;
+      return value.split(',').every((part) => {
+        const n = Number(part.trim());
+        return n >= 1 && (!optionCount || n <= optionCount);
+      });
+    }
+    case 'time':
+      // 24-hour, as asked for. "2pm" is a failure here, not a near miss:
+      // handlers parse HH:MM and nothing else.
+      return /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+    case 'date': {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      // Shape alone still admits 2026-02-31, so round-trip through Date to
+      // catch the days that do not exist.
+      const d = new Date(`${value}T00:00:00Z`);
+      return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
+    }
+    case 'yesno':
+      return /^(yes|no)$/i.test(value);
+    default:
+      return true;
+  }
+}
+
+/**
  * Is this message an answer to the question, and what is it?
  *
  * Unchanged in spirit from the original: cold, literal, and quick to give up.
@@ -157,7 +196,28 @@ export async function extract({ message, question, expect, options = [], today }
   // still has to be a few characters.
   if (answer.length > 40 || /\s{2,}|\n/.test(answer)) return null;
 
-  return answer.replace(/^["'`]|["'`.]$/g, '').trim();
+  const cleaned = answer.replace(/^["'`]|["'`.]$/g, '').trim();
+  if (!cleaned) return null;
+
+  // Check the answer is actually the shape we asked for.
+  //
+  // Everything above this point trusts the model to have followed the
+  // instruction. It usually does — but "unclear" is not the only way it can
+  // fail, and the others are silent: a date that comes back as "next Tuesday",
+  // or an option number of "7" when there are four options, both flow straight
+  // into the handler. The handler then rejects them, which reads to the family
+  // as the bot ignoring her. Worse, a plausible-but-wrong date books a nanny
+  // for the wrong day, which is the one failure nobody notices until someone
+  // is standing at a door.
+  //
+  // So: anything not in the requested shape becomes null, and null hands the
+  // message to converse(), which is good at not knowing.
+  if (!matchesShape(cleaned, expect, options.length)) {
+    console.error(`[ai] extracted "${cleaned}" is not a valid ${expect}; treating as unclear`);
+    return null;
+  }
+
+  return cleaned;
 }
 
 /* ------------------------------------------------------------------ *
@@ -246,6 +306,16 @@ export async function converse({
   // A model that returns something enormous has lost the plot; the structured
   // prompt is better than a wall of text.
   if (reply.length > 700) return null;
+
+  // The whole contract of this function is "answer them, then ask again". A
+  // reply that answers warmly and forgets to ask is a dead end: the flow is
+  // still waiting on that question, she has nothing to respond to, and the
+  // booking stops with no error anywhere. Falling back to the original prompt
+  // is mechanical but it always moves.
+  if (!/\?/.test(reply)) {
+    console.error('[ai] conversational reply asked nothing; using the original question');
+    return null;
+  }
 
   // Arrives as one string with --- between the parts; the caller wants the
   // separate WhatsApp messages it is meant to become.
@@ -347,9 +417,25 @@ export function splitForWhatsApp(reply) {
     parts = keep;
   }
 
-  // A "short message" that runs to a screenful defeats the point, but cutting
-  // mid-sentence is worse than leaving it long, so this only rejoins.
-  return parts.map((p) => (p.length > MAX_BUBBLE_CHARS ? p : p));
+  // A message that runs past MAX_BUBBLE_CHARS is split again at a sentence
+  // end, never mid-sentence: a screenful in one bubble defeats the point of
+  // texting like a person, but a sentence cut in half is worse than a long one.
+  // Only the overflow moves, and only when there is room left under the cap.
+  const sized = [];
+  for (const part of parts) {
+    if (part.length <= MAX_BUBBLE_CHARS || sized.length >= MAX_BUBBLES) {
+      sized.push(part);
+      continue;
+    }
+    const cut = part.lastIndexOf('. ', MAX_BUBBLE_CHARS);
+    if (cut < MAX_BUBBLE_CHARS * 0.5) {
+      sized.push(part);
+      continue;
+    }
+    sized.push(part.slice(0, cut + 1).trim());
+    sized.push(part.slice(cut + 1).trim());
+  }
+  return sized.slice(0, MAX_BUBBLES);
 }
 
 /** What the bot may say about the business, so it cannot invent terms. */

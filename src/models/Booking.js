@@ -127,6 +127,23 @@ const BookingSchema = new mongoose.Schema({
 
   hourlyRate: Number,                // locked at booking time; nanny rate changes don't apply
   totalAmount: Number,
+
+  /**
+   * What each nanny is paid per hour on this booking — her own agreed rate,
+   * not the family's price.
+   *
+   * These are two entirely separate numbers. `hourlyRate` above is what the
+   * family is charged, set by our rate card. This is her salary, agreed with
+   * the office when she registers, and a family never sees it. The difference
+   * between them is our commission.
+   *
+   * Captured here at booking time for the same reason as `hourlyRate`: if she
+   * renegotiates her rate next month, that must not change what she is owed
+   * for work already done. `secondNannyHourlyRate` covers the other nanny on
+   * a 24h booking, who may well be on a different rate.
+   */
+  nannyHourlyRate: Number,
+  secondNannyHourlyRate: Number,
   // What the same booking would have cost without a referral discount,
   // and whether one was applied. Recorded so support can explain a price
   // months later without having to recompute it from settings that moved.

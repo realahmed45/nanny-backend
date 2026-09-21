@@ -191,7 +191,79 @@ const UserSchema = new mongoose.Schema({
   languages: [RatedItemSchema],
   skills: [RatedItemSchema],
   subjects: [String],
+  /**
+   * What this nanny is paid per hour — her salary, agreed with the office.
+   *
+   * Admin-side only. A family never sees it and it has no bearing on what
+   * they are charged: they pay the platform's rate card, which depends on the
+   * number of children, not on who is booked. The difference between the two
+   * is the platform's commission.
+   */
   hourlyRate: Number,
+
+  /**
+   * The terms the office agreed with her, where they differ from simply being
+   * paid for the hours she works.
+   *
+   * Only some nannies are on a contract. An empty object means she is paid
+   * for what she works and nothing more, which is the normal case.
+   */
+  contract: {
+    /**
+     * Hours per week we have promised to pay her for, whether or not we manage
+     * to book them.
+     *
+     * A real guarantee: if she is contracted for 40 and only booked for 30,
+     * she is still owed 40. The shortfall is money out of the business, which
+     * is why scheduling deliberately aims above the threshold — see
+     * `safetyBufferPercent`.
+     */
+    minimumHoursPerWeek: { type: Number, default: 0 },
+
+    /**
+     * Client visits per week we have promised her, counted separately from
+     * hours.
+     *
+     * A nanny can meet her hours across four visits and still be a visit short
+     * of her contract, so the two are tracked independently rather than one
+     * being derived from the other.
+     */
+    minimumShiftsPerWeek: { type: Number, default: 0 },
+
+    /**
+     * How far above the contracted minimum auto-booking aims, as a percentage.
+     *
+     * 20 means a 40-hour contract targets 48. The buffer exists because a
+     * cancellation late in the week leaves no time to find replacement work,
+     * and an unmet guarantee is paid out of the platform's own pocket.
+     */
+    safetyBufferPercent: { type: Number, default: 20 },
+
+    /** Free-text note for terms that do not fit the fields above. */
+    notes: String,
+
+    /**
+     * A scan or photo of the signed contract itself.
+     *
+     * The fields above are what we believe we agreed; this is the proof of it.
+     * When a nanny disputes her guaranteed hours — and that argument is always
+     * about money — a typed number in our own database is not evidence, because
+     * we are the ones who typed it. Her signature is.
+     *
+     * Stored in our own media archive rather than as a link to whatever the
+     * file was uploaded from, so it cannot disappear from underneath the
+     * record it is supposed to prove. Admin-side only: a family has no reason
+     * to see a nanny's pay agreement.
+     */
+    documentUrl: String,
+    documentUploadedAt: Date,
+    documentUploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'AdminUser' },
+
+    /** Who last changed these terms, and when — this is a pay agreement. */
+    updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'AdminUser' },
+    updatedAt: Date,
+  },
+
   cprCertified: { type: Boolean, default: false },
   residingAddress: String,
   residingMapUrl: String,

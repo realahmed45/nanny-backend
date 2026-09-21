@@ -362,6 +362,12 @@ async function retryWithAi(ctx, handler, prompt) {
     const { extract, converse, isConfigured } = await import('../services/aiConversation.js');
     if (!isConfigured()) return null;
 
+    // Remember the mode for this message so rephraseOutbound does not read
+    // settings again a few milliseconds later. One message, one answer to
+    // "is AI mode on" — and if someone flips the toggle mid-message, the reply
+    // stays consistent with the half already written instead of mixing modes.
+    ctx.aiMode = true;
+
     const question = String(prompt || '').slice(0, 600);
 
     // The prompt usually lists its own options as "1. Something"; reusing them
@@ -648,9 +654,14 @@ async function rephraseOutbound(outbound, ctx, said) {
   if (ctx.mediaUrl) return outbound;
 
   try {
-    const { getSettings } = await import('../services/settings.js');
-    const settings = await getSettings();
-    if (settings.conversationMode?.mode !== 'ai') return outbound;
+    // retryWithAi already resolved the mode for this message when it ran.
+    // Only ask again when it did not — an answer the parser accepted first
+    // time never reaches it.
+    if (ctx.aiMode !== true) {
+      const { getSettings } = await import('../services/settings.js');
+      const settings = await getSettings();
+      if (settings.conversationMode?.mode !== 'ai') return outbound;
+    }
 
     const { rephrase, isConfigured } = await import('../services/aiConversation.js');
     if (!isConfigured()) return outbound;
@@ -702,8 +713,16 @@ function rememberTurn(session, said, replies) {
   const history = Array.isArray(session.aiHistory) ? session.aiHistory : [];
   history.push({ from: 'user', text: said_.slice(0, 300) });
 
-  const last = (replies || []).filter(Boolean).at(-1);
-  if (last) history.push({ from: 'bot', text: String(last).slice(0, 300) });
+  // Record what the bot actually said, not just its final bubble. A reply
+  // that arrived as "Yes, all our nannies are checked." + "Which languages?"
+  // used to be remembered as the question alone, so the next turn's context
+  // had the bot asking things for no reason and the answer it gave gone. That
+  // is exactly the context a follow-up like "what about the other one?" needs.
+  const said_back = (replies || [])
+    .map((r) => (typeof r === 'string' ? r : r?.text || ''))
+    .filter(Boolean)
+    .join(' ');
+  if (said_back) history.push({ from: 'bot', text: said_back.slice(0, 300) });
 
   session.aiHistory = history.slice(-6);
   session.markModified('aiHistory');

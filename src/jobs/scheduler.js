@@ -83,7 +83,20 @@ Responding quickly helps you get more bookings.`);
 
 export async function processServiceDayTransitions(now = new Date()) {
   const bookings = await Booking.find({
-    status: { $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING] },
+    // PENDING_ADDITIONAL_PAYMENT belongs here too. It is a booking that has
+    // been rescheduled upward and is waiting on a top-up — the work itself is
+    // still going ahead, and the nanny is still turning up. Leaving it out
+    // froze the booking: no arrival prompt, no end-of-service prompt and no
+    // completion for any remaining day, with nothing to indicate why. An
+    // unpaid balance is a billing matter, not a reason to stop running the
+    // days the family already paid for.
+    status: {
+      $in: [
+        BOOKING_STATUS.UPCOMING,
+        BOOKING_STATUS.ONGOING,
+        BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT,
+      ],
+    },
   }).populate('nanny family');
 
   const changed = [];

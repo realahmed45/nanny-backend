@@ -13,7 +13,7 @@ import {
   syncBookingStatus, markNannyCancelled, cancelBooking,
 } from '../services/booking.js';
 import { computeCancellationRefund, computeOvertimeHours, round2 } from '../services/policy.js';
-import { queuePayout, refundBooking, dayEarnings } from '../services/payments.js';
+import { queuePayout, refundBooking, dayEarnings, rateForDay } from '../services/payments.js';
 import { findReplacements } from '../services/matching.js';
 import { notifyUser } from '../services/notify.js';
 import { applyPendingChange } from './familyBookingActions.js';
@@ -650,7 +650,7 @@ export async function completeServiceDay(ctx, booking, day) {
 
   await queuePayout(booking, {
     nannyId: booking.nanny,
-    amount: dayEarnings(booking, day),
+    amount: dayEarnings(booking, day, rateForDay(booking, day)),
     serviceDayIds: [day._id],
     isFinal,
     notes: `Service on ${day.date}`,
@@ -685,7 +685,7 @@ Thank you for using My Nanny! ❤️`);
 
 ${prettyDate(day.date)} — ${timeRange(booking.startTime, booking.hoursPerDay)}${overtimeNote}
 
-💰 Earnings for today: *${money(dayEarnings(booking, day))}*
+💰 Earnings for today: *${money(dayEarnings(booking, day, rateForDay(booking, day)))}*
 Payment will be released on the next payout Monday.
 
 ${isFinal ? '🎉 This booking is now fully complete!' : `📅 Remaining service days: *${remaining.length}*`}

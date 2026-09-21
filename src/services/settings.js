@@ -25,7 +25,43 @@ export const DEFAULTS = {
   // What an emergency adds to the transport fee. null means "use the
   // configured default" — see emergencySurcharge() below.
   emergency: null,
+
+  /**
+   * What the family hands the nanny in cash when she arrives, per shift.
+   *
+   * This is "payment for transport to nanny" — it never passes through the
+   * platform, is not part of the booking total, and is not commission. It is
+   * set here so the office can change it without a deploy, and quoted to both
+   * sides so neither has to guess.
+   *
+   * `emergency` is the same payment on a same-day booking, which pulls a nanny
+   * across town at no notice and is therefore worth more.
+   */
+  transportPayment: null,
 };
+
+/** Defaults for the cash-in-hand transport payment, in rupiah per shift. */
+export const TRANSPORT_PAYMENT_DEFAULTS = {
+  standard: 50000,
+  emergency: 100000,
+};
+
+/**
+ * The per-shift transport payment in force right now.
+ *
+ * Zero is a real value — a booking where no transport payment applies — so
+ * the check is for null rather than falsiness, otherwise setting it to zero
+ * would silently restore the default.
+ */
+export async function transportPayment({ isEmergency = false } = {}) {
+  const settings = await getSettings();
+  const set = settings.transportPayment || {};
+  const key = isEmergency ? 'emergency' : 'standard';
+  const value = set[key];
+  return value === undefined || value === null
+    ? TRANSPORT_PAYMENT_DEFAULTS[key]
+    : Number(value);
+}
 
 /**
  * The emergency surcharge in force right now.
@@ -79,5 +115,6 @@ export async function setSetting(key, value, adminId = null) {
 }
 
 export default {
-  getSettings, getSetting, setSetting, invalidateSettings, emergencySurcharge, DEFAULTS,
+  getSettings, getSetting, setSetting, invalidateSettings, emergencySurcharge,
+  transportPayment, DEFAULTS, TRANSPORT_PAYMENT_DEFAULTS,
 };

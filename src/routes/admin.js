@@ -17,7 +17,9 @@ import { signToken, requireAuth, requireRole } from '../middleware/auth.js';
 import { rateLimit, clear as clearRateLimit } from '../middleware/rateLimit.js';
 import { auditMutations } from '../middleware/audit.js';
 import { recordAudit } from '../services/audit.js';
-import { cancelBooking, markNannyCancelled, openNannyResponseWindow } from '../services/booking.js';
+import {
+  cancelBooking, markNannyCancelled, openNannyResponseWindow, releaseBookingToNannies,
+} from '../services/booking.js';
 import {
   refundBooking, releaseDuePayouts, queuePayout,
   approveTransfer, rejectTransfer, completeRefund, markPayoutPaid,
@@ -33,6 +35,7 @@ import {
   DEFAULT_SOCIAL_DISCOUNT as SOCIAL_DEFAULTS,
 } from '../services/pricing.js';
 import { CALENDAR_DEFAULTS, ISO_DATE, getCalendar, daysInRange } from '../services/calendar.js';
+import { TRANSPORT_PAYMENT_DEFAULTS } from '../services/settings.js';
 
 const router = express.Router();
 
@@ -2488,16 +2491,10 @@ router.post('/payments/:id/approve', requireRole('admin', 'super_admin'), wrap(a
       }));
     }
 
-    // Open the nanny's response window now that the money is confirmed.
-    if (nanny && booking.status === BOOKING_STATUS.PENDING_PAYMENT) {
-      const { expiresAt } = openNannyResponseWindow(booking, nanny._id, 'new_booking');
-      booking.status = BOOKING_STATUS.UPCOMING;
-      await booking.save();
-
-      await notifyUser(nanny, M.nannyBookingRequest(booking, family, expiresAt));
-      const { setNannyRequestState } = await import('../flows/familyBookingPayment.js');
-      await setNannyRequestState(nanny, booking);
-    }
+    // Open the response window now that the money is confirmed — for both
+    // nannies when this is a 24h booking, which is why it goes through the
+    // shared helper rather than notifying `booking.nanny` alone.
+    await releaseBookingToNannies(booking, family, notifyUser, M);
   }
 
   res.json({ ok: true, payment, booking });
@@ -2553,18 +2550,8 @@ router.post('/payments/bulk-approve', requireRole('admin', 'super_admin'), wrap(
 
         // Releasing the request to the nanny is part of approving, so it
         // happens here too rather than only on the single-approve path.
-        if (nanny && booking.status === BOOKING_STATUS.PENDING_PAYMENT) {
-          const { expiresAt } = openNannyResponseWindow(booking, nanny._id, 'new_booking');
-          booking.status = BOOKING_STATUS.UPCOMING;
-          // eslint-disable-next-line no-await-in-loop
-          await booking.save();
-          // eslint-disable-next-line no-await-in-loop
-          await notifyUser(nanny, M.nannyBookingRequest(booking, family, expiresAt));
-          // eslint-disable-next-line no-await-in-loop
-          const { setNannyRequestState } = await import('../flows/familyBookingPayment.js');
-          // eslint-disable-next-line no-await-in-loop
-          await setNannyRequestState(nanny, booking);
-        }
+        // eslint-disable-next-line no-await-in-loop
+        await releaseBookingToNannies(booking, family, notifyUser, M);
       }
 
       approved.push({ id, reference: payment.reference, bookingNumber: booking?.bookingNumber });
@@ -2977,6 +2964,13 @@ router.get('/settings', wrap(async (req, res) => {
     // Falls back to the configured default, so the form opens on the figure
     // actually in force rather than a blank field.
     emergency: { surcharge: runtime.emergency?.surcharge ?? config.emergencySurcharge },
+    // Cash the family hands the nanny on arrival, per shift. Never passes
+    // through the platform and is not part of any booking total — it is set
+    // here only so the office can change it without a deploy.
+    transportPayment: {
+      ...TRANSPORT_PAYMENT_DEFAULTS,
+      ...(runtime.transportPayment || {}),
+    },
     socialDiscount: { ...SOCIAL_DEFAULTS, ...(runtime.socialDiscount || {}) },
     accounts: { instagram: '', facebook: '', tiktok: '', ...(runtime.accounts || {}) },
     areas: runtime.areas || [],
@@ -3300,5 +3294,209 @@ async function paginate(Model, query, { page = 1, limit = 25 }, options = {}) {
   const [items, total] = await Promise.all([q, Model.countDocuments(query)]);
   return { items, total, page: p, limit: l, pages: Math.ceil(total / l) };
 }
+
+/* ------------------------------------------------------------------ *
+ * Earnings — what the business made, and what it owes
+ * ------------------------------------------------------------------ */
+
+/**
+ * Commission over a period.
+ *
+ * The page the office looks at to answer "what did we actually make?". Two
+ * numbers meet on every booking: what the family was charged (our rate card)
+ * and what the nanny was paid (her own agreed rate). The difference is ours.
+ *
+ * Completed days only. Counting scheduled work as revenue is how a dashboard
+ * ends up disagreeing with the bank.
+ */
+router.get('/earnings', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const { earningsSummary } = await import('../services/earnings.js');
+  const summary = await earningsSummary({ from: req.query.from, to: req.query.to });
+  res.json(summary);
+}));
+
+/**
+ * One booking's money, itemised — for answering a query about a single job.
+ */
+router.get('/earnings/booking/:id', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const booking = await Booking.findById(req.params.id)
+    .populate('nanny', 'fullName nickname hourlyRate')
+    .populate('family', 'fullName');
+  if (!booking) return res.status(404).json({ error: 'Booking not found' });
+
+  const { bookingEarnings } = await import('../services/earnings.js');
+  res.json({
+    ...bookingEarnings(booking),
+    nanny: booking.nanny?.fullName || null,
+    family: booking.family?.fullName || null,
+    nannyHourlyRate: booking.nannyHourlyRate || 0,
+    familyHourlyRate: booking.hourlyRate || 0,
+  });
+}));
+
+/* ------------------------------------------------------------------ *
+ * Contract settings — per-nanny guarantees
+ * ------------------------------------------------------------------ */
+
+/**
+ * Every nanny on a contract, and whether she has the work she was promised.
+ *
+ * Sorted by what an unmet guarantee would cost, because that is the list the
+ * office works down: a shortfall closed with real work is revenue, and one
+ * left to the end of the week is money paid for nothing.
+ */
+router.get('/contracts', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const { contractStatusAll } = await import('../services/earnings.js');
+  res.json({ rows: await contractStatusAll({ weekOf: req.query.week || new Date() }) });
+}));
+
+/** One nanny's contract terms and how this week is tracking against them. */
+router.get('/contracts/:id', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const nanny = await User.findById(req.params.id).select('fullName nickname hourlyRate contract');
+  if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
+
+  const { contractStatus } = await import('../services/earnings.js');
+  res.json({
+    nanny: {
+      id: nanny._id,
+      name: nanny.fullName || nanny.nickname,
+      // Her salary rate. Admin-side only — a family never sees this.
+      hourlyRate: nanny.hourlyRate || 0,
+    },
+    contract: nanny.contract || {},
+    status: await contractStatus(nanny._id, { weekOf: req.query.week || new Date() }),
+  });
+}));
+
+/** File types a signed contract plausibly arrives as: a scan or a phone photo. */
+const CONTRACT_DOC_EXTS = ['.pdf', '.jpg', '.jpeg', '.png', '.webp'];
+
+/**
+ * Upload the signed contract for one nanny.
+ *
+ * Base64 in a JSON body, matching how the phone app already uploads, so the
+ * server still needs no multipart middleware or temp directory. It has its own
+ * body-size limit mounted in index.js because the global admin limit is 2mb and
+ * a photographed contract is routinely larger than that.
+ *
+ * Replaces rather than accumulates: there is one current agreement with a
+ * nanny, and a list of five scans is a list nobody can tell apart. Re-uploading
+ * is how a re-signed contract is recorded.
+ */
+router.post('/contracts/:id/document', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const nanny = await User.findById(req.params.id);
+  if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
+
+  const raw = String(req.body?.ext || '').toLowerCase();
+  const ext = raw.startsWith('.') ? raw : `.${raw}`;
+  if (!CONTRACT_DOC_EXTS.includes(ext)) {
+    return res.status(400).json({ error: `That file type is not accepted (${CONTRACT_DOC_EXTS.join(', ')})` });
+  }
+
+  const base64 = String(req.body?.data || '').replace(/^data:[^,]+,/, '');
+  if (!base64) return res.status(400).json({ error: 'No file was attached' });
+
+  let buf;
+  try {
+    buf = Buffer.from(base64, 'base64');
+  } catch {
+    return res.status(400).json({ error: 'The file could not be read' });
+  }
+  if (!buf.length) return res.status(400).json({ error: 'The file was empty' });
+
+  const { storeBuffer } = await import('../services/mediaArchive.js');
+  let url;
+  try {
+    url = await storeBuffer(buf, { ext });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  nanny.contract = {
+    ...(nanny.contract?.toObject?.() ?? nanny.contract ?? {}),
+    documentUrl: url,
+    documentUploadedAt: new Date(),
+    documentUploadedBy: req.admin?._id,
+  };
+  await nanny.save();
+
+  res.json({ ok: true, documentUrl: url, documentUploadedAt: nanny.contract.documentUploadedAt });
+}));
+
+/**
+ * Remove a contract scan.
+ *
+ * Only the pointer is cleared; the archived file stays on disk. A pay
+ * agreement that was once uploaded should not become unrecoverable because
+ * somebody clicked the wrong row, and the file is named by its content hash,
+ * so nothing else is disturbed by leaving it.
+ */
+router.delete('/contracts/:id/document', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const nanny = await User.findById(req.params.id);
+  if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
+
+  nanny.contract = {
+    ...(nanny.contract?.toObject?.() ?? nanny.contract ?? {}),
+    documentUrl: undefined,
+    documentUploadedAt: undefined,
+    documentUploadedBy: undefined,
+  };
+  await nanny.save();
+  res.json({ ok: true });
+}));
+
+/**
+ * Change a nanny's pay terms.
+ *
+ * Every field is validated rather than trusted: this sets what the business
+ * owes a person, and a stray negative or a string where a number belongs would
+ * quietly corrupt a payroll figure. Who changed it is recorded, because it is
+ * a pay agreement.
+ */
+router.put('/contracts/:id', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const nanny = await User.findById(req.params.id);
+  if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
+
+  const num = (value, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) => {
+    if (value === undefined || value === null || value === '') return undefined;
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < min || n > max) return null;
+    return n;
+  };
+
+  const hourlyRate = num(req.body.hourlyRate);
+  const minHours = num(req.body.minimumHoursPerWeek, { max: 168 });
+  const minShifts = num(req.body.minimumShiftsPerWeek, { max: 100 });
+  const buffer = num(req.body.safetyBufferPercent, { max: 200 });
+
+  for (const [name, value] of Object.entries({
+    hourlyRate, minimumHoursPerWeek: minHours, minimumShiftsPerWeek: minShifts,
+    safetyBufferPercent: buffer,
+  })) {
+    if (value === null) return res.status(400).json({ error: `${name} is not a valid number` });
+  }
+
+  // Her salary, which is separate from the contract terms around it.
+  if (hourlyRate !== undefined) nanny.hourlyRate = hourlyRate;
+
+  nanny.contract = {
+    ...(nanny.contract?.toObject?.() ?? nanny.contract ?? {}),
+    ...(minHours !== undefined ? { minimumHoursPerWeek: minHours } : {}),
+    ...(minShifts !== undefined ? { minimumShiftsPerWeek: minShifts } : {}),
+    ...(buffer !== undefined ? { safetyBufferPercent: buffer } : {}),
+    ...(req.body.notes !== undefined ? { notes: String(req.body.notes).slice(0, 2000) } : {}),
+    updatedBy: req.admin?._id,
+    updatedAt: new Date(),
+  };
+  await nanny.save();
+
+  const { contractStatus } = await import('../services/earnings.js');
+  res.json({
+    ok: true,
+    hourlyRate: nanny.hourlyRate || 0,
+    contract: nanny.contract,
+    status: await contractStatus(nanny._id),
+  });
+}));
 
 export default router;

@@ -89,6 +89,12 @@ export async function createBooking({ family, nanny, draft }) {
 
   const bookingNumber = String(await nextSequence('booking', 12344));
 
+  // The other nanny on a 24h booking, loaded only for her salary rate — she
+  // may be on a different one, and both have to be locked in at booking time.
+  const secondNannyDoc = draft.secondNanny
+    ? await User.findById(draft.secondNanny).select('hourlyRate')
+    : null;
+
   const booking = await Booking.create({
     bookingNumber,
     family: family._id,
@@ -123,6 +129,12 @@ export async function createBooking({ family, nanny, draft }) {
     agentCallRequested: !!draft.agentCallRequested,
     hourlyRate,
     totalAmount,
+    // Her own agreed salary rate, copied from her profile as it stands today.
+    // Separate from `hourlyRate` above, which is what the family pays: the gap
+    // between the two is our commission. Locked here so a later renegotiation
+    // cannot change what she is owed for work already done.
+    nannyHourlyRate: nanny?.hourlyRate || 0,
+    secondNannyHourlyRate: secondNannyDoc?.hourlyRate || undefined,
     // Kept so support can explain a price months later without recomputing it.
     standardHourlyRate: pricing.standardRate,
     referralDiscountApplied: pricing.discounted,
@@ -226,7 +238,15 @@ export function syncBookingStatus(booking) {
   const anyCompleted = active.some((d) => d.status === SERVICE_DAY_STATUS.COMPLETED);
 
   if (inFlight || anyCompleted) {
-    booking.status = BOOKING_STATUS.ONGOING;
+    // A booking waiting on a top-up keeps that status while the balance is
+    // outstanding. The days still run — the scheduler deliberately includes
+    // this status — but flipping it to ONGOING here would erase the only
+    // signal that money is still owed, and the dashboard would stop chasing
+    // it. `additionalDue` returning to zero is what releases it.
+    const awaitingTopUp = booking.status === BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT
+      && (booking.additionalDue || 0) > 0;
+
+    if (!awaitingTopUp) booking.status = BOOKING_STATUS.ONGOING;
     const map = {
       [SERVICE_DAY_STATUS.AWAITING_ARRIVAL]: BOOKING_SUBSTATUS.AWAITING_ARRIVAL,
       [SERVICE_DAY_STATUS.ARRIVAL_CONFIRMED]: BOOKING_SUBSTATUS.ARRIVAL_CONFIRMED,
@@ -341,8 +361,56 @@ export async function assignReplacement(booking, nanny) {
   return { difference: 0, requiresPayment: false };
 }
 
+/**
+ * Release a confirmed booking to the nanny — or to both, on a 24h booking.
+ *
+ * A 24-hour booking is covered by two nannies in shifts. The family picks
+ * both and pays for both, so both have to be asked. Until this existed each
+ * approval path notified `booking.nanny` alone, and the second nanny never
+ * heard about a job she had been booked and paid for.
+ *
+ * Shared by the single and bulk approval routes because they were drifting:
+ * the same twenty lines written twice, and a fix to one never reached the
+ * other.
+ *
+ * Returns the nannies actually asked, so the caller can log or report it.
+ */
+export async function releaseBookingToNannies(booking, family, notifyUser, messages) {
+  if (booking.status !== BOOKING_STATUS.PENDING_PAYMENT) return [];
+
+  // The pair, in the order the family chose them, with any blank slot dropped.
+  const ids = [booking.nanny, booking.secondNanny].filter(Boolean);
+  if (!ids.length) return [];
+
+  const { setNannyRequestState } = await import('../flows/familyBookingPayment.js');
+  const asked = [];
+
+  for (const id of ids) {
+    // Already a document when the caller populated it; an id otherwise.
+    const nanny = id?._id ? id : await User.findById(id);
+    if (!nanny) continue;
+
+    const { expiresAt } = openNannyResponseWindow(booking, nanny._id, 'new_booking');
+    asked.push({ nanny, expiresAt });
+  }
+
+  if (!asked.length) return [];
+
+  // One save for both windows, then message them.
+  booking.status = BOOKING_STATUS.UPCOMING;
+  await booking.save();
+
+  for (const { nanny, expiresAt } of asked) {
+    await notifyUser(nanny, messages.nannyBookingRequest(booking, family, expiresAt));
+    await setNannyRequestState(nanny, booking);
+  }
+
+  return asked.map((a) => a.nanny);
+}
+
 export default {
   generateServiceCode, buildServiceDays, createBooking, recalcServiceDays,
   openNannyResponseWindow, pendingResponse, isInResponseWindow,
+  releaseBookingToNannies,
   syncBookingStatus, cancelBooking, markNannyCancelled, assignReplacement,
 };

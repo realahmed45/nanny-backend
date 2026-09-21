@@ -860,9 +860,17 @@ test('only ticked media reaches a family, and the profile is capped', async () =
   const shown = featuredMedia(nanny).map((m) => m.url);
   assert.deepEqual(shown, ['https://cdn/v-shown.mp4', 'https://cdn/p-shown.jpg']);
 
-  // Approval alone is not permission to display — that is the whole point.
+  // The profile text names the media rather than linking it — the files
+  // themselves follow as real WhatsApp images and videos, so a family sees
+  // the photo in the chat instead of a URL to open in a browser. So the
+  // assertion is about the count line, and about no URL ever leaking into
+  // the text.
   const profile = nannyProfile(nanny);
-  assert.match(profile, /v-shown\.mp4/);
+  assert.match(profile, /1 photo and 1 video/);
+  assert.doesNotMatch(profile, /https:\/\/cdn/, 'URLs are never shown to a family');
+
+  // Approval alone is not permission to display — that is the whole point.
+  // What a family actually receives is featuredMedia(), asserted above.
   assert.doesNotMatch(profile, /v-approved-only/, 'approved but unticked stays private');
   assert.doesNotMatch(profile, /v-unapproved/);
   assert.doesNotMatch(profile, /p-approved-only/);
@@ -1183,43 +1191,11 @@ test('an emergency lasting an unknown time is still bookable', async () => {
     session.data.startDate,
     'today stands in, so the booking is valid and staffable today',
   );
-  assert.equal(session.state, 'FF_REPEAT_DAYS');
-});
-
-test('an emergency lasting an unknown time is still bookable', async () => {
-  const { Session } = await import('../src/models/index.js');
-
-  await say(FAMILY, 'nanny');
-  await say(FAMILY, '1');
-  await say(FAMILY, '1');
-  await say(FAMILY, 'Sarah Johnson');
-  await say(FAMILY, 'sarah@email.com');
-  await say(FAMILY, await latestOtp(FAMILY));
-  await say(FAMILY, 'https://maps.google.com/?q=25.2,55.3');
-  await say(FAMILY, 'Downtown Dubai');
-  await say(FAMILY, '2');
-  await say(FAMILY, '2');                              // multiple days
-  await say(FAMILY, dayjs().format('YYYY-MM-DD'));     // today
-  await say(FAMILY, '1');                              // it is urgent
-  let reply = await say(FAMILY, '1');                  // keep this location
-
-  assert.match(reply, /How long do you need the nanny/i);
-  assert.match(reply, /I do not know yet/i, 'not knowing is offered as an answer');
-
-  // Someone whose childcare has just collapsed often cannot say how long they
-  // need cover for. Forcing a date would only get a guess, and a guess becomes
-  // a booking that has to be changed later.
-  reply = await say(FAMILY, '2');
-  assert.match(reply, /No problem/i);
-
-  const session = await Session.findOne({ phone: FAMILY });
-  assert.equal(session.data.endDateUnknown, true, 'flagged, not silently guessed');
-  assert.equal(
-    session.data.endDate,
-    session.data.startDate,
-    'today stands in, so the booking is valid and staffable today',
-  );
-  assert.equal(session.state, 'FF_REPEAT_DAYS');
+  // Today standing in for the end date makes this a single-day booking, and
+  // asking which weekdays a one-day booking repeats on is a question with no
+  // sensible answer — so the flow fills the repeat day in from the date and
+  // goes straight to asking the time.
+  assert.equal(session.state, 'FF_START_TIME');
 });
 
 test('family registration collects name, email and verifies OTP', async () => {
