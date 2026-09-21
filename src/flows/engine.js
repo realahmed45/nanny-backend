@@ -164,6 +164,17 @@ async function handleGlobalCommand(ctx) {
     return restartHandler(ctx);
   }
 
+  // Change language from anywhere. Reachable mid-flow on purpose: the person
+  // most likely to need it is the one who picked the wrong language and now
+  // cannot read the screen they are on. Their place is remembered, so
+  // switching language does not cost them the booking they were making.
+  if (command === 'LANGUAGE') {
+    const M = await import('../utils/messages.js');
+    session.push(session.state);
+    session.state = 'LANGUAGE_PICK';
+    return { text: M.LANGUAGE_PICKER, state: 'LANGUAGE_PICK', noTranslate: true };
+  }
+
   if (command === 'MAIN_MENU') {
     const state = mainMenuState(session.role);
     session.reset(state);
@@ -512,7 +523,7 @@ export async function handleMessage({ phone: rawPhone, text = '', mediaUrl, medi
     const bodies = [voice.notice, prompt].filter(Boolean);
     for (const body of bodies) {
       // eslint-disable-next-line no-await-in-loop
-      await sendText(phone, body, { role: session.role, state: session.state }).catch(() => {});
+      await sendText(phone, body, { role: session.role, state: session.state, locale: session.locale }).catch(() => {});
     }
     return bodies;
   }
@@ -766,7 +777,13 @@ async function applyResult(session, result, ctx) {
       bodies.push(node.text);
       session.lastBotMessage = node.text;
       try {
-        await sendText(session.phone, node.text, { role: session.role, state: session.state });
+        await sendText(session.phone, node.text, {
+          role: session.role,
+          state: session.state,
+          locale: session.locale,
+          // The language picker carries this: it is already multilingual.
+          noTranslate: node.noTranslate,
+        });
       } catch (err) {
         console.error(`[engine] send failed to ${session.phone}: ${err.message}`);
       }
@@ -794,7 +811,7 @@ async function applyResult(session, result, ctx) {
           await sendText(
             session.phone,
             `${item.caption || (item.kind === 'video' ? 'Video' : 'Photo')}: ${link}`,
-            { role: session.role, state: session.state },
+            { role: session.role, state: session.state, locale: session.locale },
           ).catch(() => {});
         }
       }

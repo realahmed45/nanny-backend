@@ -189,6 +189,16 @@ const UserSchema = new mongoose.Schema({
   age: Number,
   experienceYears: Number,
   languages: [RatedItemSchema],
+
+  /**
+   * The language this person is written to in.
+   *
+   * Distinct from `languages` directly above, which is what a nanny speaks
+   * and families search on. This is the language the bot uses when it writes
+   * to them — asked once on first contact, then kept, because nobody should
+   * have to pick their language every time they say hello.
+   */
+  locale: { type: String, default: 'en' },
   skills: [RatedItemSchema],
   subjects: [String],
   /**

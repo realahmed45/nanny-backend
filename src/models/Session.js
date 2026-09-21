@@ -10,6 +10,16 @@ const SessionSchema = new mongoose.Schema({
   role: { type: String, enum: ['family', 'nanny', null], default: null },
   user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 
+  /**
+   * The language this conversation happens in.
+   *
+   * Held on the session as well as the user because a conversation starts
+   * before anyone is registered: someone picks a language, and the messages
+   * that follow must honour it immediately, not from whenever an account is
+   * created. On registration it is copied to the user and outlives the session.
+   */
+  locale: { type: String, default: 'en' },
+
   state: { type: String, default: 'START' },
   data: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
 

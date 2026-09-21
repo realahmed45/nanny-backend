@@ -22,7 +22,10 @@ export async function notifyUser(userOrId, body, meta = {}) {
     ? userOrId
     : await User.findById(userOrId);
   if (!user?.phone) return { skipped: true };
-  return notifyPhone(user.phone, body, { role: user.role, ...meta });
+  // Their language, so a reminder or a booking alert arrives in it. Every
+  // system-initiated message passes through here, which is why this one line
+  // covers reminders, broadcasts and scheduler jobs alike.
+  return notifyPhone(user.phone, body, { role: user.role, locale: user.locale, ...meta });
 }
 
 /**

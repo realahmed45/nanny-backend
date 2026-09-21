@@ -6,10 +6,39 @@ import {
   LANGUAGES, SKILLS, SUBJECTS, WEEKDAYS, MAX_FEATURED_VIDEOS, MAX_FEATURED_PHOTOS,
 } from './constants.js';
 import config from '../config/index.js';
+import { languageMenu, LOCALE_CODES } from './locales.js';
+
+/** Rendered once at load: the list does not change while the process runs. */
+const LANG_MENU = languageMenu();
+const LANG_COUNT = LOCALE_CODES.length;
 
 /* ------------------------------------------------------------------ *
  * Shared / global
  * ------------------------------------------------------------------ */
+
+/**
+ * The language picker, shown once to anyone we have not met.
+ *
+ * Built from the locale list rather than written out, so adding a language
+ * is one line in locales.js and this menu updates itself. Each option is in
+ * its own language: somebody who cannot read English cannot find "Spanish"
+ * in a list, but they will find "Espanol".
+ *
+ * Never translated — it is already in every language it offers.
+ */
+export const LANGUAGE_PICKER = `🌍 *Please choose your language*
+
+${LANG_MENU}
+
+_Reply with a number._`;
+
+/** Same menu again after an unrecognised reply, with the hint made plainer. */
+export const LANGUAGE_PICKER_RETRY = `Please reply with a number from 1 to ${LANG_COUNT}.
+
+${LANG_MENU}`;
+
+/** Confirmation, sent in the language just chosen so the choice is visible. */
+export const LANGUAGE_SET = 'Done. We will write to you in this language from now on.';
 
 export const WELCOME_FAMILY =
   '👋 Welcome to *My Nanny*\nFind a trusted nanny in just a few minutes.\nHow can I help you today?';

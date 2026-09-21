@@ -4,6 +4,7 @@ import dayjs from 'dayjs';
 import {
   setupDb, teardownDb, clearDb, say, latestOtp, messagesTo, outbox,
   setEmailVerification, setConversationMode,
+  startChat,
 } from './helpers.js';
 
 const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
@@ -21,7 +22,7 @@ async function createVerifiedNanny(phone = NANNY, { rate = 25, name = 'Maria Gro
   const { User } = await import('../src/models/index.js');
   const { NANNY_STATUS, USER_ROLE } = await import('../src/utils/constants.js');
 
-  await say(phone, 'nanny');
+  await startChat(phone);
   await say(phone, '2');            // I'm a nanny
   await say(phone, name);
   await say(phone, address);
@@ -60,7 +61,7 @@ async function createVerifiedNanny(phone = NANNY, { rate = 25, name = 'Maria Gro
 async function familyBookingUpToListing(phone = FAMILY, { date = null } = {}) {
   const target = date || dayjs().add(10, 'day').format('YYYY-MM-DD');
 
-  await say(phone, 'nanny');
+  await startChat(phone);
   await say(phone, '1');            // I'm a family
   await say(phone, '1');            // Find a Nanny
   await say(phone, 'Sarah Johnson');
@@ -279,7 +280,7 @@ test('asking for agent help queues a callback with what was captured', async () 
   const { CallbackRequest } = await import('../src/models/index.js');
   await createVerifiedNanny();
 
-  await say(FAMILY, 'nanny');
+  await startChat(FAMILY);
   await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
@@ -325,7 +326,7 @@ test('booking dates are limited to a sensible window', async () => {
   const toStartDate = async (multi = false) => {
     await clearDb();
     await createVerifiedNanny();
-    await say(FAMILY, 'nanny');
+    await startChat(FAMILY);
     await say(FAMILY, '1');
     await say(FAMILY, '1');
     await say(FAMILY, 'Sarah Johnson');
@@ -363,7 +364,7 @@ test('"Return back" restarts from the very first question', async () => {
   const { Session } = await import('../src/models/index.js');
   await createVerifiedNanny();
 
-  await say(FAMILY, 'nanny');
+  await startChat(FAMILY);
   await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
@@ -388,7 +389,7 @@ test('a weekday answer is confirmed back as a real date', async () => {
   const { Session } = await import('../src/models/index.js');
   await createVerifiedNanny();
 
-  await say(FAMILY, 'nanny');
+  await startChat(FAMILY);
   await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
@@ -435,7 +436,7 @@ test('a voice note is answered rather than ignored', async () => {
   const { handleMessage } = await import('../src/flows/index.js');
 
   await createVerifiedNanny();
-  await say(FAMILY, 'nanny');
+  await startChat(FAMILY);
   await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
@@ -542,7 +543,7 @@ test('contact details are stripped from relayed chat messages', async () => {
 });
 
 test('the bot greets people by their first name', async () => {
-  await say(FAMILY, 'nanny');
+  await startChat(FAMILY);
   await say(FAMILY, '1');
   await say(FAMILY, '1');
 
@@ -582,12 +583,19 @@ test('only the word "nanny" starts the bot', async () => {
     assert.equal(session.state, 'START', `"${text}" should leave the session untouched`);
   }
 
-  // Phones capitalise the first letter, so casing must not matter.
+  // Phones capitalise the first letter, so casing must not matter. The first
+  // screen is the language picker: it comes before the role question because
+  // that question is unreadable to someone who does not read English.
   for (const text of ['nanny', 'Nanny', 'NANNY', 'nanny!', 'Hi nanny']) {
     await clearDb();
     const reply = await say(FAMILY, text);
-    assert.match(reply, /Welcome to \*My Nanny\*/, `"${text}" should start the bot`);
-    assert.match(reply, /I'm a Family/);
+    assert.match(reply, /choose your language/i, `"${text}" should start the bot`);
+    assert.match(reply, /Bahasa Indonesia/, 'the picker lists languages in their own script');
+
+    // Choosing English then leads to the role question as it always did.
+    const next = await say(FAMILY, '1');
+    assert.match(next, /Welcome to \*My Nanny\*/);
+    assert.match(next, /I'm a Family/);
   }
 });
 
@@ -626,7 +634,7 @@ test('the video step keeps every video and photo a nanny sends', async () => {
  * the only route into the 24-hour branch.
  */
 async function multiDayToDuration(phone = FAMILY) {
-  await say(phone, 'nanny');
+  await startChat(phone);
   await say(phone, '1');
   await say(phone, '1');
   await say(phone, 'Sarah Johnson');
@@ -708,7 +716,7 @@ test('a 24-hour booking for one day does not need an agent', async () => {
   const { Session } = await import('../src/models/index.js');
   await createVerifiedNanny();
 
-  await say(FAMILY, 'nanny');
+  await startChat(FAMILY);
   await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
@@ -738,7 +746,7 @@ test('a 24-hour booking for one day does not need an agent', async () => {
 test('an emergency promises a call, records it, and confirms the address', async () => {
   const { Session, CallbackRequest } = await import('../src/models/index.js');
 
-  await say(FAMILY, 'nanny');
+  await startChat(FAMILY);
   await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
@@ -777,7 +785,7 @@ test('an emergency promises a call, records it, and confirms the address', async
 });
 
 test('an emergency that keeps its address carries straight on', async () => {
-  await say(FAMILY, 'nanny');
+  await startChat(FAMILY);
   await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
@@ -905,7 +913,8 @@ test('a conversation abandoned months ago starts cleanly', async () => {
     lastMessageAt: dayjs().subtract(90, 'day').toDate(),
   });
 
-  // The word now behaves the way anyone would expect it to.
+  // A known person skips the language picker — their language is already on
+  // their account — so this goes straight through `say`.
   const reply = await say(NANNY, 'nanny');
   assert.match(reply, /Welcome back Maria/i);
   assert.doesNotMatch(reply, /hourly rate/i, 'not dropped back into a form from March');
@@ -1161,7 +1170,7 @@ test('an emergency is offered to everyone and claimed by the first to answer', a
 test('an emergency lasting an unknown time is still bookable', async () => {
   const { Session } = await import('../src/models/index.js');
 
-  await say(FAMILY, 'nanny');
+  await startChat(FAMILY);
   await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
@@ -1201,7 +1210,7 @@ test('an emergency lasting an unknown time is still bookable', async () => {
 test('family registration collects name, email and verifies OTP', async () => {
   const { User } = await import('../src/models/index.js');
 
-  let reply = await say(FAMILY, 'nanny');
+  let reply = await startChat(FAMILY);
   assert.match(reply, /Welcome to \*My Nanny\*/);
   assert.match(reply, /I'm a Family/);
 
@@ -1304,7 +1313,7 @@ test('booking asks for a date by option, and flags same-day as an emergency', as
   const { Booking } = await import('../src/models/index.js');
   await createVerifiedNanny();
 
-  await say(FAMILY, 'nanny');
+  await startChat(FAMILY);
   await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
@@ -1486,7 +1495,7 @@ test('multi-day booking builds one service day per matching weekday', async () =
   while (start.day() !== 1) start = start.add(1, 'day');
   const end = start.add(13, 'day');   // two full weeks
 
-  await say(FAMILY, 'nanny');
+  await startChat(FAMILY);
   await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
@@ -1523,7 +1532,7 @@ test('multi-day booking builds one service day per matching weekday', async () =
 });
 
 test('global commands work: 0 returns to the main menu', async () => {
-  await say(FAMILY, 'nanny');
+  await startChat(FAMILY);
   await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
@@ -1767,7 +1776,7 @@ test('with email verification off, a nanny registers on her name alone', async (
   await setEmailVerification(false);
   const phone = '999300000010';
 
-  await say(phone, 'nanny');
+  await startChat(phone);
   await say(phone, '2');
   const reply = await say(phone, 'Siti Rahayu');
 
@@ -1788,7 +1797,7 @@ test('with email verification off, a family registers on its name alone', async 
   const phone = '999300000011';
 
   // "nanny" is the trigger word; anything else is ignored at START.
-  await say(phone, 'nanny');
+  await startChat(phone);
   await say(phone, '1');   // I'm a family
   await say(phone, '1');   // Find a Nanny -> asks for a name
   const reply = await say(phone, 'Sarah Jones');
@@ -1805,7 +1814,7 @@ test('turning it back on restores the email step', async () => {
   await setEmailVerification(true);
   const phone = '999300000012';
 
-  await say(phone, 'nanny');
+  await startChat(phone);
   await say(phone, '2');
   const reply = await say(phone, 'Dewi Putri');
 
@@ -1864,7 +1873,7 @@ function stubGroq() {
 
 /** Walk a nanny registration as far as the languages question. */
 async function toLanguages(phone) {
-  await say(phone, 'nanny');
+  await startChat(phone);
   await say(phone, '2');
   await say(phone, 'Maria Test');
   await say(phone, 'Maria');
@@ -1950,7 +1959,7 @@ test('a mistyped option at the main menu redraws the menu rather than chatting',
 
   try {
     const phone = '999500000104';
-    await say(phone, 'nanny');
+    await startChat(phone);
     await say(phone, '1');
 
     const reply = await say(phone, '99');

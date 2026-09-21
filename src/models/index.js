@@ -16,3 +16,4 @@ export { default as Note } from './Note.js';
 export { default as ShareLink } from './ShareLink.js';
 export { default as ShareLinkClick, SKIP_REASON } from './ShareLinkClick.js';
 export { default as LinkAbuseAlert, ABUSE_KIND } from './LinkAbuseAlert.js';
+export { default as Translation } from './Translation.js';

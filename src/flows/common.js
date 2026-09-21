@@ -158,6 +158,9 @@ on('START', async (ctx) => {
 
   if (existing && existing.registrationComplete) {
     const state = mainMenuState(existing.role);
+    // Their saved language governs this conversation from here on, including
+    // the greeting below — a returning user never picks a language twice.
+    if (existing.locale) ctx.session.locale = existing.locale;
     return {
       text: `${existing.role === USER_ROLE.NANNY ? M.WELCOME_NANNY : M.WELCOME_FAMILY}\n\n${mainMenuFor(existing.role)}`,
       state,
@@ -170,6 +173,7 @@ on('START', async (ctx) => {
   // Registration was started but not finished — resume where they left off.
   if (existing) {
     const state = existing.role === USER_ROLE.NANNY ? 'NANNY_REG_RESUME' : 'FAMILY_REG_RESUME';
+    if (existing.locale) ctx.session.locale = existing.locale;
     return {
       text: `👋 Welcome back ${firstName(existing.fullName) || ''}! Let's finish setting up your account.`,
       state,
@@ -177,6 +181,45 @@ on('START', async (ctx) => {
       user: existing._id,
       noPush: true,
     };
+  }
+
+  // Nobody we know. Ask the language first, because every question after
+  // this one is unreadable to someone who does not read English — including
+  // the question asking whether they are a family or a nanny.
+  return { text: M.LANGUAGE_PICKER, state: 'LANGUAGE_PICK', noPush: true, noTranslate: true };
+});
+
+/**
+ * Pick the language, once.
+ *
+ * Deliberately the first thing asked of a new contact and never asked again:
+ * the choice is stored on the session immediately so the very next message is
+ * already translated, and copied onto the user when they register.
+ */
+on('LANGUAGE_PICK', async (ctx) => {
+  const { localeFromMenuChoice } = await import('../utils/locales.js');
+  const locale = localeFromMenuChoice(ctx.text);
+
+  if (!locale) {
+    // Re-asked in English, because we do not yet know what else they read,
+    // and the menu itself is written in the languages it offers.
+    return { text: M.LANGUAGE_PICKER_RETRY, state: 'LANGUAGE_PICK', noPush: true, noTranslate: true };
+  }
+
+  ctx.session.locale = locale;
+
+  // Registered people keep the choice on their account, so it survives the
+  // session and applies to reminders and notifications sent later.
+  if (ctx.session.user) {
+    await User.updateOne({ _id: ctx.session.user }, { $set: { locale } }).catch(() => {});
+  }
+  await ctx.session.save().catch(() => {});
+
+  // Reached from the menu mid-conversation: confirm and put them back where
+  // they were, rather than restarting anything they had part-finished.
+  const back = ctx.session.pop();
+  if (back) {
+    return { text: M.LANGUAGE_SET, state: back, noPush: true };
   }
 
   return { text: M.ROLE_PICKER, state: 'ROLE_PICK', noPush: true };
@@ -249,6 +292,10 @@ export async function completeRegistration(ctx, role, { emailVerified }) {
       email: ctx.get('email'),
       emailVerified,
       referralCode: makeReferralCode(ctx.get('fullName')),
+      // The language they chose before they had an account. Carried across so
+      // notifications and reminders — which are sent outside any session —
+      // reach them in the language they actually read.
+      locale: ctx.session.locale || 'en',
     });
   } else {
     user.fullName = ctx.get('fullName') || user.fullName;

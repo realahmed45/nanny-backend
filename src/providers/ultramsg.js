@@ -57,6 +57,33 @@ const UNROUTABLE = /^999/;
 export async function sendText(to, body, meta = {}) {
   const phone = normalizePhone(to);
 
+  /**
+   * Put the message in the reader's language before anything else happens.
+   *
+   * Done here rather than in each flow because this is the one point every
+   * outbound message passes through — flows, schedulers, broadcasts and
+   * reminders alike. A message added next year is translated without anyone
+   * remembering to do it, which is the only way a translation layer stays
+   * complete.
+   *
+   * `meta.locale` is passed by the caller that already knows who it is
+   * writing to. Absent, or English, and the text goes out as written.
+   */
+  let text = String(body ?? '');
+  // The language picker is already written in every language it offers;
+  // translating it would render the other eleven options unreadable to the
+  // one person who needs them.
+  if (meta.locale && meta.locale !== 'en' && !meta.noTranslate) {
+    try {
+      const { translate } = await import('../services/translate.js');
+      text = await translate(text, meta.locale);
+    } catch (err) {
+      // A translation failure must never swallow the message itself.
+      console.error(`[ultramsg] translation skipped: ${err.message}`);
+    }
+  }
+  body = text;
+
   if (UNROUTABLE.test(phone)) {
     // Logged, not silent: a seeded account that should have been a real one is
     // worth noticing, and the conversation still shows in the dashboard.

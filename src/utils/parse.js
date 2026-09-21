@@ -41,9 +41,34 @@ export function detectCommand(text) {
   // Checked before BACK, since "return back" contains "back".
   if (t === COMMANDS.RESTART || t === 'restart' || t === 'start over') return 'RESTART';
   if (t === COMMANDS.BACK) return 'BACK';
+  // Recognised in every language it offers, because someone who picked the
+  // wrong language cannot read the menu that would let them change it. These
+  // are the words for "language" a person is most likely to reach for.
+  if (LANGUAGE_WORDS.has(t)) return 'LANGUAGE';
   if (isNone(t)) return 'NONE';
   return null;
 }
+
+/**
+ * How people ask to change language, across the languages we support.
+ *
+ * Someone who chose Japanese by mistake is now looking at a menu they cannot
+ * read; the way out has to be typeable from that position, so the English
+ * word is accepted alongside each native one.
+ */
+const LANGUAGE_WORDS = new Set([
+  'language', 'lang',
+  'bahasa',            // Indonesian
+  'idioma',            // Spanish, Portuguese
+  'langue',            // French
+  'sprache',           // German
+  'язык',              // Russian
+  'لغة',               // Arabic
+  '语言',               // Chinese (Simplified)
+  '語言',               // Chinese (Traditional)
+  '言語',               // Japanese
+  '언어',               // Korean
+]);
 
 /**
  * "None" and the ways people actually type it.

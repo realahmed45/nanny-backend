@@ -101,6 +101,21 @@ export async function say(phone, text, extra = {}) {
   return replies.join('\n---\n');
 }
 
+/**
+ * Wake the bot and get past the language picker in one step.
+ *
+ * A new contact is asked their language before anything else, so almost every
+ * test would otherwise open with the same two lines of picking English. This
+ * keeps that detail in one place: when the picker changes, the tests do not.
+ *
+ * Returns the bot's reply to the language choice — that is, the first real
+ * screen of the conversation.
+ */
+export async function startChat(phone, { locale = '1' } = {}) {
+  await say(phone, 'nanny');
+  return say(phone, locale);
+}
+
 /** Read the most recent OTP issued to a phone (email delivery is mocked). */
 export async function latestOtp(phone) {
   const { Otp } = await import('../src/models/index.js');
