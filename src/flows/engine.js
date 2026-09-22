@@ -360,6 +360,71 @@ function isNavigationMenu(text) {
  * path leaves the original rejection standing, so this cannot make the bot
  * worse than it is without it.
  */
+/**
+ * Answer from the sheet somebody filled in, rather than repeating the question.
+ *
+ * The structured flow has one reply for a rejected answer: ask again. That is
+ * correct when somebody typed the wrong thing, and useless when they asked a
+ * question — "what's the minimum?" gets the minimum-hours question repeated
+ * back at them.
+ *
+ * So each step of the flow has a box in the dashboard, and whatever is written
+ * there is sent before the question is put again. Nothing is invented: an
+ * empty box, or the sheet switched off, returns null and the flow carries on
+ * exactly as it does today.
+ *
+ *   strict    the written answer, word for word
+ *   flexible  the same answer, worded to fit what was actually asked
+ *
+ * Both keep the question after the answer, because the booking still needs it.
+ */
+async function answerFromSheet(ctx, rejection) {
+  if (ctx.mediaUrl || ctx.command) return null;
+
+  const said = String(ctx.text || '').trim();
+  if (!said) return null;
+
+  // A menu choice that missed is a typo, not a question. Answering "2x" with
+  // a paragraph about our hours would be worse than redrawing the menu.
+  if (/^[\d\s,.]+$/.test(said)) return null;
+
+  try {
+    const {
+      getReplySheet, answerFor, stepForState, REPLY_MODE,
+    } = await import('../services/replies.js');
+
+    const sheet = await getReplySheet();
+    if (!sheet.enabled) return null;
+
+    const step = stepForState(ctx.session?.state);
+    if (!step) return null;
+
+    const written = answerFor(step, sheet);
+    if (!written) return null;
+
+    let answer = written;
+
+    // Flexible: the same facts, worded to fit the question actually asked.
+    // Strict sends the box verbatim, which is the point of strict.
+    if (sheet.mode === REPLY_MODE.FLEXIBLE) {
+      const { adaptAnswer, isConfigured } = await import('../services/aiConversation.js');
+      if (isConfigured() && typeof adaptAnswer === 'function') {
+        const better = await adaptAnswer({ asked: said, answer: written });
+        if (better) answer = better;
+      }
+    }
+
+    // The question follows the answer: they still have to answer it, and a
+    // reply that ends without it leaves the conversation with nowhere to go.
+    const question = String(rejection?.text || '').trim();
+    ctx.aiAnswered = true;
+    return { ...rejection, text: question ? `${answer}\n\n${question}` : answer };
+  } catch (err) {
+    console.error(`[engine] reply sheet failed: ${err.message}`);
+    return null;
+  }
+}
+
 async function retryWithAi(ctx, handler, prompt) {
   if (ctx.mediaUrl || ctx.command) return null;
   const said = String(ctx.text || '').trim();
@@ -588,8 +653,17 @@ export async function handleMessage({ phone: rawPhone, text = '', mediaUrl, medi
         try { prompt = await handler.prompt(ctx); } catch { prompt = null; }
       }
       if (looksRejected(result, prompt)) {
-        const better = await retryWithAi(ctx, handler, prompt);
-        if (better) result = better;
+        // The answer sheet first: somebody has written what to say when a
+        // question is asked at this step, and a written answer beats a
+        // generated one. Tried before the AI path, and independent of it —
+        // the sheet works whether or not AI mode is on.
+        const answered = await answerFromSheet(ctx, result);
+        if (answered) {
+          result = answered;
+        } else {
+          const better = await retryWithAi(ctx, handler, prompt);
+          if (better) result = better;
+        }
       }
     }
   } catch (err) {

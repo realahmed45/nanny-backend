@@ -1,6 +1,6 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
-import { PHRASES } from '../services/phrasebook.js';
+import { STEP_KEYS } from '../services/replies.js';
 import dayjs from 'dayjs';
 import {
   User, Booking, Ticket, ChatThread, MessageLog, AdminUser, Session, CallbackRequest,
@@ -3007,8 +3007,7 @@ const RUNTIME_SETTINGS = new Set([
   'conversationMode',
   'emailVerification',
   'autoVerifyNannies',
-  'phrasing',
-  'phrasingOverrides',
+  'replySheet',
 ]);
 
 /**
@@ -3090,68 +3089,37 @@ function validateSetting(key, value) {
    * is identical and the tolerance is different.
    */
   /**
-   * How the bot words a question: one fixed wording, or one of several.
+   * The answer sheet: what the bot says when somebody asks something instead
+   * of answering the question in front of them.
    *
-   * Nothing generated — every alternative is written and stored. Separate
-   * from conversationMode, which governs how a *reply* is read rather than
-   * how a *question* is put.
+   * Only for the structured flow, off until switched on, and never generated
+   * — whatever is typed in the dashboard is the whole of what the bot knows.
    */
-  if (key === 'phrasing') {
-    const mode = String(value?.mode || value || '').trim();
-    if (!['strict', 'flexible'].includes(mode)) {
-      throw new Error('Phrasing must be "strict" or "flexible"');
-    }
-    return { mode };
-  }
-
-  /**
-   * Wording edited in the dashboard, replacing what ships in the code.
-   *
-   * Checked rather than trusted: a variant that drops a {{placeholder}}
-   * sends a family a message with a blank where a name should be, and one
-   * that renumbers a menu routes somebody to the wrong option. Either is
-   * worse than the original wording, so either is refused.
-   */
-  if (key === 'phrasingOverrides') {
+  if (key === 'replySheet') {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      throw new Error('Phrasing overrides must be an object');
+      throw new Error('Reply sheet must be an object');
     }
 
-    const out = {};
+    const mode = String(value.mode || 'strict');
+    if (!['strict', 'flexible'].includes(mode)) {
+      throw new Error('Reply mode must be "strict" or "flexible"');
+    }
 
-    for (const [phraseKey, entry] of Object.entries(value)) {
-      const known = PHRASES[phraseKey];
-      if (!known) throw new Error(`Unknown question: ${phraseKey}`);
-
-      const required = known.placeholders || [];
-      const check = (text, where) => {
-        const str = String(text || '').trim();
-        if (!str) throw new Error(`${phraseKey}: ${where} cannot be empty`);
-        if (str.length > 900) throw new Error(`${phraseKey}: ${where} is too long`);
-        for (const token of required) {
-          if (!str.includes(token)) {
-            throw new Error(`${phraseKey}: ${where} must still contain ${token}`);
-          }
-        }
-        return str;
-      };
-
-      const clean = {};
-      if (entry?.strict !== undefined) clean.strict = check(entry.strict, 'the strict wording');
-
-      if (entry?.flexible !== undefined) {
-        if (!Array.isArray(entry.flexible)) {
-          throw new Error(`${phraseKey}: alternatives must be a list`);
-        }
-        if (entry.flexible.length > 8) {
-          throw new Error(`${phraseKey}: at most 8 alternatives`);
-        }
-        clean.flexible = entry.flexible.map((t, i) => check(t, `alternative ${i + 1}`));
+    const answers = {};
+    for (const [stepKey, text] of Object.entries(value.answers || {})) {
+      if (!STEP_KEYS.includes(stepKey)) {
+        throw new Error(`Unknown step: ${stepKey}`);
       }
-
-      if (Object.keys(clean).length) out[phraseKey] = clean;
+      const clean = String(text ?? '').trim();
+      // An empty box is not an error; it is how a step is left alone.
+      if (!clean) continue;
+      if (clean.length > 1500) {
+        throw new Error(`${stepKey}: that answer is too long for a WhatsApp message`);
+      }
+      answers[stepKey] = clean;
     }
-    return out;
+
+    return { enabled: Boolean(value.enabled), mode, answers };
   }
 
   if (key === 'conversationMode') {
@@ -3414,63 +3382,31 @@ router.get('/earnings/booking/:id', requireRole('admin', 'super_admin'), wrap(as
  * left to the end of the week is money paid for nothing.
  */
 /**
- * The bot's whole script, and how each question is worded in each mode.
+ * The structured flow, step by step, with whatever answer is written for each.
  *
- * Returned in one call rather than per question, because the point of the
- * page is to read the script end to end: a wording that is wrong is usually
- * only obviously wrong beside the ones around it.
+ * Returned whole rather than per step, because the point of the page is to
+ * read the flow in order: an answer only makes sense beside the question it
+ * follows.
  */
-router.get('/phrasing', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
-  const {
-    PHRASES: CATALOGUE, PHRASE_KEYS, ALWAYS_STRICT, getPhrasingMode, getOverrides,
-  } = await import('../services/phrasebook.js');
-
-  const [mode, overrides] = await Promise.all([getPhrasingMode(), getOverrides()]);
-
-  const questions = PHRASE_KEYS.map((key) => {
-    const entry = CATALOGUE[key];
-    const edited = overrides[key] || {};
-    return {
-      key,
-      label: entry.label,
-      // What is in force now, so the page shows the live wording rather
-      // than only what shipped in the code.
-      strict: edited.strict ?? entry.strict,
-      flexible: edited.flexible ?? entry.flexible,
-      // Whether this one has been changed from what the code ships.
-      edited: Boolean(edited.strict || edited.flexible),
-      fixed: ALWAYS_STRICT.has(key),
-      fixedBecause: entry.fixedBecause || null,
-      placeholders: entry.placeholders || [],
-      hasOptions: Boolean(entry.hasOptions),
-    };
-  });
+router.get('/replies', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const { FLOW_STEPS, getReplySheet } = await import('../services/replies.js');
+  const sheet = await getReplySheet();
 
   res.json({
-    mode,
-    questions,
+    enabled: sheet.enabled,
+    mode: sheet.mode,
+    steps: FLOW_STEPS.map((step) => ({
+      key: step.key,
+      group: step.group,
+      question: step.question,
+      asks: step.asks,
+      answer: sheet.answers[step.key] || '',
+    })),
     counts: {
-      total: questions.length,
-      fixed: questions.filter((q) => q.fixed).length,
-      edited: questions.filter((q) => q.edited).length,
+      total: FLOW_STEPS.length,
+      answered: FLOW_STEPS.filter((s) => sheet.answers[s.key]).length,
     },
   });
-}));
-
-/** Reset one question to the wording that ships in the code. */
-router.delete('/phrasing/:key', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
-  const { PHRASES: CATALOGUE } = await import('../services/phrasebook.js');
-  if (!CATALOGUE[req.params.key]) {
-    return res.status(404).json({ error: 'Unknown question' });
-  }
-
-  const { getSettings, setSetting } = await import('../services/settings.js');
-  const current = (await getSettings())?.phrasingOverrides || {};
-  const next = { ...current };
-  delete next[req.params.key];
-
-  await setSetting('phrasingOverrides', next, req.admin?._id);
-  res.json({ ok: true });
 }));
 
 router.get('/contracts', requireRole('admin', 'super_admin'), wrap(async (req, res) => {

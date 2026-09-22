@@ -463,6 +463,51 @@ const FACTS = [
  * Returns null on any doubt, and null means the original prompt is sent
  * unchanged — so a bad rewrite is never worse than no rewrite.
  */
+
+/**
+ * Word a written answer to fit the question that was actually asked.
+ *
+ * The office writes one answer per step — "minimum 3 hours, overtime is 1.5x"
+ * — and it has to serve every way that gets asked: "what's the minimum?",
+ * "can she stay late?", "is there a short booking?". Strict mode sends the
+ * note as written, which is blunt but always correct. This is the other mode.
+ *
+ * The one rule that matters: the facts come from the note and nowhere else.
+ * A model that fills a gap with something plausible is inventing policy, and
+ * a family will hold us to whatever it said.
+ */
+export async function adaptAnswer({ asked, answer }) {
+  const note = String(answer || '').trim();
+  const question = String(asked || '').trim();
+  if (!note || !question) return null;
+
+  const system = [
+    VOICE,
+    '',
+    'YOUR TASK:',
+    'You are given a customer question and the written answer the office gave.',
+    'Reply to the question using ONLY what the written answer contains.',
+    '',
+    'Rules:',
+    '- Never add a fact, number, price or promise that is not in the written answer.',
+    '- If the written answer does not cover what they asked, say what it does',
+    '  cover and leave the rest alone. Do not guess.',
+    '- Two sentences at most. This is a WhatsApp reply, not a page.',
+    '- Do not ask a question of your own; the booking asks the next one.',
+  ].join('\n');
+
+  const user = [
+    `They asked: "${question.slice(0, 300)}"`,
+    '',
+    `The written answer:\n"""\n${note.slice(0, 1200)}\n"""`,
+  ].join('\n');
+
+  const out = await ask({
+    system, user, maxTokens: 220, timeout: CHAT_TIMEOUT_MS, temperature: 0.3,
+  });
+  return out ? toWhatsAppMarkup(out) : null;
+}
+
 export async function rephrase({ question, options = [], role = 'customer', history = [], justSaid }) {
   const text = String(question || '').trim();
   if (!text || text.length > 900) return null;
