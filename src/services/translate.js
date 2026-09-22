@@ -208,14 +208,28 @@ export async function translate(text, localeInput) {
   const out = await callModel(source, locale);
   if (!out) return source;
 
-  if (!placeholdersIntact(source, out)) {
-    console.error(`[translate] placeholders altered for ${locale}; keeping English`);
+  /**
+   * A validation failure is permanent, so remember it as one.
+   *
+   * `temperature: 0` means the same English produces the same bad output
+   * every time. Without this the phrase is sent to the model again on every
+   * single send — same failure, same fallback to English, but paid for in
+   * full and charged against the 8-second budget of a reply somebody is
+   * waiting for. A menu that trips one of these guards would put that on
+   * every menu draw, for every user in that language.
+   *
+   * Cached in memory only, not in the database: a later model or a reworded
+   * source should get a fresh attempt rather than inheriting a verdict, and
+   * a process restart is a cheap enough place to re-check.
+   */
+  const keepEnglish = (why) => {
+    console.error(`[translate] ${why} for ${locale}; keeping English`);
+    remember(key, source);
     return source;
-  }
-  if (!menuNumbersIntact(source, out)) {
-    console.error(`[translate] menu numbering altered for ${locale}; keeping English`);
-    return source;
-  }
+  };
+
+  if (!placeholdersIntact(source, out)) return keepEnglish('placeholders altered');
+  if (!menuNumbersIntact(source, out)) return keepEnglish('menu numbering altered');
 
   remember(key, out);
 

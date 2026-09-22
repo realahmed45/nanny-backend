@@ -237,6 +237,12 @@ const STATE_TO_STEP = {
   FB_CHANGE_SKILLS: 'ASK_SKILLS',
 
   FF_OTHER_INSTRUCTIONS: 'ASK_OTHER_INSTRUCTIONS',
+
+  // Money. Without these two the boxes exist in the dashboard and can never
+  // be reached, which is the worst of both: somebody writes an answer about
+  // bank details and it is never sent.
+  FF_AWAIT_PROOF: 'ASK_PAYMENT_PROOF',
+  FF_CONFIRM_SUMMARY: 'CONFIRM_BOOKING_DETAILS',
   FF_ID_FRONT: 'ASK_ID_FRONT',
   NR_ID_FRONT: 'ASK_ID_FRONT',
 };

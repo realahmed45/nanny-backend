@@ -1,3 +1,4 @@
+import dayjs from 'dayjs';
 import { Session, User, MessageLog } from '../models/index.js';
 import { sendText, sendImage, sendVideo, normalizePhone } from '../providers/ultramsg.js';
 import { detectCommand, isStartWord } from '../utils/parse.js';
@@ -384,8 +385,25 @@ async function answerFromSheet(ctx, rejection) {
   const said = String(ctx.text || '').trim();
   if (!said) return null;
 
-  // A menu choice that missed is a typo, not a question. Answering "2x" with
-  // a paragraph about our hours would be worse than redrawing the menu.
+  /**
+   * Only answer something that is actually a question.
+   *
+   * A rejected reply is far more often a typo than a question — "tomorow" at
+   * the date step, "2x" at a menu. Answering those with a paragraph about our
+   * booking policy, then re-asking, is worse than simply re-asking: it buries
+   * the correction under text they did not want.
+   *
+   * So this asks the narrow question "did they ask something?" rather than
+   * the broad one "did the parser fail?". A question mark, or an opening
+   * word that starts one. Anything else falls through to the normal retry.
+   */
+  const looksLikeAQuestion =
+    said.includes('?')
+    || /^(what|when|where|who|why|how|can|could|do|does|did|is|are|will|would|should|may|must|if)\b/i.test(said);
+
+  if (!looksLikeAQuestion) return null;
+
+  // A bare menu choice is never a question, whatever else it contains.
   if (/^[\d\s,.]+$/.test(said)) return null;
 
   try {
@@ -466,7 +484,13 @@ async function retryWithAi(ctx, handler, prompt) {
       question,
       expect,
       options,
-      today: new Date().toISOString().slice(0, 10),
+      // The local date, not the UTC one. toISOString() converts to UTC
+      // first, so anywhere east of Greenwich the early hours still read as
+      // yesterday — in Bali, until 08:00. The AI was then told the wrong
+      // day, resolved "tomorrow" to today, and the flow treated the booking
+      // as a same-day emergency and charged the surcharge for it. The rest
+      // of the codebase already uses dayjs() for exactly this reason.
+      today: dayjs().format('YYYY-MM-DD'),
     });
 
     if (answer && answer !== said) {

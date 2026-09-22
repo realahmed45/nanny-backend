@@ -104,10 +104,27 @@ function scrub(doc) {
  * just not the value it replaced.
  */
 async function snapshot(req) {
-  const resource = String(req.path).split('/').filter(Boolean)[0];
+  const parts = String(req.path).split('/').filter(Boolean);
+  const resource = parts[0];
   const modelName = MODEL_BY_RESOURCE[resource];
   const id = targetIdFrom(req.path);
   if (!modelName || !id) return undefined;
+
+  /**
+   * Only ever snapshot the record the path is directly about.
+   *
+   * `targetIdFrom` returns the first id in the path, which on a nested route
+   * like `/nannies/:id/videos/:videoId` is the nanny rather than the video.
+   * Snapshotting the parent there is wrong twice over: the diff becomes the
+   * whole nanny record instead of the one thing that changed, and a delete
+   * looks like an edit, because the parent still exists afterwards.
+   *
+   * Those routes set `res.locals.auditBefore` themselves and are already
+   * correct. Declining to guess here is what keeps a *new* nested route from
+   * silently recording the wrong document.
+   */
+  const idAt = parts.findIndex((p) => /^[a-f\d]{24}$/i.test(p));
+  if (idAt !== 1 || parts.length > 3) return undefined;
 
   try {
     const models = await import('../models/index.js');
@@ -143,17 +160,31 @@ export async function auditMutations(req, res, next) {
     let before = res.locals?.auditBefore;
     let after = res.locals?.auditAfter;
 
+    // Whether the comparison ran and concluded nothing moved. Distinct from
+    // "we never looked", which is why it is not simply `!before && !after`.
+    let unchanged = false;
+
     if (before === undefined && after === undefined && beforeDoc) {
       const afterDoc = await snapshot(req);
       if (afterDoc) {
         const d = diff(beforeDoc, afterDoc);
-        // An unchanged record still gets a row: knowing an action was taken
-        // and changed nothing is itself worth being able to see.
-        if (d.changed) { before = d.before; after = d.after; }
+        if (d.changed) {
+          before = d.before;
+          after = d.after;
+        } else {
+          // An action that changed nothing still gets a row — but it must not
+          // fall through to logging the whole submitted form as its "after".
+          // A form resubmitted with no edits sends every field, and a row
+          // reading "before: empty, after: <the entire record>" is exactly how
+          // a no-op comes to look like somebody rewrote the record.
+          unchanged = true;
+        }
       } else {
         // Gone after the request: a delete. The whole record is the before
-        // image, and it is the only copy that will exist.
+        // image, and it is the only copy that will exist. Nothing follows it,
+        // so "after" stays empty rather than echoing the request body.
         before = beforeDoc;
+        unchanged = true;
       }
     }
 
@@ -162,9 +193,9 @@ export async function auditMutations(req, res, next) {
       targetType: (req.path.split('/').filter(Boolean)[0] || '').replace(/ies$/, 'y').replace(/s$/, ''),
       target: targetIdFrom(req.path),
       targetLabel: res.locals?.auditLabel,
-      after: after ?? safeBody(req.body),
+      after: unchanged ? undefined : (after ?? safeBody(req.body)),
       before,
-      note: res.locals?.auditNote,
+      note: unchanged && !before ? 'No fields changed' : res.locals?.auditNote,
     });
   });
 

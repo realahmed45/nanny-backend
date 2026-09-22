@@ -71,21 +71,6 @@ export async function sendText(to, body, meta = {}) {
    */
   let text = String(body ?? '');
 
-  // Vary the wording before anything else touches it.
-  //
-  // Ordered before translation deliberately: the phrasebook is written in
-  // English and matches on the English text, so a message translated first
-  // would never be recognised. Reword, then translate whatever came out.
-  if (!meta.noTranslate) {
-    try {
-      const { reword } = await import('../services/phrasebook.js');
-      text = await reword(text);
-    } catch (err) {
-      // Cosmetic. Never a reason for a message not to arrive.
-      console.error(`[ultramsg] rewording skipped: ${err.message}`);
-    }
-  }
-
   // The language picker is already written in every language it offers;
   // translating it would render the other eleven options unreadable to the
   // one person who needs them.
