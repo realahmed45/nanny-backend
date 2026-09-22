@@ -3390,11 +3390,16 @@ router.get('/earnings/booking/:id', requireRole('admin', 'super_admin'), wrap(as
  */
 router.get('/replies', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
   const { FLOW_STEPS, getReplySheet } = await import('../services/replies.js');
-  const sheet = await getReplySheet();
+  const { getSettings } = await import('../services/settings.js');
+  const [sheet, settings] = await Promise.all([getReplySheet(), getSettings()]);
 
   res.json({
     enabled: sheet.enabled,
     mode: sheet.mode,
+    // The conversation mode this sheet sits inside. Returned so the page can
+    // say plainly which flow is live: an answer sheet written for the
+    // structured flow is not in use while the bot is running on AI.
+    conversationMode: settings.conversationMode?.mode || 'structured',
     steps: FLOW_STEPS.map((step) => ({
       key: step.key,
       group: step.group,
