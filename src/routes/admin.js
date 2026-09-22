@@ -1,5 +1,6 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
+import { PHRASES } from '../services/phrasebook.js';
 import dayjs from 'dayjs';
 import {
   User, Booking, Ticket, ChatThread, MessageLog, AdminUser, Session, CallbackRequest,
@@ -3006,6 +3007,8 @@ const RUNTIME_SETTINGS = new Set([
   'conversationMode',
   'emailVerification',
   'autoVerifyNannies',
+  'phrasing',
+  'phrasingOverrides',
 ]);
 
 /**
@@ -3086,6 +3089,71 @@ function validateSetting(key, value) {
    * attempt at reading a reply the strict parser rejected — so the structure
    * is identical and the tolerance is different.
    */
+  /**
+   * How the bot words a question: one fixed wording, or one of several.
+   *
+   * Nothing generated — every alternative is written and stored. Separate
+   * from conversationMode, which governs how a *reply* is read rather than
+   * how a *question* is put.
+   */
+  if (key === 'phrasing') {
+    const mode = String(value?.mode || value || '').trim();
+    if (!['strict', 'flexible'].includes(mode)) {
+      throw new Error('Phrasing must be "strict" or "flexible"');
+    }
+    return { mode };
+  }
+
+  /**
+   * Wording edited in the dashboard, replacing what ships in the code.
+   *
+   * Checked rather than trusted: a variant that drops a {{placeholder}}
+   * sends a family a message with a blank where a name should be, and one
+   * that renumbers a menu routes somebody to the wrong option. Either is
+   * worse than the original wording, so either is refused.
+   */
+  if (key === 'phrasingOverrides') {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('Phrasing overrides must be an object');
+    }
+
+    const out = {};
+
+    for (const [phraseKey, entry] of Object.entries(value)) {
+      const known = PHRASES[phraseKey];
+      if (!known) throw new Error(`Unknown question: ${phraseKey}`);
+
+      const required = known.placeholders || [];
+      const check = (text, where) => {
+        const str = String(text || '').trim();
+        if (!str) throw new Error(`${phraseKey}: ${where} cannot be empty`);
+        if (str.length > 900) throw new Error(`${phraseKey}: ${where} is too long`);
+        for (const token of required) {
+          if (!str.includes(token)) {
+            throw new Error(`${phraseKey}: ${where} must still contain ${token}`);
+          }
+        }
+        return str;
+      };
+
+      const clean = {};
+      if (entry?.strict !== undefined) clean.strict = check(entry.strict, 'the strict wording');
+
+      if (entry?.flexible !== undefined) {
+        if (!Array.isArray(entry.flexible)) {
+          throw new Error(`${phraseKey}: alternatives must be a list`);
+        }
+        if (entry.flexible.length > 8) {
+          throw new Error(`${phraseKey}: at most 8 alternatives`);
+        }
+        clean.flexible = entry.flexible.map((t, i) => check(t, `alternative ${i + 1}`));
+      }
+
+      if (Object.keys(clean).length) out[phraseKey] = clean;
+    }
+    return out;
+  }
+
   if (key === 'conversationMode') {
     const mode = String(value?.mode || value || '').trim();
     if (!['structured', 'ai'].includes(mode)) {
@@ -3345,6 +3413,66 @@ router.get('/earnings/booking/:id', requireRole('admin', 'super_admin'), wrap(as
  * office works down: a shortfall closed with real work is revenue, and one
  * left to the end of the week is money paid for nothing.
  */
+/**
+ * The bot's whole script, and how each question is worded in each mode.
+ *
+ * Returned in one call rather than per question, because the point of the
+ * page is to read the script end to end: a wording that is wrong is usually
+ * only obviously wrong beside the ones around it.
+ */
+router.get('/phrasing', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const {
+    PHRASES: CATALOGUE, PHRASE_KEYS, ALWAYS_STRICT, getPhrasingMode, getOverrides,
+  } = await import('../services/phrasebook.js');
+
+  const [mode, overrides] = await Promise.all([getPhrasingMode(), getOverrides()]);
+
+  const questions = PHRASE_KEYS.map((key) => {
+    const entry = CATALOGUE[key];
+    const edited = overrides[key] || {};
+    return {
+      key,
+      label: entry.label,
+      // What is in force now, so the page shows the live wording rather
+      // than only what shipped in the code.
+      strict: edited.strict ?? entry.strict,
+      flexible: edited.flexible ?? entry.flexible,
+      // Whether this one has been changed from what the code ships.
+      edited: Boolean(edited.strict || edited.flexible),
+      fixed: ALWAYS_STRICT.has(key),
+      fixedBecause: entry.fixedBecause || null,
+      placeholders: entry.placeholders || [],
+      hasOptions: Boolean(entry.hasOptions),
+    };
+  });
+
+  res.json({
+    mode,
+    questions,
+    counts: {
+      total: questions.length,
+      fixed: questions.filter((q) => q.fixed).length,
+      edited: questions.filter((q) => q.edited).length,
+    },
+  });
+}));
+
+/** Reset one question to the wording that ships in the code. */
+router.delete('/phrasing/:key', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const { PHRASES: CATALOGUE } = await import('../services/phrasebook.js');
+  if (!CATALOGUE[req.params.key]) {
+    return res.status(404).json({ error: 'Unknown question' });
+  }
+
+  const { getSettings, setSetting } = await import('../services/settings.js');
+  const current = (await getSettings())?.phrasingOverrides || {};
+  const next = { ...current };
+  delete next[req.params.key];
+
+  await setSetting('phrasingOverrides', next, req.admin?._id);
+  res.json({ ok: true });
+}));
+
 router.get('/contracts', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
   const { contractStatusAll } = await import('../services/earnings.js');
   res.json({ rows: await contractStatusAll({ weekOf: req.query.week || new Date() }) });
