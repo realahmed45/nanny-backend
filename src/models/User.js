@@ -249,6 +249,26 @@ const UserSchema = new mongoose.Schema({
      */
     safetyBufferPercent: { type: Number, default: 20 },
 
+    /**
+     * How often she is paid, and what the guarantee is measured over.
+     *
+     * A weekly contract guarantees hours per week; a monthly one guarantees
+     * them per month. The two are not interchangeable — 40 hours a week is
+     * four times the promise that 40 hours a month is — so the period has to
+     * be stored beside the number rather than assumed.
+     *
+     * Weekly by default, which is what the payout schedule already does.
+     */
+    salaryPeriod: { type: String, enum: ['weekly', 'monthly'], default: 'weekly' },
+
+    /**
+     * A fixed salary, when she is on one rather than paid by the hour.
+     *
+     * Left at zero for an hourly nanny, where the guarantee is the minimum
+     * hours above and her rate does the rest.
+     */
+    salaryAmount: { type: Number, default: 0 },
+
     /** Free-text note for terms that do not fit the fields above. */
     notes: String,
 

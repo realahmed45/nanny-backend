@@ -51,7 +51,36 @@ const PayoutSchema = new mongoose.Schema({
   releasedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'AdminUser' },
   isFinalForBooking: { type: Boolean, default: false },
 
-  // Proof the admin transferred the money to the nanny.
+  /**
+   * What this payout is for.
+   *
+   * Most are earnings from service days. A `special` payout is everything
+   * else the business owes her — a taxi fare she covered, a uniform, a
+   * medical cost — and those need a reason and a receipt, because unlike
+   * earnings there is no booking behind them to check the figure against.
+   */
+  kind: { type: String, enum: ['earnings', 'special'], default: 'earnings', index: true },
+
+  /**
+   * Why a special payout was raised, and the receipt for it.
+   *
+   * Required for `special` and meaningless for earnings. The receipt is the
+   * evidence that the cost happened at all; the note is what it was for. A
+   * payment to a person with neither is indistinguishable from an error.
+   */
+  reason: String,
+  costProof: {
+    url: String,
+    uploadedAt: Date,
+  },
+
+  /**
+   * Proof the money actually reached her.
+   *
+   * Separate from `costProof` and not interchangeable: one shows the expense
+   * was real, the other shows we settled it. A dispute about whether she was
+   * paid is answered by this one.
+   */
   proof: {
     url: String,
     mediaId: String,

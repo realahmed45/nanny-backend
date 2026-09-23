@@ -2659,6 +2659,99 @@ router.post('/payments/:id/complete-refund', requireRole('admin', 'super_admin')
   res.json({ ok: true, payment, booking });
 }));
 
+/**
+ * Raise a special payout — something owed to a nanny that no booking covers.
+ *
+ * A taxi she paid for, a uniform, a medical bill. Both a reason and a receipt
+ * are required: unlike earnings there is no booking behind the figure to check
+ * it against, so without them a payment to a person is indistinguishable from
+ * a mistake or a favour.
+ */
+router.post('/payouts/special', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const nanny = await User.findById(req.body?.nannyId);
+  if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
+
+  const raw = req.body?.amount;
+  if (raw === '' || raw === null || raw === undefined) {
+    return res.status(400).json({ error: 'Please enter an amount' });
+  }
+  const amount = Number(raw);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return res.status(400).json({ error: 'Amount must be a positive number' });
+  }
+  if (amount > 1e9) {
+    return res.status(400).json({ error: 'That amount looks wrong — please check it' });
+  }
+
+  const reason = String(req.body?.reason || '').trim();
+  if (!reason) {
+    return res.status(400).json({ error: 'Please say what this payment is for' });
+  }
+
+  // The receipt is the whole point of the category. Refused rather than
+  // warned about: a special cost with no evidence should not exist.
+  const costProofUrl = String(req.body?.costProofUrl || '').trim();
+  if (!costProofUrl) {
+    return res.status(400).json({ error: 'Please attach a photo of the receipt' });
+  }
+
+  const { nextSequence } = await import('../models/index.js');
+  const seq = await nextSequence('payout');
+
+  const payout = await Payout.create({
+    reference: `PO-${String(seq).padStart(6, '0')}`,
+    nanny: nanny._id,
+    kind: 'special',
+    amount: Math.round(amount * 100) / 100,
+    reason: reason.slice(0, 500),
+    costProof: { url: costProofUrl, uploadedAt: new Date() },
+    // Owed now, not on the weekly cycle: a nanny who paid for something out
+    // of her own pocket should not wait until Monday for it.
+    scheduledFor: new Date(),
+    notes: String(req.body?.note || '').trim().slice(0, 1000) || undefined,
+  });
+
+  res.status(201).json({ ok: true, payout });
+}));
+
+/**
+ * Upload a photo for a payout — a receipt, or proof of the transfer.
+ *
+ * Base64 in a JSON body, matching how everything else here uploads, so the
+ * server still needs no multipart middleware. `kind` says which of the two
+ * this is; they are kept apart because one shows the expense was real and the
+ * other shows we settled it, and a dispute needs whichever it needs.
+ */
+router.post('/payouts/proof-upload', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+  const EXTS = ['.jpg', '.jpeg', '.png', '.webp', '.pdf'];
+  const raw = String(req.body?.ext || '').toLowerCase();
+  const ext = raw.startsWith('.') ? raw : `.${raw}`;
+  if (!EXTS.includes(ext)) {
+    return res.status(400).json({ error: `That file type is not accepted (${EXTS.join(', ')})` });
+  }
+
+  const base64 = String(req.body?.data || '').replace(/^data:[^,]+,/, '');
+  if (!base64) return res.status(400).json({ error: 'No file was attached' });
+
+  let buf;
+  try {
+    buf = Buffer.from(base64, 'base64');
+  } catch {
+    return res.status(400).json({ error: 'The file could not be read' });
+  }
+  if (!buf.length) return res.status(400).json({ error: 'The file was empty' });
+
+  const { storeBuffer } = await import('../services/mediaArchive.js');
+  let url;
+  try {
+    url = await storeBuffer(buf, { ext });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  res.json({ ok: true, url });
+}));
+
 /** Mark a nanny payout as transferred, with proof. */
 router.post('/payouts/:id/mark-paid', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
   const payout = await Payout.findById(req.params.id);
@@ -3742,10 +3835,11 @@ router.put('/contracts/:id', requireRole('admin', 'super_admin'), wrap(async (re
   const minHours = num(req.body.minimumHoursPerWeek, { max: 168 });
   const minShifts = num(req.body.minimumShiftsPerWeek, { max: 100 });
   const buffer = num(req.body.safetyBufferPercent, { max: 200 });
+  const salaryAmount = num(req.body.salaryAmount);
 
   for (const [name, value] of Object.entries({
     hourlyRate, minimumHoursPerWeek: minHours, minimumShiftsPerWeek: minShifts,
-    safetyBufferPercent: buffer,
+    safetyBufferPercent: buffer, salaryAmount,
   })) {
     if (value === null) return res.status(400).json({ error: `${name} is not a valid number` });
   }
@@ -3759,6 +3853,11 @@ router.put('/contracts/:id', requireRole('admin', 'super_admin'), wrap(async (re
     ...(minShifts !== undefined ? { minimumShiftsPerWeek: minShifts } : {}),
     ...(buffer !== undefined ? { safetyBufferPercent: buffer } : {}),
     ...(req.body.notes !== undefined ? { notes: String(req.body.notes).slice(0, 2000) } : {}),
+    // Weekly or monthly. The number above means nothing without it: 40 hours
+    // a week is four times the promise that 40 hours a month is.
+    ...(['weekly', 'monthly'].includes(req.body.salaryPeriod)
+      ? { salaryPeriod: req.body.salaryPeriod } : {}),
+    ...(salaryAmount !== undefined ? { salaryAmount } : {}),
     updatedBy: req.admin?._id,
     updatedAt: new Date(),
   };

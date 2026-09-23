@@ -65,6 +65,8 @@ export function createApp() {
   // routinely bigger than the 2mb the rest of the admin API is capped at.
   // Scoped to this one path so the low ceiling still applies everywhere else.
   app.use(/^\/api\/admin\/contracts\/[^/]+\/document$/, express.json({ limit: '32mb' }));
+  // A photographed receipt is the same shape of problem as a contract scan.
+  app.use('/api/admin/payouts/proof-upload', express.json({ limit: '32mb' }));
   app.use(express.json({ limit: '2mb' }));
 
   // Serve our own copies of nanny media. Read-only and long-cached: a stored
