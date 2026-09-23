@@ -206,6 +206,27 @@ export const config = {
     enabled: process.env.MEDIA_ARCHIVE !== 'off',
     dir: process.env.MEDIA_DIR || 'storage/media',
     maxBytes: int(process.env.MEDIA_MAX_BYTES, 64 * 1024 * 1024),
+
+    /**
+     * Where the files actually live, permanently.
+     *
+     * The directory above is a fallback for local development. In production
+     * it is inside the app directory, which Render and most container hosts
+     * replace on every deploy — so anything left there is destroyed, and the
+     * profiles pointing at it break with nothing to recover from.
+     *
+     * Set these and the archive moves to object storage instead: R2, B2,
+     * Wasabi or S3, all the same API. `publicBase` is the domain files are
+     * served from, which is not the endpoint they are uploaded to.
+     */
+    s3: {
+      bucket: process.env.MEDIA_S3_BUCKET || '',
+      endpoint: process.env.MEDIA_S3_ENDPOINT || '',
+      accessKeyId: process.env.MEDIA_S3_KEY || '',
+      secretAccessKey: process.env.MEDIA_S3_SECRET || '',
+      region: process.env.MEDIA_S3_REGION || 'auto',
+      publicBase: process.env.MEDIA_PUBLIC_BASE || '',
+    },
   },
 
   brand: {

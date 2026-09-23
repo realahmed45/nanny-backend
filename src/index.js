@@ -75,6 +75,32 @@ export function createApp() {
    *
    * Behind the admin token, since the reply names the host and the login.
    */
+  /**
+   * Where media is actually being stored, right now.
+   *
+   * The failure this exists for is silent: files keep being accepted, the
+   * profiles look right, and then a deploy takes every one of them away. This
+   * says plainly whether the archive is permanent, so the answer does not
+   * depend on reading the startup log at the right moment.
+   */
+  app.get('/diag/media', async (req, res) => {
+    const token = String(req.query.key || '');
+    if (!config.admin.diagKey || token !== config.admin.diagKey) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
+    const objectStore = (await import('./services/objectStore.js')).default;
+    const where = objectStore.describe();
+
+    res.json({
+      ...where,
+      localDir: config.media.dir,
+      warning: where.permanent
+        ? null
+        : 'Files are on a disk this host replaces on deploy. They will be lost.',
+    });
+  });
+
   app.get('/diag/email', async (req, res) => {
     const token = String(req.query.key || '');
     if (!config.admin.diagKey || token !== config.admin.diagKey) {

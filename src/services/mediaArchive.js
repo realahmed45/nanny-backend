@@ -3,6 +3,7 @@ import fsSync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import config from '../config/index.js';
+import objectStore from './objectStore.js';
 
 /**
  * Keep our own copy of every photo and video a nanny sends.
@@ -95,6 +96,18 @@ export async function store(remoteUrl, { mediaType } = {}) {
       throw new Error(`file is ${Math.round(buf.length / 1e6)}MB, over the limit`);
     }
 
+    // Same destination choice as an upload from the app: the bucket when it
+    // is configured, so a photo that arrived over WhatsApp is as permanent
+    // as one sent from the phone app.
+    if (objectStore.isConfigured()) {
+      try {
+        return await objectStore.putObject(buf, { key: name, ext: path.extname(name) });
+      } catch (err) {
+        console.error(`[media] object storage upload failed for ${name}: ${err.message}`);
+        console.error('[media] falling back to local disk — this copy will not survive a deploy');
+      }
+    }
+
     // Written to a temporary name first, so a crash mid-download cannot leave
     // a half-file that later looks complete.
     const tmp = `${dest}.part`;
@@ -126,6 +139,29 @@ export async function storeBuffer(buf, { ext = '.jpg' } = {}) {
   // Named by content, so the same picture sent twice is stored once.
   const hash = crypto.createHash('sha1').update(buf).digest('hex').slice(0, 20);
   const name = `${hash}${ext}`;
+
+  /**
+   * Object storage first, when it is configured.
+   *
+   * This is the path that makes the archive permanent: the bucket is not
+   * touched by a deploy, so a photo sent today is still there after the next
+   * release, the one after that, and a move to a different host.
+   *
+   * A failure here falls through to disk rather than throwing. A nanny who
+   * has just recorded her intro video should not lose it because the bucket
+   * was briefly unreachable — a file on an ephemeral disk is worth more than
+   * no file, for as long as that disk lasts, and the error is logged loudly
+   * enough to be noticed.
+   */
+  if (objectStore.isConfigured()) {
+    try {
+      return await objectStore.putObject(buf, { key: name, ext });
+    } catch (err) {
+      console.error(`[media] object storage upload failed for ${name}: ${err.message}`);
+      console.error('[media] falling back to local disk — this copy will not survive a deploy');
+    }
+  }
+
   const dest = path.join(ROOT, name);
   const publicUrl = `${PUBLIC_PREFIX}/${name}`;
 
@@ -169,8 +205,12 @@ function warnIfEphemeral() {
     + '[media] On a host that redeploys by replacing that directory (Render, Heroku,\n'
     + '[media] most containers) every archived photo and video is destroyed on the\n'
     + '[media] next deploy, and the profiles pointing at them break with no way back.\n'
-    + '[media] Set MEDIA_DIR to a persistent disk — on Render, mount one and point\n'
-    + '[media] MEDIA_DIR at it, e.g. /var/data/media.',
+    + '[media] Fix it one of two ways:\n'
+    + '[media]   1. Object storage (recommended — survives a host move too):\n'
+    + '[media]      set MEDIA_S3_BUCKET, MEDIA_S3_ENDPOINT, MEDIA_S3_KEY,\n'
+    + '[media]      MEDIA_S3_SECRET and MEDIA_PUBLIC_BASE.\n'
+    + '[media]   2. A persistent disk: mount one and set MEDIA_DIR to it,\n'
+    + '[media]      e.g. /var/data/media on Render.',
   );
 }
 

@@ -11,6 +11,7 @@
     "test": "node --test test/policy.test.js test/parse.test.js test/referral.test.js test/conversation.test.js test/money.test.js test/nannyApp.test.js test/earnings.test.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1138.0",
     "axios": "^1.7.9",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
