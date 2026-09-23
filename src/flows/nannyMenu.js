@@ -114,6 +114,23 @@ on('NANNY_MAIN_MENU', nannyMenuHandler);
  * Booking requests (accept / decline within the response window)
  * ------------------------------------------------------------------ */
 
+/**
+ * The response row belonging to *this* nanny.
+ *
+ * A 24h booking opens a window for two nannies, so `nannyResponses` can hold
+ * more than one pending row. Taking the first meant the second nanny opening
+ * her request loaded and acted on the first nanny's row — accepting on her
+ * behalf, or declining a booking the other had already taken.
+ *
+ * `nannyResponse.js` (the phone-app path) has always filtered by id. This is
+ * the same predicate, for the WhatsApp path.
+ */
+function pendingFor(booking, nannyId) {
+  return (booking.nannyResponses || []).find(
+    (r) => String(r.nanny) === String(nannyId) && r.outcome === 'pending',
+  );
+}
+
 async function showPendingRequests(ctx) {
   const bookings = await Booking.find({
     nanny: ctx.session.user,
@@ -122,7 +139,7 @@ async function showPendingRequests(ctx) {
   });
 
   const live = bookings.filter((b) => {
-    const p = b.nannyResponses.find((r) => r.outcome === 'pending');
+    const p = pendingFor(b, ctx.session.user);
     return p && new Date(p.expiresAt) > new Date();
   });
 
@@ -133,7 +150,7 @@ async function showPendingRequests(ctx) {
   if (live.length === 1) {
     const b = live[0];
     const family = await User.findById(b.family);
-    const p = b.nannyResponses.find((r) => r.outcome === 'pending');
+    const p = pendingFor(b, ctx.session.user);
     ctx.set('requestBookingId', String(b._id));
     return {
       text: M.nannyBookingRequest(b, family, p.expiresAt, { isChange: p.kind === 'booking_change' }),
@@ -162,7 +179,7 @@ on('NANNY_REQUEST_LIST', async (ctx) => {
   if (!booking) return M.INVALID_CHOICE;
 
   const family = await User.findById(booking.family);
-  const p = booking.nannyResponses.find((r) => r.outcome === 'pending');
+  const p = pendingFor(booking, ctx.session.user);
   ctx.set('requestBookingId', String(booking._id));
 
   return {
@@ -180,7 +197,7 @@ const requestHandler = async (ctx) => {
     return { text: `That request is no longer available.\n\n${M.NANNY_MAIN_MENU}`, state: 'NANNY_MAIN_MENU' };
   }
 
-  const pending = booking.nannyResponses.find((r) => r.outcome === 'pending');
+  const pending = pendingFor(booking, ctx.session.user);
   if (!pending) {
     return { text: `⌛ This request has already been closed.\n\n${M.NANNY_MAIN_MENU}`, state: 'NANNY_MAIN_MENU' };
   }
@@ -204,7 +221,7 @@ requestHandler.prompt = async (ctx) => {
   const booking = await Booking.findById(ctx.get('requestBookingId'));
   if (!booking) return M.NANNY_MAIN_MENU;
   const family = await User.findById(booking.family);
-  const p = booking.nannyResponses.find((r) => r.outcome === 'pending');
+  const p = pendingFor(booking, ctx.session.user);
   return M.nannyBookingRequest(booking, family, p?.expiresAt, { isChange: p?.kind === 'booking_change' });
 };
 on('NANNY_BOOKING_REQUEST', requestHandler);
@@ -254,7 +271,7 @@ on('NANNY_DECLINE_REASON', async (ctx) => {
   const booking = await Booking.findById(ctx.get('requestBookingId'));
   if (!booking) return { text: M.NANNY_MAIN_MENU, state: 'NANNY_MAIN_MENU' };
 
-  const pending = booking.nannyResponses.find((r) => r.outcome === 'pending');
+  const pending = pendingFor(booking, ctx.session.user);
   if (!pending) return { text: M.NANNY_MAIN_MENU, state: 'NANNY_MAIN_MENU' };
 
   const reason = ctx.command === 'SKIP' ? 'No reason given' : clean(ctx.text);
@@ -263,7 +280,10 @@ on('NANNY_DECLINE_REASON', async (ctx) => {
   pending.declineReason = reason;
 
   const isChange = pending.kind === 'booking_change';
-  const nannyId = booking.nanny;
+  // Whoever is declining, not whoever the booking lists first — on a 24h
+  // booking those are different people, and blacklisting the wrong one takes
+  // a nanny off a job she had already accepted.
+  const nannyId = pending.nanny || booking.nanny;
 
   if (isChange) {
     // Spec: the original booking stands; the family may now pick someone else.

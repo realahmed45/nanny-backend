@@ -45,6 +45,21 @@ export function createApp() {
    * everywhere else: a 64MB ceiling on every endpoint is a way to exhaust the
    * server's memory with a request that does nothing.
    */
+  /**
+   * Believe the proxy about who the client is.
+   *
+   * Render, Heroku and every container platform put a load balancer in front
+   * of this. Without it Express reports the balancer's address as req.ip for
+   * everybody, so every IP-keyed rate limiter shares one bucket: a single
+   * attacker making twenty bad sign-in attempts locks the nanny app for every
+   * nanny on the platform, and nine bad passwords locks the dashboard for
+   * every admin.
+   *
+   * One hop, not `true`: trusting the whole chain lets a client forge
+   * X-Forwarded-For and evade the limiter entirely.
+   */
+  app.set('trust proxy', 1);
+
   app.use('/api/nanny/media', express.json({ limit: '72mb' }));
   // A signed contract is usually a phone photo of a piece of paper, which is
   // routinely bigger than the 2mb the rest of the admin API is capped at.

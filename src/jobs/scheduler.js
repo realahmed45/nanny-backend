@@ -40,7 +40,22 @@ export async function processResponseTimeouts(now = new Date()) {
     pending.respondedAt = now;
 
     const isChange = pending.kind === 'booking_change';
-    const nannyId = booking.nanny;
+
+    /**
+     * The nanny whose window actually expired — not whoever the booking
+     * happens to list first.
+     *
+     * A 24h booking opens a window for both nannies. Reading `booking.nanny`
+     * here meant that when the second nanny timed out, the sweep blacklisted
+     * the first — the one who had already accepted — cleared her from the
+     * booking, and messaged her to say she had not responded in time. She
+     * then could never be re-offered the job, because findReplacements
+     * excludes rejectedNannies.
+     *
+     * `nannyResponse.js` already gets this right; this path and nannyMenu
+     * were never updated when the two-nanny booking was added.
+     */
+    const nannyId = pending.nanny || booking.nanny;
 
     if (isChange) {
       // The original booking survives; the family may now change nanny.
