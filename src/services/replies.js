@@ -14,17 +14,31 @@ import { Setting } from '../models/index.js';
  * is invented and nothing is generated — an empty box means the bot carries
  * on exactly as it does now, repeating the question.
  *
- * Two modes, and they differ only in how literally the written answer is
- * used:
+ * Three modes, in increasing order of how much latitude the bot is given:
  *
- *   strict    — reply with exactly what is in the box, word for word.
- *   flexible  — the same facts, worded to fit what was actually asked.
+ *   structured  — no AI at all. The flow as it has always been: ask the
+ *                 question, and if the reply does not parse, ask it again.
+ *                 Nothing on this page is used.
+ *   strict      — lower-level AI. When somebody asks a question instead of
+ *                 answering, reply with exactly what is written in that
+ *                 step's box, word for word. Nothing reworded or added.
+ *   flexible    — medium-level AI. The same written facts, worded to fit
+ *                 what was actually asked. It may rephrase; it may not
+ *                 invent a price, a number or a promise.
  *
- * The whole feature is off until somebody turns it on. An answer sheet that
- * nobody has filled in should not start changing what the bot says.
+ * The ordering matters: each mode is the one before it plus one degree of
+ * freedom, and every degree is bounded by what somebody typed into a box.
+ * Structured is the default, so a sheet nobody has filled in changes nothing.
  */
 
-export const REPLY_MODE = { STRICT: 'strict', FLEXIBLE: 'flexible' };
+export const REPLY_MODE = {
+  STRUCTURED: 'structured',
+  STRICT: 'strict',
+  FLEXIBLE: 'flexible',
+};
+
+/** The three, in the order the dashboard shows them. */
+export const REPLY_MODES = [REPLY_MODE.STRUCTURED, REPLY_MODE.STRICT, REPLY_MODE.FLEXIBLE];
 
 /**
  * Every step of the structured flow, in the order a family meets them.
@@ -252,8 +266,8 @@ export function stepForState(state) {
   return STATE_TO_STEP[String(state || '')] || null;
 }
 
-/** Everything off, and nothing written, until somebody says otherwise. */
-const OFF = { enabled: false, mode: REPLY_MODE.STRICT, answers: {} };
+/** Structured until somebody chooses otherwise: the flow as it always was. */
+const OFF = { mode: REPLY_MODE.STRUCTURED, answers: {} };
 
 /**
  * The answer sheet as it stands.
@@ -268,9 +282,11 @@ export async function getReplySheet() {
     const v = row?.value;
     if (!v || typeof v !== 'object') return OFF;
 
+    // An unrecognised mode falls back to structured rather than guessing at
+    // one of the AI modes: doing less than asked is recoverable, doing more
+    // is not.
     return {
-      enabled: Boolean(v.enabled),
-      mode: v.mode === REPLY_MODE.FLEXIBLE ? REPLY_MODE.FLEXIBLE : REPLY_MODE.STRICT,
+      mode: REPLY_MODES.includes(v.mode) ? v.mode : REPLY_MODE.STRUCTURED,
       answers: v.answers && typeof v.answers === 'object' ? v.answers : {},
     };
   } catch {
@@ -286,9 +302,21 @@ export async function getReplySheet() {
  * without this feature rather than improvising.
  */
 export function answerFor(stepKey, sheet) {
-  if (!sheet?.enabled) return null;
+  /**
+   * Only the two AI modes consult the sheet.
+   *
+   * Tested by membership rather than by excluding structured, so a mode this
+   * function does not recognise — a typo, a value written straight into the
+   * database, a mode added later — stays silent instead of behaving like an
+   * AI mode by default. Doing less than intended is recoverable.
+   */
+  const mode = sheet?.mode;
+  if (mode !== REPLY_MODE.STRICT && mode !== REPLY_MODE.FLEXIBLE) return null;
   const text = String(sheet.answers?.[stepKey] || '').trim();
   return text || null;
 }
 
-export default { REPLY_MODE, FLOW_STEPS, STEP_KEYS, getReplySheet, answerFor, stepForState };
+export default {
+  REPLY_MODE, REPLY_MODES, FLOW_STEPS, STEP_KEYS,
+  getReplySheet, answerFor, stepForState,
+};

@@ -650,7 +650,9 @@ export async function completeServiceDay(ctx, booking, day) {
 
   await queuePayout(booking, {
     nannyId: booking.nanny,
-    amount: dayEarnings(booking, day, rateForDay(booking, day)),
+    // Her own rate, not whichever nanny the booking lists first: on a 24h
+    // booking both cover the same days, so the day cannot say who worked it.
+    amount: dayEarnings(booking, day, rateForDay(booking, day, booking.nanny)),
     serviceDayIds: [day._id],
     isFinal,
     notes: `Service on ${day.date}`,
@@ -685,7 +687,7 @@ Thank you for using My Nanny! ❤️`);
 
 ${prettyDate(day.date)} — ${timeRange(booking.startTime, booking.hoursPerDay)}${overtimeNote}
 
-💰 Earnings for today: *${money(dayEarnings(booking, day, rateForDay(booking, day)))}*
+💰 Earnings for today: *${money(dayEarnings(booking, day, rateForDay(booking, day, ctx.session.user)))}*
 Payment will be released on the next payout Monday.
 
 ${isFinal ? '🎉 This booking is now fully complete!' : `📅 Remaining service days: *${remaining.length}*`}

@@ -99,14 +99,33 @@ export async function earningsSummary({ from, to } = {}) {
   const unpriced = [];
 
   for (const booking of bookings) {
-    // Only the days worked inside the window count toward this period.
-    const inRange = completedDays(booking).filter((d) => {
-      const when = d.endConfirmedAt || d.endAt;
-      return when && dayjs(when).isAfter(start) && dayjs(when).isBefore(end);
-    });
-    if (!inRange.length) continue;
+    // Inclusive at both ends. `isAfter`/`isBefore` are strict, so a day landing
+    // exactly on a boundary — midnight at the start, the final millisecond at
+    // the end — was dropped from the period entirely.
+    const within = (when) => when
+      && !dayjs(when).isBefore(start)
+      && !dayjs(when).isAfter(end);
 
-    const scoped = { ...booking, serviceDays: inRange };
+    // Only the days worked inside the window count toward this period.
+    const inRange = completedDays(booking).filter(
+      (d) => within(d.endConfirmedAt || d.endAt),
+    );
+
+    /**
+     * Cancelled days in the window, for their compensation alone.
+     *
+     * `nannyCompensation` is only ever written on a cancelled day, so scoping
+     * the booking to completed days meant it was always zero here: real money
+     * paid to a nanny never appeared in "paid to nannies", and the commission
+     * for the period read higher than it was.
+     */
+    const compensated = (booking.serviceDays || []).filter(
+      (d) => (d.nannyCompensation || 0) > 0 && within(d.cancelledAt || d.startAt),
+    );
+
+    if (!inRange.length && !compensated.length) continue;
+
+    const scoped = { ...booking, serviceDays: [...inRange, ...compensated] };
     const money = bookingEarnings(scoped);
 
     if (money.missingNannyRate) {
@@ -188,7 +207,13 @@ export async function contractStatus(nannyId, { weekOf = new Date() } = {}) {
   for (const booking of bookings) {
     for (const day of booking.serviceDays || []) {
       if (day.status === SERVICE_DAY_STATUS.CANCELLED) continue;
-      if (!dayjs(day.startAt).isAfter(start) || !dayjs(day.startAt).isBefore(end)) continue;
+
+      // Inclusive at both ends. `isAfter` is strict against Monday 00:00:00,
+      // so a live-in or 24h booking starting at exactly midnight lost every
+      // Monday from her hours — understating what she worked and inflating
+      // the guarantee shortfall the business believes it owes her for it.
+      const at = dayjs(day.startAt);
+      if (at.isBefore(start) || at.isAfter(end)) continue;
 
       // After a replacement the day belongs to whoever actually has it.
       const worker = String(day.nanny || booking.nanny || '');

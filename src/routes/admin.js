@@ -2061,10 +2061,14 @@ router.post('/bookings/:id/cancel', wrap(async (req, res) => {
   if (breakdown.totalRefund > 0) {
     await refundBooking(booking, { amount: breakdown.totalRefund, breakdown, reason: 'Admin cancellation' });
   }
-  if (breakdown.completedAmount > 0 && nannyId) {
+  // Completed days are already paid — each one queues its own payout at her
+  // rate when she closes it out. This used to pay `completedAmount` on top,
+  // which is the family's price for work she had already been paid for.
+  // Only the compensation for days she LOSES is owed here.
+  if (breakdown.totalNannyCompensation > 0 && nannyId) {
     await queuePayout(booking, {
-      nannyId, amount: breakdown.completedAmount, isFinal: true,
-      notes: 'Completed services before admin cancellation',
+      nannyId, amount: breakdown.totalNannyCompensation, isFinal: true,
+      notes: 'Cancellation compensation',
     });
   }
 
@@ -3100,9 +3104,9 @@ function validateSetting(key, value) {
       throw new Error('Reply sheet must be an object');
     }
 
-    const mode = String(value.mode || 'strict');
-    if (!['strict', 'flexible'].includes(mode)) {
-      throw new Error('Reply mode must be "strict" or "flexible"');
+    const mode = String(value.mode || 'structured');
+    if (!['structured', 'strict', 'flexible'].includes(mode)) {
+      throw new Error('Mode must be "structured", "strict" or "flexible"');
     }
 
     const answers = {};
@@ -3119,7 +3123,7 @@ function validateSetting(key, value) {
       answers[stepKey] = clean;
     }
 
-    return { enabled: Boolean(value.enabled), mode, answers };
+    return { mode, answers };
   }
 
   if (key === 'conversationMode') {
@@ -3394,7 +3398,6 @@ router.get('/replies', requireRole('admin', 'super_admin'), wrap(async (req, res
   const [sheet, settings] = await Promise.all([getReplySheet(), getSettings()]);
 
   res.json({
-    enabled: sheet.enabled,
     mode: sheet.mode,
     // The conversation mode this sheet sits inside. Returned so the page can
     // say plainly which flow is live: an answer sheet written for the

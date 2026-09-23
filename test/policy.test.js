@@ -24,7 +24,7 @@ test('multi-day family cancellation bands match spec', () => {
   assert.equal(multiDaySplit(23).familyRefundPct, 0);
 });
 
-test('completed days are never refunded and always pay the nanny', () => {
+test('a completed day is not refunded, and is not paid a second time', () => {
   const now = new Date('2026-08-10T00:00:00Z');
   const booking = {
     serviceDays: [
@@ -33,10 +33,21 @@ test('completed days are never refunded and always pay the nanny', () => {
     ],
   };
   const r = computeCancellationRefund(booking, { cancelledBy: CANCELLED_BY.FAMILY, at: now });
-  // 10 days notice on day b => 100% refund; day a completed => nanny keeps it.
+
+  // 10 days' notice on day b, so the family gets that day back in full.
   assert.equal(r.totalRefund, 50);
+
+  // Day a is kept by the business rather than refunded.
   assert.equal(r.completedAmount, 50);
-  assert.equal(r.totalNannyCompensation, 50);
+
+  /**
+   * And it is owed to nobody here.
+   *
+   * The nanny was paid for day a the moment she completed it, at her own
+   * rate. This used to report 50 — the family's price for a day already
+   * settled — and every cancellation path paid it out again on top.
+   */
+  assert.equal(r.totalNannyCompensation, 0);
 });
 
 test('nanny cancellation refunds 100% of remaining days with no compensation', () => {
@@ -63,4 +74,50 @@ test('overtime rounding: 15+ min = 30 min, 45+ min = 1 hour', () => {
 
 test('booking amount matches the spec example ($25/hr x 2hrs x 30 days = $1500)', () => {
   assert.equal(computeBookingAmount({ hourlyRate: 25, hoursPerDay: 2, days: 30 }), 1500);
+});
+
+/* ------------------------------------------------------------------ *
+ * Regressions
+ *
+ * Each of these was a live bug. The assertions are the behaviour that was
+ * wrong, so a reintroduction fails here rather than in somebody's payout.
+ * ------------------------------------------------------------------ */
+
+test('a reschedule past the free allowance actually charges the penalty', async () => {
+  const { computeReschedulePenalty } = await import('../src/services/policy.js');
+  const booking = {
+    rescheduleCount: 5,          // well past the free limit
+    serviceDays: [
+      { _id: 'a', amount: 100, status: 'scheduled' },
+      { _id: 'b', amount: 100, status: 'scheduled' },
+    ],
+  };
+
+  // Called with the days it applies to, as the quoting screen does.
+  const withDays = computeReschedulePenalty(booking, ['a', 'b']);
+  assert.ok(withDays.penalty > 0, 'a penalty is owed once the free allowance is used up');
+
+  // Called without them — the bug. The default empty list matched no days, so
+  // the base was zero and the family was quoted a penalty then never charged.
+  const withoutDays = computeReschedulePenalty(booking);
+  assert.equal(withoutDays.penalty, 0);
+  assert.notEqual(
+    withDays.penalty, withoutDays.penalty,
+    'the argument matters: omitting it silently zeroes the charge',
+  );
+});
+
+test('a payout is never scheduled for a time that has already passed', async () => {
+  const { nextMonday } = await import('../src/services/payments.js');
+
+  // Every day of the week, including Monday itself — the case that broke.
+  for (let i = 0; i < 7; i += 1) {
+    const from = new Date(Date.UTC(2026, 8, 21 + i, 10, 0, 0));
+    const due = nextMonday(from);
+    assert.ok(
+      due > from,
+      `work finished ${from.toDateString()} must wait, not release immediately`,
+    );
+    assert.equal(due.getDay(), 1, 'payouts land on a Monday');
+  }
 });

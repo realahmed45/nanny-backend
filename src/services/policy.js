@@ -67,13 +67,24 @@ export function computeCancellationRefund(booking, opts = {}) {
   for (const day of booking.serviceDays || []) {
     const dayAmount = round2(day.amount ?? 0);
 
-    // Completed (or already-cancelled) days are settled and not refundable.
+    /**
+     * A completed day is settled: the family is not refunded for it, and the
+     * nanny was already paid for it the moment she closed it out — at her own
+     * rate, by the payout queued in nannyMenu.
+     *
+     * It used to be added to `totalNannyCompensation` as well, so cancelling
+     * the booking paid her a second time for work already settled, and at
+     * `day.amount` — the family's price — which inflated the duplicate by the
+     * whole commission margin on top.
+     *
+     * `completedAmount` is kept because it is genuinely useful: it is what the
+     * family is not getting back. It is not money owed to anybody.
+     */
     if (day.status === 'completed') {
       completedAmount += dayAmount;
-      totalNannyCompensation += dayAmount;
       perDay.push({
         dayId: String(day._id ?? ''), date: day.date, amount: dayAmount,
-        familyRefund: 0, nannyCompensation: dayAmount, band: 'completed (not refundable)',
+        familyRefund: 0, nannyCompensation: 0, band: 'completed (already paid, not refundable)',
       });
       continue;
     }

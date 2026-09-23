@@ -336,14 +336,25 @@ export async function applyPendingChange(booking) {
     booking.repeatDays = merged.repeatDays;
     booking.markModified('serviceDays');
 
-    // The reschedule is real now, so it counts against the free allowance.
-    booking.rescheduleCount = (booking.rescheduleCount || 0) + 1;
-
     // The confirmation screen quotes an additional payment, a refund and a
     // penalty. None of them were ever applied: the total moved and nothing
     // else did, so a family who doubled their hours was never billed for them
     // and a family who shortened the booking never got their money back.
-    const penaltyInfo = computeReschedulePenalty(booking);
+    //
+    // Computed before the count is incremented, and with the days it applies
+    // to. Both matter: `dayIds` defaults to an empty list, so calling this
+    // without it filtered every day out and the penalty was silently always
+    // zero — the family was shown a charge on the previous screen and then
+    // never billed for it. Incrementing first would also move them past the
+    // free allowance a reschedule early, charging for the one that was free.
+    const penaltyInfo = computeReschedulePenalty(
+      booking,
+      booking.remainingDays().map((d) => d._id),
+    );
+
+    // The reschedule is real now, so it counts against the free allowance.
+    booking.rescheduleCount = (booking.rescheduleCount || 0) + 1;
+
     const difference = round2((totalAmount - previousTotal) + (penaltyInfo.penalty || 0));
 
     if (difference > 0) {

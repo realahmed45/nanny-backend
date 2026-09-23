@@ -412,7 +412,9 @@ async function answerFromSheet(ctx, rejection) {
     } = await import('../services/replies.js');
 
     const sheet = await getReplySheet();
-    if (!sheet.enabled) return null;
+    // Structured is the flow as it always was: no AI, no written answers,
+    // a rejected reply simply gets the question again.
+    if (sheet.mode === REPLY_MODE.STRUCTURED) return null;
 
     const step = stepForState(ctx.session?.state);
     if (!step) return null;

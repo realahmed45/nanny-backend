@@ -211,9 +211,17 @@ export async function completeRefund(payment, { adminId = null, proof = {}, note
   return { success: true, payment, booking };
 }
 
-/** The Monday on or after a date — payouts are released weekly on Monday. */
+/**
+ * The next Monday strictly after a date — payouts are released weekly.
+ *
+ * Strictly after, not "on or after". The loop used to check the day before
+ * advancing, so work finished on a Monday was scheduled for that same Monday
+ * at 00:00 — a time already past, which the release sweep reads as due and
+ * pays out immediately. Monday's work skipped the weekly hold entirely while
+ * Tuesday's waited the full six days.
+ */
 export function nextMonday(from = new Date()) {
-  let d = dayjs(from).startOf('day');
+  let d = dayjs(from).startOf('day').add(1, 'day');
   while (d.day() !== 1) d = d.add(1, 'day');
   return d.toDate();
 }
@@ -348,11 +356,27 @@ export function dayCommission(booking, day, nannyHourlyRate) {
  * `secondNannyRate` is used when the day belongs to the second nanny, and the
  * primary rate is the fallback for everything else.
  */
-export function rateForDay(booking, day) {
-  const dayNanny = String(day?.nanny?._id || day?.nanny || '');
+export function rateForDay(booking, day, forNannyId = null) {
   const second = String(booking?.secondNanny?._id || booking?.secondNanny || '');
 
-  if (dayNanny && second && dayNanny === second && booking.secondNannyHourlyRate) {
+  /**
+   * Who is being paid for this day.
+   *
+   * `day.nanny` is only stamped by a replacement — `buildServiceDays` never
+   * sets it, and on a 24h booking both nannies cover the same days rather
+   * than splitting them. So relying on `day.nanny` alone meant every day of
+   * a two-nanny booking fell through to the primary rate, and the second
+   * nanny was paid the first nanny's salary for the whole booking.
+   *
+   * `forNannyId` is what the caller knows and the day does not: which of the
+   * two this payout is actually for. Falling back to the day's own stamp
+   * keeps replacements working as before.
+   */
+  const worker = String(
+    forNannyId?._id || forNannyId || day?.nanny?._id || day?.nanny || '',
+  );
+
+  if (worker && second && worker === second && booking.secondNannyHourlyRate) {
     return booking.secondNannyHourlyRate;
   }
   return booking?.nannyHourlyRate || 0;

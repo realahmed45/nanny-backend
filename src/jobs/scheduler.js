@@ -192,17 +192,17 @@ export async function processReplacementDeadlines(now = new Date()) {
       }
 
       // The nanny who worked the earlier days still has to be paid for them.
-      // Every other cancellation path queues this; only the sweep did not, so
-      // a nanny whose booking ended here was never paid for work she had
-      // already delivered. `booking.nanny` is cleared when she steps away, so
-      // the payout goes to the nanny the booking recorded as being replaced.
+      // Compensation for the days she loses. Work she already delivered was
+      // paid at the time she completed it, so it is not counted again here.
+      // `booking.nanny` is cleared when she steps away, so the payout goes to
+      // the nanny the booking recorded as being replaced.
       const owedTo = booking.replacementOfNanny;
       if (breakdown.totalNannyCompensation > 0 && owedTo) {
         await queuePayout(booking, {
           nannyId: owedTo,
           amount: breakdown.totalNannyCompensation,
           isFinal: true,
-          notes: 'Compensation for completed days (no replacement selected)',
+          notes: 'Cancellation compensation (no replacement selected)',
         });
       }
       await notifyUser(booking.family, `🔴 *Booking Cancelled – No Replacement Selected*
