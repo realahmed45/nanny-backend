@@ -42,9 +42,21 @@ export async function setupDb() {
   } catch {
     const base = process.env.MONGODB_URI;
     if (!base) throw new Error('No in-memory MongoDB and no MONGODB_URI set for tests.');
-    const uri = base.replace(/\/([^/?]*)(\?|$)/, '/mynanny_autotest$2');
+
+    /**
+     * One database per test process, not one shared by all of them.
+     *
+     * `node --test` runs each file in its own process, in parallel. Pointing
+     * them all at the same remote database meant every file's `clearDb()`
+     * emptied the collections the others were mid-way through using — so a
+     * suite that passes file by file fails when run together, with failures
+     * that move around between runs and look like flaky logic rather than
+     * what they are.
+     */
+    const suffix = `${process.pid}_${Date.now().toString(36)}`;
+    const uri = base.replace(/\/([^/?]*)(\?|$)/, `/mynanny_autotest_${suffix}$2`);
     await mongoose.connect(uri);
-    console.log('[test] using remote test database mynanny_autotest');
+    console.log(`[test] using remote test database mynanny_autotest_${suffix}`);
     return mongoose.connection;
   }
 }
