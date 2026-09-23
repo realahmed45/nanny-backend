@@ -814,7 +814,27 @@ export function featuredMedia(n) {
     .map((m) => ({ ...(m.toObject?.() ?? m), kind }))
     .slice(0, limit);
 
+  /**
+   * Her headshot, first.
+   *
+   * `profilePictures` is a separate list from `photos` — one is her face, the
+   * others are her at work — and it used to be left out of this entirely, so
+   * a family received the videos and the work photos but never the picture of
+   * the person they were being asked to let into their home.
+   *
+   * `profilePhotoUrl` is the resolved answer to "her photo" and is kept in
+   * step with whichever picture is featured. It is used as the fallback for
+   * a profile whose picture was approved before the featured flag existed,
+   * which would otherwise still show nothing.
+   */
+  const headshots = pick(n.profilePictures, 'photo', 1);
+
+  if (!headshots.length && n.profilePhotoUrl) {
+    headshots.push({ url: n.profilePhotoUrl, kind: 'photo' });
+  }
+
   return [
+    ...headshots,
     ...pick(n.videos, 'video', MAX_FEATURED_VIDEOS),
     ...pick(n.photos, 'photo', MAX_FEATURED_PHOTOS),
   ];
