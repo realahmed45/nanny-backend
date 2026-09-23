@@ -3453,7 +3453,19 @@ router.get('/costs', requireRole('admin', 'super_admin', 'finance'), wrap(async 
 router.post('/costs', requireFinance, wrap(async (req, res) => {
   const { Cost, COST_CATEGORY } = await import('../models/index.js');
 
-  const amount = Number(req.body?.amount);
+  /**
+   * An empty field is not zero.
+   *
+   * `Number('')` and `Number(null)` are both 0, so a form submitted with the
+   * amount left blank would store a cost of nothing — a row in the ledger
+   * that looks entered and records no spending. Caught before the coercion
+   * rather than after it.
+   */
+  const rawAmount = req.body?.amount;
+  if (rawAmount === '' || rawAmount === null || rawAmount === undefined) {
+    return res.status(400).json({ error: 'Please enter an amount' });
+  }
+  const amount = Number(rawAmount);
   if (!Number.isFinite(amount) || amount < 0) {
     return res.status(400).json({ error: 'Amount must be a positive number' });
   }
@@ -3495,6 +3507,10 @@ router.put('/costs/:id', requireFinance, wrap(async (req, res) => {
   if (cost.voided) return res.status(400).json({ error: 'A voided cost cannot be edited' });
 
   if (req.body?.amount !== undefined) {
+    // Same coercion trap as on create: '' and null both become 0.
+    if (req.body.amount === '' || req.body.amount === null) {
+      return res.status(400).json({ error: 'Please enter an amount' });
+    }
     const amount = Number(req.body.amount);
     if (!Number.isFinite(amount) || amount < 0) {
       return res.status(400).json({ error: 'Amount must be a positive number' });
