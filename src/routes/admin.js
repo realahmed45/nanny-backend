@@ -3417,6 +3417,142 @@ router.get('/replies', requireRole('admin', 'super_admin'), wrap(async (req, res
   });
 }));
 
+/* ------------------------------------------------------------------ *
+ * Finance
+ *
+ * Reading is open to any admin: knowing what the business made is not a
+ * privileged act. Writing a cost is restricted to finance and super_admin,
+ * because these rows are what the year's figures are built from and the
+ * person who edits a booking should not also be able to alter what the
+ * business records as spending.
+ * ------------------------------------------------------------------ */
+
+/** Whoever keeps the books. Costs are theirs alone to enter. */
+const requireFinance = requireRole('finance', 'super_admin');
+
+router.get('/finance', requireRole('admin', 'super_admin', 'finance'), wrap(async (req, res) => {
+  const { financeSummary } = await import('../services/finance.js');
+  res.json(await financeSummary({ from: req.query.from, to: req.query.to }));
+}));
+
+/** The cost ledger for a period, newest first, voided rows included. */
+router.get('/costs', requireRole('admin', 'super_admin', 'finance'), wrap(async (req, res) => {
+  const { costSummary } = await import('../services/finance.js');
+  const { COST_CATEGORY } = await import('../models/Cost.js');
+  const summary = await costSummary({ from: req.query.from, to: req.query.to });
+  res.json({ ...summary, categories: Object.values(COST_CATEGORY) });
+}));
+
+/**
+ * Record a cost.
+ *
+ * Every field is validated rather than trusted: this is what the business
+ * believes it spent, and a stray string where a number belongs would quietly
+ * corrupt a profit figure somebody reports to a bank.
+ */
+router.post('/costs', requireFinance, wrap(async (req, res) => {
+  const { Cost, COST_CATEGORY } = await import('../models/index.js');
+
+  const amount = Number(req.body?.amount);
+  if (!Number.isFinite(amount) || amount < 0) {
+    return res.status(400).json({ error: 'Amount must be a positive number' });
+  }
+
+  const description = String(req.body?.description || '').trim();
+  if (!description) return res.status(400).json({ error: 'Please say what the cost was for' });
+
+  const category = String(req.body?.category || COST_CATEGORY.OTHER);
+  if (!Object.values(COST_CATEGORY).includes(category)) {
+    return res.status(400).json({ error: 'Unknown category' });
+  }
+
+  // The day it was spent, not the day it was typed: entering last week's
+  // receipts on a Monday would otherwise land them all in this week.
+  const spentOn = req.body?.spentOn ? new Date(req.body.spentOn) : new Date();
+  if (Number.isNaN(spentOn.getTime())) {
+    return res.status(400).json({ error: 'That is not a valid date' });
+  }
+
+  const cost = await Cost.create({
+    spentOn,
+    category,
+    description: description.slice(0, 500),
+    amount: Math.round(amount * 100) / 100,
+    paidTo: String(req.body?.paidTo || '').trim().slice(0, 200) || undefined,
+    recurring: Boolean(req.body?.recurring),
+    note: String(req.body?.note || '').trim().slice(0, 1000) || undefined,
+    createdBy: req.admin?._id,
+  });
+
+  res.status(201).json({ ok: true, cost });
+}));
+
+/** Correct a cost that was entered wrongly. */
+router.put('/costs/:id', requireFinance, wrap(async (req, res) => {
+  const { Cost, COST_CATEGORY } = await import('../models/index.js');
+  const cost = await Cost.findById(req.params.id);
+  if (!cost) return res.status(404).json({ error: 'Cost not found' });
+  if (cost.voided) return res.status(400).json({ error: 'A voided cost cannot be edited' });
+
+  if (req.body?.amount !== undefined) {
+    const amount = Number(req.body.amount);
+    if (!Number.isFinite(amount) || amount < 0) {
+      return res.status(400).json({ error: 'Amount must be a positive number' });
+    }
+    cost.amount = Math.round(amount * 100) / 100;
+  }
+
+  if (req.body?.category !== undefined) {
+    if (!Object.values(COST_CATEGORY).includes(req.body.category)) {
+      return res.status(400).json({ error: 'Unknown category' });
+    }
+    cost.category = req.body.category;
+  }
+
+  if (req.body?.spentOn !== undefined) {
+    const spentOn = new Date(req.body.spentOn);
+    if (Number.isNaN(spentOn.getTime())) {
+      return res.status(400).json({ error: 'That is not a valid date' });
+    }
+    cost.spentOn = spentOn;
+  }
+
+  if (req.body?.description !== undefined) {
+    const description = String(req.body.description).trim();
+    if (!description) return res.status(400).json({ error: 'Please say what the cost was for' });
+    cost.description = description.slice(0, 500);
+  }
+
+  if (req.body?.paidTo !== undefined) cost.paidTo = String(req.body.paidTo).trim().slice(0, 200);
+  if (req.body?.note !== undefined) cost.note = String(req.body.note).trim().slice(0, 1000);
+  if (req.body?.recurring !== undefined) cost.recurring = Boolean(req.body.recurring);
+
+  cost.updatedBy = req.admin?._id;
+  await cost.save();
+  res.json({ ok: true, cost });
+}));
+
+/**
+ * Void a cost rather than delete it.
+ *
+ * A row entered by mistake still happened: somebody recorded it, and the
+ * month's figures may already have been reported. Voiding takes it out of
+ * every total and keeps the row, so last month's report stays reproducible.
+ */
+router.delete('/costs/:id', requireFinance, wrap(async (req, res) => {
+  const { Cost } = await import('../models/index.js');
+  const cost = await Cost.findById(req.params.id);
+  if (!cost) return res.status(404).json({ error: 'Cost not found' });
+
+  cost.voided = true;
+  cost.voidedAt = new Date();
+  cost.voidedBy = req.admin?._id;
+  cost.voidReason = String(req.body?.reason || '').trim().slice(0, 500) || undefined;
+  await cost.save();
+
+  res.json({ ok: true });
+}));
+
 router.get('/contracts', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
   const { contractStatusAll } = await import('../services/earnings.js');
   res.json({ rows: await contractStatusAll({ weekOf: req.query.week || new Date() }) });

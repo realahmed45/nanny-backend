@@ -139,6 +139,10 @@ export async function earningsSummary({ from, to } = {}) {
       ...money,
       nanny: booking.nanny?.fullName || booking.nanny?.nickname || '—',
       family: booking.family?.fullName || '—',
+      // The ids as well as the names: two families can share a name, and
+      // grouping revenue by a display string would silently merge them.
+      nannyId: booking.nanny?._id ? String(booking.nanny._id) : null,
+      familyId: booking.family?._id ? String(booking.family._id) : null,
       nannyHourlyRate: booking.nannyHourlyRate || 0,
       familyHourlyRate: booking.hourlyRate || 0,
     });
