@@ -73,6 +73,9 @@ const MODEL_BY_RESOURCE = {
   admins: 'AdminUser',
   callbacks: 'CallbackRequest',
   notes: 'Note',
+  // A cost is money the business says it spent. Of everything here it is the
+  // record most worth being able to reconstruct.
+  costs: 'Cost',
 };
 
 /**

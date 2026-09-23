@@ -78,7 +78,23 @@ export async function payoutSummary({ from, to } = {}) {
   const start = from ? dayjs(from).startOf('day').toDate() : dayjs().startOf('month').toDate();
   const end = to ? dayjs(to).endOf('day').toDate() : dayjs().endOf('day').toDate();
 
-  const payouts = await Payout.find({ createdAt: { $gte: start, $lte: end } })
+  /**
+   * Dated by when the money moved, not when the row was made.
+   *
+   * A payout queued on 28 August and released on 3 September is September's
+   * cash and August's obligation. Ranging everything on `createdAt` put the
+   * released amount in August — a "paid" figure describing neither the cash
+   * that left nor the debt that stood.
+   *
+   * So a settled payout is matched on `releasedAt` and an unsettled one on
+   * `createdAt`, which is the only date it has.
+   */
+  const payouts = await Payout.find({
+    $or: [
+      { releasedAt: { $gte: start, $lte: end } },
+      { releasedAt: { $in: [null, undefined] }, createdAt: { $gte: start, $lte: end } },
+    ],
+  })
     .populate('nanny', 'fullName nickname phone')
     .sort({ createdAt: -1 })
     .lean();

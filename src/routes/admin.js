@@ -105,6 +105,34 @@ router.get('/auth/me', requireAuth, (req, res) => {
 router.use(requireAuth);
 
 /**
+ * Narrow roles are allowed only where a route says so.
+ *
+ * `requireAuth` proves who somebody is, not what they may do, and most routes
+ * here carry no `requireRole` of their own — which made the role enum an
+ * allowlist by accident: adding `finance` silently granted it every unguarded
+ * route, including verifying a nanny and cancelling a booking. `support` had
+ * the same reach.
+ *
+ * So the default is now deny. A specialised role reaches only the paths named
+ * below, and widening that list is a deliberate edit rather than a side effect
+ * of adding a role. The two broad roles are unaffected.
+ */
+const SCOPED_ROLES = {
+  // Whoever keeps the books: the finance page, the cost ledger, and the
+  // session endpoints any signed-in person needs.
+  finance: [/^\/finance/, /^\/costs/, /^\/auth\//, /^\/settings$/],
+  // Support answers tickets and calls people back.
+  support: [/^\/tickets/, /^\/callbacks/, /^\/conversations/, /^\/notes/, /^\/auth\//],
+};
+
+router.use((req, res, next) => {
+  const allowed = SCOPED_ROLES[req.admin?.role];
+  if (!allowed) return next();          // admin and super_admin are unscoped
+  if (allowed.some((re) => re.test(req.path))) return next();
+  return res.status(403).json({ error: 'Insufficient permissions' });
+});
+
+/**
  * Replace every phone number on the way out, when an override is configured.
  *
  * Seeded data needs genuine per-person numbers: the bot finds people by
@@ -3466,8 +3494,13 @@ router.post('/costs', requireFinance, wrap(async (req, res) => {
     return res.status(400).json({ error: 'Please enter an amount' });
   }
   const amount = Number(rawAmount);
-  if (!Number.isFinite(amount) || amount < 0) {
+  if (!Number.isFinite(amount) || amount <= 0) {
     return res.status(400).json({ error: 'Amount must be a positive number' });
+  }
+  // An unbounded amount is one typo away from a figure that swamps every
+  // total on the page. A billion is far above any real expense here.
+  if (amount > 1e9) {
+    return res.status(400).json({ error: 'That amount looks wrong — please check it' });
   }
 
   const description = String(req.body?.description || '').trim();
@@ -3478,15 +3511,24 @@ router.post('/costs', requireFinance, wrap(async (req, res) => {
     return res.status(400).json({ error: 'Unknown category' });
   }
 
-  // The day it was spent, not the day it was typed: entering last week's
-  // receipts on a Monday would otherwise land them all in this week.
-  const spentOn = req.body?.spentOn ? new Date(req.body.spentOn) : new Date();
-  if (Number.isNaN(spentOn.getTime())) {
+  /**
+   * The day it was spent, not the day it was typed.
+   *
+   * Parsed with dayjs rather than `new Date`, because the two disagree: a
+   * date-only string is UTC midnight to `new Date` and local midnight to
+   * dayjs, and the finance page queries with dayjs. West of UTC that gap put
+   * a cost entered as the 1st outside the month's own window — reported in
+   * the month before, moving money between two sets of figures.
+   */
+  const spentOn = req.body?.spentOn
+    ? dayjs(req.body.spentOn).startOf('day')
+    : dayjs().startOf('day');
+  if (!spentOn.isValid()) {
     return res.status(400).json({ error: 'That is not a valid date' });
   }
 
   const cost = await Cost.create({
-    spentOn,
+    spentOn: spentOn.toDate(),
     category,
     description: description.slice(0, 500),
     amount: Math.round(amount * 100) / 100,
@@ -3512,8 +3554,11 @@ router.put('/costs/:id', requireFinance, wrap(async (req, res) => {
       return res.status(400).json({ error: 'Please enter an amount' });
     }
     const amount = Number(req.body.amount);
-    if (!Number.isFinite(amount) || amount < 0) {
+    if (!Number.isFinite(amount) || amount <= 0) {
       return res.status(400).json({ error: 'Amount must be a positive number' });
+    }
+    if (amount > 1e9) {
+      return res.status(400).json({ error: 'That amount looks wrong — please check it' });
     }
     cost.amount = Math.round(amount * 100) / 100;
   }
@@ -3526,11 +3571,12 @@ router.put('/costs/:id', requireFinance, wrap(async (req, res) => {
   }
 
   if (req.body?.spentOn !== undefined) {
-    const spentOn = new Date(req.body.spentOn);
-    if (Number.isNaN(spentOn.getTime())) {
+    // Same parse as on create, for the same reason.
+    const spentOn = dayjs(req.body.spentOn).startOf('day');
+    if (!spentOn.isValid()) {
       return res.status(400).json({ error: 'That is not a valid date' });
     }
-    cost.spentOn = spentOn;
+    cost.spentOn = spentOn.toDate();
   }
 
   if (req.body?.description !== undefined) {
@@ -3559,6 +3605,10 @@ router.delete('/costs/:id', requireFinance, wrap(async (req, res) => {
   const { Cost } = await import('../models/index.js');
   const cost = await Cost.findById(req.params.id);
   if (!cost) return res.status(404).json({ error: 'Cost not found' });
+
+  // Already voided: say so rather than overwriting who did it and why. The
+  // whole point of voiding over deleting is that the original act survives.
+  if (cost.voided) return res.json({ ok: true, alreadyVoided: true });
 
   cost.voided = true;
   cost.voidedAt = new Date();

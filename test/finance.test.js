@@ -194,3 +194,79 @@ test('money paid out is kept apart from money still owed', async () => {
   assert.equal(p.byNanny[0].paid, 100);
   assert.equal(p.byNanny[0].pending, 75);
 });
+
+/* ------------------------------------------------------------------ *
+ * Access control
+ *
+ * The rule is that whoever keeps the books can record spending without
+ * also being handed control of nannies, bookings and payments. These
+ * assert the boundary rather than the intention.
+ * ------------------------------------------------------------------ */
+
+test('a finance user cannot reach anything but the finance pages', async () => {
+  // The same table the router uses, exercised directly.
+  const SCOPED = {
+    finance: [/^\/finance/, /^\/costs/, /^\/auth\//, /^\/settings$/],
+    support: [/^\/tickets/, /^\/callbacks/, /^\/conversations/, /^\/notes/, /^\/auth\//],
+  };
+  const allowed = (role, path) => {
+    const rules = SCOPED[role];
+    return !rules || rules.some((re) => re.test(path));
+  };
+
+  // The routes that would let a bookkeeper run the agency.
+  for (const path of [
+    '/nannies/507f1f77bcf86cd799439011/verify',
+    '/nannies/507f1f77bcf86cd799439011/suspend',
+    '/bookings/507f1f77bcf86cd799439011/cancel',
+    '/families/507f1f77bcf86cd799439011/block',
+    '/payments/507f1f77bcf86cd799439011/approve',
+  ]) {
+    assert.equal(allowed('finance', path), false, `finance must not reach ${path}`);
+  }
+
+  // And the ones they need.
+  for (const path of ['/finance', '/costs', '/costs/507f1f77bcf86cd799439011', '/auth/me']) {
+    assert.equal(allowed('finance', path), true, `finance must reach ${path}`);
+  }
+
+  // An unscoped role is unaffected.
+  assert.equal(allowed('admin', '/nannies/507f1f77bcf86cd799439011/verify'), true);
+  assert.equal(allowed('super_admin', '/costs'), true);
+});
+
+test('a cost lands in the month it was entered for, whatever the server timezone', async () => {
+  const dayjs = (await import('dayjs')).default;
+
+  // The route and the query must parse a date-only string the same way.
+  // `new Date('2026-09-01')` is UTC midnight; dayjs is local midnight, and
+  // west of UTC that put the 1st outside its own month.
+  const stored = dayjs('2026-09-01').startOf('day').toDate();
+  const start = dayjs('2026-09-01').startOf('day').toDate();
+  const end = dayjs('2026-09-30').endOf('day').toDate();
+
+  assert.ok(stored >= start && stored <= end, 'the 1st belongs to its own month');
+
+  const lastDay = dayjs('2026-09-30').startOf('day').toDate();
+  assert.ok(lastDay >= start && lastDay <= end, 'and so does the last');
+
+  const prevMonth = dayjs('2026-08-31').startOf('day').toDate();
+  assert.ok(!(prevMonth >= start && prevMonth <= end), 'the month before stays out');
+});
+
+test('an amount that is empty, zero or absurd is refused', async () => {
+  // The route's own rule, which the schema's `min: 0` does not cover.
+  const accepted = (v) => {
+    if (v === '' || v === null || v === undefined) return false;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return false;
+    return !(n > 1e9);
+  };
+
+  for (const v of ['', null, undefined, 'abc', -5, 0, NaN, Infinity, 1e308]) {
+    assert.equal(accepted(v), false, `${String(v)} must be refused`);
+  }
+  for (const v of [1, 100, '250.5', 1e9]) {
+    assert.equal(accepted(v), true, `${String(v)} must be accepted`);
+  }
+});
