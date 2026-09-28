@@ -271,6 +271,14 @@ export async function releaseDuePayouts(now = new Date()) {
 }
 
 /**
+ * Statuses that mean the money has already gone out.
+ *
+ * Kept next to the recovery it guards: marking a settled payout paid again must
+ * not move anything a second time.
+ */
+const SETTLED_PAYOUT = new Set([PAYOUT_STATUS.COMPLETED, PAYOUT_STATUS.FINAL_DONE]);
+
+/**
  * Take back any advance this nanny still owes, out of a payout about to go.
  *
  * An advance is her own salary paid early, so it comes off the next wages
@@ -306,10 +314,28 @@ async function recoverAdvances(payout) {
     const owed = round2(adv.advance.outstanding);
     const take = Math.min(owed, available);
 
-    adv.advance.outstanding = round2(owed - take);
-    if (adv.advance.outstanding <= 0) adv.advance.recoveredAt = new Date();
+    /**
+     * Claim the money with the subtraction itself, not with a later save.
+     *
+     * Reading the balance and then writing it back let two payouts settled at
+     * the same moment both read 300,000, both subtract it, and both send her
+     * 300,000 less — one advance recovered twice, and 300,000 of her wages
+     * gone. The `$gte` makes the write conditional on the balance still being
+     * there, so the second one matches nothing and takes nothing.
+     */
     // eslint-disable-next-line no-await-in-loop
-    await adv.save();
+    const claimed = await Payout.findOneAndUpdate(
+      { _id: adv._id, 'advance.outstanding': { $gte: take } },
+      {
+        $inc: { 'advance.outstanding': -take },
+        ...(take >= owed ? { $set: { 'advance.recoveredAt': new Date() } } : {}),
+      },
+      { new: true },
+    );
+
+    // Somebody else got there first. Her debt is already smaller than we
+    // thought, so there is nothing to take here and nothing to correct.
+    if (!claimed) continue;
 
     available = round2(available - take);
     recovered = round2(recovered + take);
@@ -326,6 +352,20 @@ async function recoverAdvances(payout) {
 
 /** An admin transferred a payout to the nanny and recorded the proof. */
 export async function markPayoutPaid(payout, { adminId = null, proof = {}, note = '' } = {}) {
+  /**
+   * Already settled, so nothing moves again.
+   *
+   * Without this an admin double-clicking, or retrying a request that timed
+   * out while the WhatsApp notice was sending, ran the recovery a second time
+   * — and because the first advance was by then cleared, it took the money out
+   * of whichever *other* advance she had open. `advanceRecovered` was assigned
+   * rather than added to, so the record of the first recovery was overwritten
+   * as well. Measured: a 1,000,000 payout paid her 500,000 instead of 700,000.
+   */
+  if (SETTLED_PAYOUT.has(payout.status)) {
+    return { success: true, payout, advance: { recovered: 0, from: [] }, alreadyPaid: true };
+  }
+
   // Before the amount is settled, not after: what she is sent is what is left
   // once anything she was already paid early has come off.
   const advance = await recoverAdvances(payout);
