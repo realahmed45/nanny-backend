@@ -1,7 +1,9 @@
 import { on, mainMenuFor, mainMenuState } from './engine.js';
 import { User, Session, Otp } from '../models/index.js';
 import { USER_ROLE, NANNY_STATUS } from '../utils/constants.js';
-import { parseChoice, parseEmail, parseOtp, clean, lower, isStartWord } from '../utils/parse.js';
+import {
+  parseChoice, parseEmail, parseOtp, clean, lower, isStartWord, detectOpeningIntent,
+} from '../utils/parse.js';
 import { sendVerificationCode } from '../providers/email.js';
 import { firstName } from '../utils/format.js';
 import * as M from '../utils/messages.js';

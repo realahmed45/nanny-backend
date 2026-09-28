@@ -22,8 +22,11 @@ async function createVerifiedNanny(phone = NANNY, { rate = 25, name = 'Maria Gro
   const { User } = await import('../src/models/index.js');
   const { NANNY_STATUS, USER_ROLE } = await import('../src/utils/constants.js');
 
-  await startChat(phone);
-  await say(phone, '2');            // I'm a nanny
+  // She says what she wants in her first message, which is what sends her down
+  // the nanny path — the "1. Family / 2. Nanny" question no longer exists.
+  await say(phone, 'nanny — I am looking for a job');
+  await say(phone, '1');            // English
+  await say(phone, '1');            // yes, I want to work as a nanny
   await say(phone, name);
   await say(phone, address);
   await say(phone, await latestOtp(phone));
@@ -62,7 +65,6 @@ async function familyBookingUpToListing(phone = FAMILY, { date = null } = {}) {
   const target = date || dayjs().add(10, 'day').format('YYYY-MM-DD');
 
   await startChat(phone);
-  await say(phone, '1');            // I'm a family
   await say(phone, '1');            // Find a Nanny
   await say(phone, 'Sarah Johnson');
   await say(phone, 'sarah@email.com');
@@ -282,7 +284,6 @@ test('asking for agent help queues a callback with what was captured', async () 
 
   await startChat(FAMILY);
   await say(FAMILY, '1');
-  await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
   await say(FAMILY, 'sarah@email.com');
   await say(FAMILY, await latestOtp(FAMILY));
@@ -328,7 +329,6 @@ test('booking dates are limited to a sensible window', async () => {
     await createVerifiedNanny();
     await startChat(FAMILY);
     await say(FAMILY, '1');
-    await say(FAMILY, '1');
     await say(FAMILY, 'Sarah Johnson');
     await say(FAMILY, 'sarah@email.com');
     await say(FAMILY, await latestOtp(FAMILY));
@@ -366,7 +366,6 @@ test('"Return back" restarts from the very first question', async () => {
 
   await startChat(FAMILY);
   await say(FAMILY, '1');
-  await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
   await say(FAMILY, 'sarah@email.com');
   await say(FAMILY, await latestOtp(FAMILY));
@@ -390,7 +389,6 @@ test('a weekday answer is confirmed back as a real date', async () => {
   await createVerifiedNanny();
 
   await startChat(FAMILY);
-  await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
   await say(FAMILY, 'sarah@email.com');
@@ -437,7 +435,6 @@ test('a voice note is answered rather than ignored', async () => {
 
   await createVerifiedNanny();
   await startChat(FAMILY);
-  await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
   await say(FAMILY, 'sarah@email.com');
@@ -544,7 +541,6 @@ test('contact details are stripped from relayed chat messages', async () => {
 
 test('the bot greets people by their first name', async () => {
   await startChat(FAMILY);
-  await say(FAMILY, '1');
   await say(FAMILY, '1');
 
   const reply = await say(FAMILY, 'Ahmed Ali');
@@ -676,7 +672,6 @@ test('the video step keeps every video and photo a nanny sends', async () => {
 async function multiDayToDuration(phone = FAMILY) {
   await startChat(phone);
   await say(phone, '1');
-  await say(phone, '1');
   await say(phone, 'Sarah Johnson');
   await say(phone, 'sarah@email.com');
   await say(phone, await latestOtp(phone));
@@ -758,7 +753,6 @@ test('a 24-hour booking for one day does not need an agent', async () => {
 
   await startChat(FAMILY);
   await say(FAMILY, '1');
-  await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
   await say(FAMILY, 'sarah@email.com');
   await say(FAMILY, await latestOtp(FAMILY));
@@ -787,7 +781,6 @@ test('an emergency promises a call, records it, and confirms the address', async
   const { Session, CallbackRequest } = await import('../src/models/index.js');
 
   await startChat(FAMILY);
-  await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
   await say(FAMILY, 'sarah@email.com');
@@ -826,7 +819,6 @@ test('an emergency promises a call, records it, and confirms the address', async
 
 test('an emergency that keeps its address carries straight on', async () => {
   await startChat(FAMILY);
-  await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
   await say(FAMILY, 'sarah@email.com');
@@ -1212,7 +1204,6 @@ test('an emergency lasting an unknown time is still bookable', async () => {
 
   await startChat(FAMILY);
   await say(FAMILY, '1');
-  await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
   await say(FAMILY, 'sarah@email.com');
   await say(FAMILY, await latestOtp(FAMILY));
@@ -1354,7 +1345,6 @@ test('booking asks for a date by option, and flags same-day as an emergency', as
   await createVerifiedNanny();
 
   await startChat(FAMILY);
-  await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
   await say(FAMILY, 'sarah@email.com');
@@ -1537,7 +1527,6 @@ test('multi-day booking builds one service day per matching weekday', async () =
 
   await startChat(FAMILY);
   await say(FAMILY, '1');
-  await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
   await say(FAMILY, 'sarah@email.com');
   await say(FAMILY, await latestOtp(FAMILY));
@@ -1573,7 +1562,6 @@ test('multi-day booking builds one service day per matching weekday', async () =
 
 test('global commands work: 0 returns to the main menu', async () => {
   await startChat(FAMILY);
-  await say(FAMILY, '1');
   await say(FAMILY, '1');
   await say(FAMILY, 'Sarah Johnson');
 
@@ -1838,7 +1826,6 @@ test('with email verification off, a family registers on its name alone', async 
 
   // "nanny" is the trigger word; anything else is ignored at START.
   await startChat(phone);
-  await say(phone, '1');   // I'm a family
   await say(phone, '1');   // Find a Nanny -> asks for a name
   const reply = await say(phone, 'Sarah Jones');
 
@@ -2000,7 +1987,6 @@ test('a mistyped option at the main menu redraws the menu rather than chatting',
   try {
     const phone = '999500000104';
     await startChat(phone);
-    await say(phone, '1');
 
     const reply = await say(phone, '99');
 

@@ -114,14 +114,16 @@ export async function say(phone, text, extra = {}) {
 }
 
 /**
- * Wake the bot and get past the language picker in one step.
+ * Wake the bot and get a new contact to the family main menu.
  *
  * A new contact is asked their language before anything else, so almost every
- * test would otherwise open with the same two lines of picking English. This
- * keeps that detail in one place: when the picker changes, the tests do not.
+ * test would otherwise open with the same lines. This keeps that detail in one
+ * place: when the opening changes, the tests do not.
  *
- * Returns the bot's reply to the language choice — that is, the first real
- * screen of the conversation.
+ * Returns the bot's reply to the language choice — the first real screen of the
+ * conversation, which is now the family menu. There used to be a role question
+ * between the two, and callers answered it themselves with a "1" meaning "I'm a
+ * Family"; that step is gone.
  */
 export async function startChat(phone, { locale = '1' } = {}) {
   await say(phone, 'nanny');
