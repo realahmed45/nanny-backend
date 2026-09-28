@@ -1241,11 +1241,9 @@ test('an emergency lasting an unknown time is still bookable', async () => {
 test('family registration collects name, email and verifies OTP', async () => {
   const { User } = await import('../src/models/index.js');
 
+  // Choosing a language lands on the family menu: there is no longer a
+  // "family or nanny?" question in between.
   let reply = await startChat(FAMILY);
-  assert.match(reply, /Welcome to \*My Nanny\*/);
-  assert.match(reply, /I'm a Family/);
-
-  reply = await say(FAMILY, '1');
   assert.match(reply, /Find a Nanny/);
 
   reply = await say(FAMILY, '1');
@@ -1804,8 +1802,11 @@ test('with email verification off, a nanny registers on her name alone', async (
   await setEmailVerification(false);
   const phone = '999300000010';
 
-  await startChat(phone);
-  await say(phone, '2');
+  // She says she wants work in her opening message, confirms it, and is sent
+  // to registration — the "family or nanny?" question is gone.
+  await say(phone, 'nanny — I am looking for a job');
+  await say(phone, '1');            // English
+  await say(phone, '1');            // yes, I want to work as a nanny
   const reply = await say(phone, 'Siti Rahayu');
 
   // Straight into the profile, with no email asked for on the way.
@@ -1900,8 +1901,9 @@ function stubGroq() {
 
 /** Walk a nanny registration as far as the languages question. */
 async function toLanguages(phone) {
-  await startChat(phone);
-  await say(phone, '2');
+  await say(phone, 'nanny — I am looking for a job');
+  await say(phone, '1');            // English
+  await say(phone, '1');            // yes, I want to work as a nanny
   await say(phone, 'Maria Test');
   await say(phone, 'Maria');
   await say(phone, '28');
