@@ -1,4 +1,6 @@
 import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc.js';
+import timezone from 'dayjs/plugin/timezone.js';
 import { Booking, User, nextSequence } from '../models/index.js';
 import {
   BOOKING_STATUS, BOOKING_SUBSTATUS, SERVICE_DAY_STATUS,
@@ -8,6 +10,9 @@ import { computeBookingAmount, computeCancellationRefund, round2 } from './polic
 import { describeDay } from './calendar.js';
 import config from '../config/index.js';
 import { emergencySurcharge } from './settings.js';
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 /** Random 4-char service code, e.g. "A123", as used in the script. */
 export function generateServiceCode() {
@@ -48,7 +53,15 @@ export function buildServiceDays({
     if (special?.closed) continue;
 
     const multiplier = special?.multiplier || 1;
-    const startAt = d.hour(hh).minute(mm).second(0).millisecond(0);
+    /**
+     * 09:00 means nine in the morning where the nanny is standing.
+     *
+     * Built from the calendar date and the wall-clock time in the business
+     * timezone, not the host's. `d.hour(hh)` read the server's zone, so on a UTC
+     * host a 09:00 Bali booking was stored as 09:00Z — eight hours out, which
+     * the phone then displayed as 5:00 PM.
+     */
+    const startAt = dayjs.tz(`${date} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`, config.timezone);
     days.push({
       date,
       startAt: startAt.toDate(),
@@ -351,6 +364,27 @@ export async function assignReplacement(booking, nanny) {
   // were never owed and rewrote the booking total downward, while a payout
   // above the charge billed them for a difference that did not exist.
   const remaining = booking.remainingDays();
+
+  /**
+   * Is she still free? Asked here, not only when she was searched for.
+   *
+   * Availability used to be checked in one place — inside the search — and
+   * every path that actually committed a nanny skipped it. Between a family
+   * seeing her and this running sits a bank transfer, a receipt photo and a
+   * manual approval: hours or days. Two families could both be shown her, both
+   * pay, and both be confirmed, and one of them would arrive to no nanny.
+   */
+  const { isNannyAvailable } = await import('./matching.js');
+  const free = await isNannyAvailable(nanny, {
+    serviceDays: remaining,
+    hoursPerDay: booking.hoursPerDay,
+    excludeBookingId: booking._id,
+  });
+  if (!free) {
+    const err = new Error('That nanny is no longer available for these dates.');
+    err.code = 'NANNY_UNAVAILABLE';
+    throw err;
+  }
 
   booking.nanny = nanny._id;
   for (const d of remaining) d.nanny = nanny._id;

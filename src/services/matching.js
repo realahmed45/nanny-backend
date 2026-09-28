@@ -28,9 +28,18 @@ export async function isNannyAvailable(nanny, { serviceDays, hoursPerDay, exclud
     if (availableDays.length && !availableDays.includes(weekdayOf(day.date))) return false;
   }
 
-  // Reject overlaps with the nanny's existing live bookings.
+  /**
+   * Reject overlaps with the nanny's existing live bookings — either seat.
+   *
+   * A 24-hour booking is covered by two nannies, and the second sits in
+   * `secondNanny`. Matching on `nanny` alone meant a nanny working the second
+   * shift read as completely free, so she could be offered and confirmed for a
+   * booking that overlapped it — guaranteed, since both nannies share the same
+   * round-the-clock service days. Every other query about what a nanny is
+   * working asks both fields; this one did not, and it is the one that decides.
+   */
   const query = {
-    nanny: nanny._id,
+    $or: [{ nanny: nanny._id }, { secondNanny: nanny._id }],
     status: { $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING] },
   };
   if (excludeBookingId) query._id = { $ne: excludeBookingId };

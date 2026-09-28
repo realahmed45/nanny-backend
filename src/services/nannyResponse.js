@@ -1,6 +1,7 @@
 import {
   BOOKING_STATUS, BOOKING_SUBSTATUS,
 } from '../utils/constants.js';
+import { nannyDisplayName } from '../utils/format.js';
 
 /**
  * A nanny answering a booking request: accept or decline.
@@ -39,17 +40,36 @@ export async function respondToBookingRequest({ booking, nanny, accept, reason =
       await applyPendingChange(booking);
       await notifyUser(family, `✅ *Booking Updated*
 
-${nanny.fullName} has accepted your changes to Booking #${booking.bookingNumber}.
+${nannyDisplayName(nanny)} has accepted your changes to Booking #${booking.bookingNumber}.
 
 ${M.bookingSummary(booking, { showId: true, nanny, paid: true, showStatus: true })}`).catch(() => {});
     } else {
+      /**
+       * The last check before she is committed, and the one that matters.
+       *
+       * She may have accepted another booking over the same hours while this
+       * request sat in her chat. Nothing else on this path asks, so without it
+       * two families each hold a confirmation for the same nanny and the same
+       * morning, and one of them finds out when nobody arrives.
+       */
+      const { isNannyAvailable } = await import('./matching.js');
+      const free = await isNannyAvailable(nanny, {
+        serviceDays: booking.remainingDays(),
+        hoursPerDay: booking.hoursPerDay,
+        excludeBookingId: booking._id,
+      });
+      if (!free) {
+        pending.outcome = 'pending';
+        return { ok: false, reason: 'no_longer_available' };
+      }
+
       booking.subStatus = BOOKING_SUBSTATUS.NANNY_CONFIRMED;
       // An ongoing booking stays ongoing; only a not-yet-started one moves up.
       if (booking.status !== BOOKING_STATUS.ONGOING) booking.status = BOOKING_STATUS.UPCOMING;
       await booking.save();
       await notifyUser(family, `🎉 *Booking Confirmed!*
 
-${nanny.fullName} has accepted your booking.
+${nannyDisplayName(nanny)} has accepted your booking.
 
 ${M.bookingSummary(booking, { showId: true, nanny, paid: true, showStatus: true })}`).catch(() => {});
     }
@@ -67,12 +87,32 @@ ${M.bookingSummary(booking, { showId: true, nanny, paid: true, showStatus: true 
     booking.subStatus = BOOKING_SUBSTATUS.NANNY_CONFIRMED;
     await booking.save();
   } else {
-    const nannyId = booking.nanny;
+    /**
+     * The nanny who actually declined — not whoever the booking lists first.
+     *
+     * A 24-hour booking asks two nannies, and `pending` is already the row
+     * belonging to whichever of them is answering. This read `booking.nanny`
+     * instead, so when the *second* nanny declined, the *first* — who may have
+     * already accepted — was blacklisted, cleared off the booking, and could
+     * never be re-offered it, because replacement search excludes
+     * `rejectedNannies`. Meanwhile the nanny who declined stayed on it.
+     *
+     * The scheduler and the WhatsApp menu were both fixed for this; this path,
+     * which the phone app uses, was not.
+     */
+    const nannyId = pending.nanny || nanny._id;
     if (nannyId && !booking.rejectedNannies.some((id) => String(id) === String(nannyId))) {
       // Recorded so she is not offered the same booking again on the next pass.
       booking.rejectedNannies.push(nannyId);
     }
-    booking.nanny = undefined;
+
+    // Clear whichever seat she held, leaving the other nanny where she is.
+    if (String(booking.secondNanny || '') === String(nannyId)) {
+      booking.secondNanny = undefined;
+    } else {
+      booking.nanny = undefined;
+    }
+
     booking.subStatus = BOOKING_SUBSTATUS.NANNY_CANCELLED_AWAITING_REPLACEMENT;
     await booking.save();
   }
