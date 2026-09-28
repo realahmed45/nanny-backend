@@ -55,15 +55,22 @@ export const FAMILY_MAIN_MENU = `What would you like to do?
 5. Refer a Friend
 6. Help`;
 
+/**
+ * Messages sits at 3 because a family can write to her before any booking
+ * exists, and until now she had no way to open that conversation at all: every
+ * route into a chat needed a live booking. She received the message and could
+ * not reply to it.
+ */
 export const NANNY_MAIN_MENU = `What would you like to do?
 
 1. Booking Requests and Updates
 2. My Bookings
-3. My Availability
-4. My Profile
-5. Payments
-6. Refer a Friend
-7. Help / Support`;
+3. Messages
+4. My Availability
+5. My Profile
+6. Payments
+7. Refer a Friend
+8. Help / Support`;
 
 /**
  * Shown when someone messages the bot before it has been started. Keeping the

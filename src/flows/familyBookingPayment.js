@@ -148,14 +148,30 @@ const chattingHandler = async (ctx) => {
   await thread.save();
 
   const nanny = await User.findById(thread.nanny);
+  let delivered = { live: false, sent: false };
   if (nanny) {
     const name = firstName(family?.fullName);
     const label = name ? `👨‍👩‍👧 ${name}` : '👨‍👩‍👧 Family';
-    await notifyUser(nanny, `${label}:\n${safe.text}`);
+    const { relayChatMessage } = await import('../services/notify.js');
+    delivered = await relayChatMessage(nanny, `${label}:\n${safe.text}`, {
+      threadId: thread._id,
+    });
   }
 
   // Tell the sender what happened, or their message looks ignored.
-  return safe.redacted ? CONTACT_BLOCKED_NOTICE : null;
+  if (safe.redacted) return CONTACT_BLOCKED_NOTICE;
+
+  /**
+   * A send that failed used to look exactly like one that worked: the family got
+   * silence either way, while the message was stored as though delivered. Said
+   * plainly instead, because the alternative is a family waiting on a reply that
+   * was never going to come.
+   */
+  if (delivered.skipped || delivered.sent === false) {
+    return '⚠️ That did not reach her. It is saved — please try again in a moment.';
+  }
+
+  return null;
 };
 chattingHandler.allowCommands = true;
 on('FF_CHATTING', chattingHandler);

@@ -88,7 +88,7 @@ Type *0* Return to Main Menu`;
  * ------------------------------------------------------------------ */
 
 const nannyMenuHandler = async (ctx) => {
-  const choice = parseChoice(ctx.text, 7);
+  const choice = parseChoice(ctx.text, 8);
   if (!choice) return M.NANNY_MAIN_MENU;
 
   const user = await User.findById(ctx.session.user);
@@ -99,11 +99,12 @@ const nannyMenuHandler = async (ctx) => {
   switch (choice) {
     case 1: return showPendingRequests(ctx);
     case 2: return { text: NANNY_BOOKINGS_MENU, state: 'NB_BOOKINGS_MENU' };
-    case 3: return { text: NANNY_AVAILABILITY_MENU, state: 'NA_MENU' };
-    case 4: return { text: NANNY_PROFILE_MENU, state: 'NP_MENU' };
-    case 5: return { text: NANNY_PAYMENTS_MENU, state: 'NPAY_MENU' };
-    case 6: return showNannyReferral(ctx);
-    case 7: return { text: NANNY_SUPPORT_MENU, state: 'NSUP_MENU' };
+    case 3: return showNannyThreads(ctx);
+    case 4: return { text: NANNY_AVAILABILITY_MENU, state: 'NA_MENU' };
+    case 5: return { text: NANNY_PROFILE_MENU, state: 'NP_MENU' };
+    case 6: return { text: NANNY_PAYMENTS_MENU, state: 'NPAY_MENU' };
+    case 7: return showNannyReferral(ctx);
+    case 8: return { text: NANNY_SUPPORT_MENU, state: 'NSUP_MENU' };
     default: return M.NANNY_MAIN_MENU;
   }
 };
@@ -238,7 +239,7 @@ async function acceptRequest(ctx, booking, pending) {
     await applyPendingChange(booking);
     await notifyUser(family, `✅ *Booking Updated*
 
-${nanny.fullName} has accepted your changes to Booking #${booking.bookingNumber}.
+${nannyDisplayName(nanny)} has accepted your changes to Booking #${booking.bookingNumber}.
 
 ${M.bookingSummary(booking, { showId: true, nanny, paid: true, showStatus: true })}`);
   } else {
@@ -247,7 +248,7 @@ ${M.bookingSummary(booking, { showId: true, nanny, paid: true, showStatus: true 
     await booking.save();
     await notifyUser(family, `🎉 *Booking Confirmed!*
 
-${nanny.fullName} has accepted your booking.
+${nannyDisplayName(nanny)} has accepted your booking.
 
 ${M.bookingSummary(booking, { showId: true, nanny, paid: true, showStatus: true })}`);
   }
@@ -358,6 +359,51 @@ ${M.nannyListing(replacements.slice(0, 3), { startIndex: 0, total: replacements.
  * Nanny <-> family chat
  * ------------------------------------------------------------------ */
 
+/**
+ * Her conversations, so a family can write to her before any booking exists.
+ *
+ * Every other way into a chat needs a live booking, so a pre-booking enquiry
+ * reached her as a notification she could not answer — the family's screen
+ * invited her to reply and there was nowhere for the reply to go.
+ */
+export async function showNannyThreads(ctx) {
+  const threads = await ChatThread.find({ nanny: ctx.session.user, closed: false })
+    .populate('family', 'fullName')
+    .sort({ lastMessageAt: -1 })
+    .limit(10);
+
+  if (!threads.length) {
+    return 'You have no messages yet.\n\nWhen a family writes to you it will appear here.\n\nType *0* for the Main Menu.';
+  }
+
+  const rows = threads.map((t, i) => {
+    const last = t.messages[t.messages.length - 1];
+    const who = firstName(t.family?.fullName) || 'A family';
+    const preview = last?.body ? `\n   _${last.body.slice(0, 60)}_` : '';
+    return `${i + 1}. 👨‍👩‍👧 ${who}${preview}`;
+  });
+
+  return {
+    text: `💬 *Messages*\n\n${rows.join('\n\n')}\n\nReply with a number to open a conversation.\nType *0* for the Main Menu.`,
+    state: 'NANNY_THREADS',
+    data: { threadIds: threads.map((t) => String(t._id)) },
+  };
+}
+
+on('NANNY_THREADS', async (ctx) => {
+  const ids = ctx.get('threadIds') || [];
+  const choice = parseChoice(ctx.text, ids.length);
+  if (!choice) return showNannyThreads(ctx);
+
+  const thread = await ChatThread.findById(ids[choice - 1]);
+  if (!thread) return showNannyThreads(ctx);
+
+  const family = await User.findById(thread.family);
+  if (!family) return showNannyThreads(ctx);
+
+  return openNannyChat(ctx, family, thread.booking ? { _id: thread.booking } : null);
+});
+
 export async function openNannyChat(ctx, family, booking = null) {
   let thread = await ChatThread.findOne({
     family: family._id, nanny: ctx.session.user, booking: booking?._id || null, closed: false,
@@ -370,8 +416,22 @@ export async function openNannyChat(ctx, family, booking = null) {
   thread.nannyActive = true;
   await thread.save();
 
+  /**
+   * What was already said, so she is not answering a question she cannot see.
+   *
+   * The messages were always stored and never shown: opening a chat gave her a
+   * blank screen, even when the family had asked something several lines long.
+   */
+  const recent = (thread.messages || []).slice(-6)
+    .map((m) => (m.from === 'family'
+      ? `👨‍👩‍👧 ${m.body || '(photo)'}`
+      : `🙋 ${m.body || '(photo)'}`))
+    .join('\n');
+
+  const history = recent ? `\n\n*Earlier*\n${recent}` : '';
+
   return {
-    text: `You can now chat with ${family.fullName || 'the family'}.\nYour phone numbers remain private.\nType "*Bye*" at any time to close the chat.`,
+    text: `You can now chat with ${firstName(family.fullName) || 'the family'}.\nYour phone numbers remain private.\nType "*Bye*" at any time to close the chat.${history}`,
     state: 'NANNY_CHATTING',
     activeChat: thread._id,
   };
@@ -410,9 +470,22 @@ const nannyChatHandler = async (ctx) => {
   await thread.save();
 
   const family = await User.findById(thread.family);
+  let delivered = { live: false, sent: false };
   if (family) {
-    await notifyUser(family, `👩 ${nannyDisplayName(nanny)}:\n${safe.text}`);
+    const { relayChatMessage } = await import('../services/notify.js');
+    delivered = await relayChatMessage(family, `👩 ${nannyDisplayName(nanny)}:\n${safe.text}`, {
+      threadId: thread._id,
+    });
   }
+
+  // She was told nothing when her message was cut, unlike the family, who got
+  // the notice. Same message both ways now.
+  if (safe.redacted) return CONTACT_BLOCKED_NOTICE;
+
+  if (delivered.skipped || delivered.sent === false) {
+    return '⚠️ That did not reach them. It is saved — please try again in a moment.';
+  }
+
   return null;
 };
 nannyChatHandler.allowCommands = true;
@@ -618,7 +691,7 @@ on('NB_ENTER_ARRIVAL_CODE', async (ctx) => {
   const nanny = await User.findById(ctx.session.user);
   await notifyUser(family, `✅ *Nanny Arrival Confirmed*
 
-${nanny?.fullName || 'Your nanny'} has arrived and her service has started.
+${nannyDisplayName(nanny)} has arrived and her service has started.
 
 📅 ${prettyDate(day.date)}
 ⏰ ${timeRange(booking.startTime, booking.hoursPerDay)}`);
@@ -688,7 +761,7 @@ Booking #${booking.bookingNumber} is now complete.
 
 Thank you for using My Nanny! ❤️
 
-Would you like to rate ${nanny?.fullName || 'your nanny'}? Go to *My Bookings > Completed*.`);
+Would you like to rate ${nannyDisplayName(nanny)}? Go to *My Bookings > Completed*.`);
   } else {
     await notifyUser(family, `✅ Today's service for *${prettyDate(day.date)}* has been successfully completed.
 
@@ -739,7 +812,7 @@ on('NB_SHARING_LOCATION', async (ctx) => {
 
   const family = await User.findById(booking.family);
   const nanny = await User.findById(ctx.session.user);
-  await notifyUser(family, `📍 *${nanny?.fullName || 'Your nanny'}'s live location*\n${loc}`);
+  await notifyUser(family, `📍 *${nannyDisplayName(nanny)}'s live location*\n${loc}`);
 
   return '📍 Location shared with the family. Send another to update it, or type *STOP*.';
 });
@@ -840,7 +913,7 @@ on('NB_CANCEL_CONFIRM', async (ctx) => {
     }
     await notifyUser(family, `🔴 *Your nanny has cancelled*
 
-${nanny?.fullName || 'Your nanny'} has cancelled Booking #${booking.bookingNumber}.
+${nannyDisplayName(nanny)} has cancelled Booking #${booking.bookingNumber}.
 
 Don't worry — here are available replacement nannies:
 
@@ -850,7 +923,7 @@ Or type *0* and go to My Bookings to cancel for a full refund.`);
   } else {
     await notifyUser(family, `🔴 *Your nanny has cancelled*
 
-${nanny?.fullName || 'Your nanny'} has cancelled Booking #${booking.bookingNumber}.
+${nannyDisplayName(nanny)} has cancelled Booking #${booking.bookingNumber}.
 
 We couldn't find a replacement immediately — our team is working on it. You can also cancel for a full refund of all unused services from *My Bookings*.`);
   }
