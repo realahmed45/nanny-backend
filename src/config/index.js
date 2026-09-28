@@ -54,7 +54,16 @@ export const config = {
     instanceId: process.env.ULTRAMSG_INSTANCE_ID || '',
     token: process.env.ULTRAMSG_TOKEN || '',
     baseUrl: process.env.ULTRAMSG_BASE_URL || 'https://api.ultramsg.com',
-    webhookToken: process.env.ULTRAMSG_WEBHOOK_TOKEN || '',
+    /**
+     * Proves an inbound webhook really came from the provider.
+     *
+     * Required in production, because the check that uses it is skipped when it
+     * is empty — and it was empty. Anyone who found the URL could post a message
+     * naming any phone number and the system would treat it as that person:
+     * book, cancel, confirm an arrival code, change their details. An open door
+     * is worse than a refused start, so this refuses to start.
+     */
+    webhookToken: requiredSecret('ULTRAMSG_WEBHOOK_TOKEN', ''),
   },
 
   // Resend is the preferred mail backend: an HTTP API, so nothing depends on
@@ -134,6 +143,18 @@ export const config = {
     console.warn(`[config] CURRENCY=${want} ignored — amounts are stored in rupiah; using IDR.`);
     return 'IDR';
   })(),
+  /**
+   * The timezone the business actually operates in.
+   *
+   * Every service time, every period boundary and every cron hour used to be
+   * computed in whatever zone the host happened to run in. On a hosted server
+   * that is UTC, and Bali is UTC+8, so a 09:00 booking was stored as 09:00Z and
+   * shown to the nanny as 5:00 PM — the same booking reading two different times
+   * on one screen. Fixed here rather than by hoping TZ is set on the host, so it
+   * cannot silently differ between a laptop and production.
+   */
+  timezone: (process.env.BUSINESS_TZ || 'Asia/Makassar').trim(),
+
   transportFee: {
     min: int(process.env.TRANSPORT_FEE_MIN, 50000),
     max: int(process.env.TRANSPORT_FEE_MAX, 100000),

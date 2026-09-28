@@ -17,10 +17,23 @@ const router = express.Router();
  * and never retries a message we already accepted.
  */
 router.post('/ultramsg', async (req, res) => {
-  // Optional shared-secret check.
-  if (config.ultramsg.webhookToken) {
+  /**
+   * Shared-secret check. Not optional in production.
+   *
+   * This used to be wrapped in `if (token)`, so an unset token skipped the check
+   * altogether and left the endpoint open to anyone who found the URL — able to
+   * post as any phone number and drive that person's conversation. Config now
+   * refuses to boot in production without one; here, a missing token is refused
+   * rather than waved through.
+   */
+  const expected = config.ultramsg.webhookToken;
+  if (!expected) {
+    if (config.env === 'production') {
+      return res.status(503).json({ error: 'Webhook not configured' });
+    }
+  } else {
     const supplied = req.query.token || req.headers['x-webhook-token'];
-    if (supplied !== config.ultramsg.webhookToken) {
+    if (supplied !== expected) {
       return res.status(401).json({ error: 'Invalid webhook token' });
     }
   }
