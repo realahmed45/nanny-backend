@@ -584,19 +584,59 @@ test('only the word "nanny" starts the bot', async () => {
   }
 
   // Phones capitalise the first letter, so casing must not matter. The first
-  // screen is the language picker: it comes before the role question because
-  // that question is unreadable to someone who does not read English.
+  // screen is the language picker: it comes before anything else because
+  // every later question is unreadable to someone who does not read English.
   for (const text of ['nanny', 'Nanny', 'NANNY', 'nanny!', 'Hi nanny']) {
     await clearDb();
     const reply = await say(FAMILY, text);
     assert.match(reply, /choose your language/i, `"${text}" should start the bot`);
     assert.match(reply, /Bahasa Indonesia/, 'the picker lists languages in their own script');
 
-    // Choosing English then leads to the role question as it always did.
+    // Choosing English drops them straight onto the family menu. Asking "are
+    // you a family or a nanny?" made every parent answer a question about us
+    // before they could ask for what they came for.
     const next = await say(FAMILY, '1');
-    assert.match(next, /Welcome to \*My Nanny\*/);
-    assert.match(next, /I'm a Family/);
+    assert.match(next, /Welcome/i);
+    assert.doesNotMatch(next, /I'm a Nanny — I want to work/, 'no role question');
   }
+});
+
+test('someone who says she is looking for work is asked to confirm, then registered', async () => {
+  const { Session } = await import('../src/models/index.js');
+
+  // The trigger word still gates the conversation; her sentence happens to
+  // contain it, which is how most nannies who message us actually write.
+  const reply = await say(FAMILY, 'I am a nanny, I am looking for a job');
+  assert.match(reply, /choose your language/i);
+
+  const asked = await say(FAMILY, '1');
+  assert.match(asked, /looking for a job with us/i, 'her intent is put back to her');
+
+  const session = await Session.findOne({ phone: FAMILY });
+  assert.equal(session.state, 'CONFIRM_NANNY_INTENT');
+
+  // Yes takes her into nanny registration.
+  const next = await say(FAMILY, '1');
+  assert.match(next, /name/i, 'registration starts by asking her name');
+
+  const after = await Session.findOne({ phone: FAMILY });
+  assert.equal(after.role, 'nanny');
+});
+
+test('a wrong guess about a nanny costs one tap', async () => {
+  const { Session } = await import('../src/models/index.js');
+
+  await say(FAMILY, 'nanny — I need work done, do you have any job for me');
+  await say(FAMILY, '1');
+
+  // "No, I need a nanny" puts her exactly where she would have been had
+  // nothing been detected at all.
+  const next = await say(FAMILY, '2');
+  assert.match(next, /Welcome/i);
+
+  const session = await Session.findOne({ phone: FAMILY });
+  assert.equal(session.role, 'family');
+  assert.equal(session.state, 'FAMILY_MAIN_MENU');
 });
 
 test('the video step keeps every video and photo a nanny sends', async () => {

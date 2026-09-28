@@ -151,6 +151,11 @@ on('START', async (ctx) => {
   // routed to START. Silent too — a stray message must not wake the bot.
   if (!isStartWord(ctx.text)) return null;
 
+  // Most people who reach us want childcare, so that is where the flow goes.
+  // A nanny says so in her opening message far more reliably than a family
+  // announces itself, so she is the one worth detecting.
+  const intent = detectOpeningIntent(ctx.text);
+
   // A referral link prefills the code, so it is here or nowhere.
   await captureReferralCode(ctx).catch(() => {});
 
@@ -183,10 +188,18 @@ on('START', async (ctx) => {
     };
   }
 
-  // Nobody we know. Ask the language first, because every question after
-  // this one is unreadable to someone who does not read English — including
-  // the question asking whether they are a family or a nanny.
-  return { text: M.LANGUAGE_PICKER, state: 'LANGUAGE_PICK', noPush: true, noTranslate: true };
+  // Nobody we know. Ask the language first, because every question after this
+  // one is unreadable to someone who does not read English.
+  //
+  // If her opening message said she is looking for work, that is carried across
+  // the language step so it can be put to her once she can read the reply.
+  return {
+    text: M.LANGUAGE_PICKER,
+    state: 'LANGUAGE_PICK',
+    noPush: true,
+    noTranslate: true,
+    ...(intent === 'nanny' ? { data: { openingIntent: intent } } : {}),
+  };
 });
 
 /**
@@ -222,7 +235,51 @@ on('LANGUAGE_PICK', async (ctx) => {
     return { text: M.LANGUAGE_SET, state: back, noPush: true };
   }
 
-  return { text: M.ROLE_PICKER, state: 'ROLE_PICK', noPush: true };
+  // She opened by saying she is looking for work, so she is asked to confirm
+  // that rather than being sent down the family path she did not ask for.
+  // Checked rather than assumed: the cost of guessing wrong is a nanny being
+  // walked through a booking, or a parent through a job application.
+  if (ctx.get('openingIntent') === 'nanny') {
+    return { text: M.CONFIRM_NANNY_INTENT, state: 'CONFIRM_NANNY_INTENT', noPush: true };
+  }
+
+  // Everybody else goes straight to the family side. Asking "are you a family
+  // or a nanny?" made every parent answer a question about us rather than
+  // about what they came for, and they are the overwhelming majority.
+  return {
+    text: `${M.WELCOME_FAMILY}\n\n${M.FAMILY_MAIN_MENU}`,
+    state: 'FAMILY_MAIN_MENU',
+    role: USER_ROLE.FAMILY,
+    noPush: true,
+  };
+});
+
+/**
+ * "You said you are looking for work — is that right?"
+ *
+ * The one question a detected nanny is asked. Yes sends her to registration;
+ * no puts her on the family menu, which is where she would have landed had
+ * nothing been detected at all, so a wrong guess costs her a single tap.
+ */
+on('CONFIRM_NANNY_INTENT', async (ctx) => {
+  const choice = parseChoice(ctx.text, 2);
+  if (!choice) return M.CONFIRM_NANNY_INTENT;
+
+  if (choice === 1) {
+    return {
+      text: `${M.WELCOME_NANNY}\n\n${M.ASK_FULL_NAME}`,
+      state: 'NANNY_REG_NAME',
+      role: USER_ROLE.NANNY,
+      noPush: true,
+    };
+  }
+
+  return {
+    text: `${M.WELCOME_FAMILY}\n\n${M.FAMILY_MAIN_MENU}`,
+    state: 'FAMILY_MAIN_MENU',
+    role: USER_ROLE.FAMILY,
+    noPush: true,
+  };
 });
 
 on('ROLE_PICK', async (ctx) => {

@@ -80,6 +80,20 @@ Are you looking for childcare, or do you want to work as a nanny?
 1. 👨‍👩‍👧 I'm a Family — I need a nanny
 2. 👩‍🍼 I'm a Nanny — I want to work`;
 
+/**
+ * Put back to someone whose first message sounded like she wants work.
+ *
+ * Her own words are not repeated to her — a detection read back as a quote
+ * invites an argument about what she typed. It asks the plain question, and
+ * the second option is what a family would pick, so a wrong guess costs one tap.
+ */
+export const CONFIRM_NANNY_INTENT = `👋 Welcome to *My Nanny*
+
+Are you a nanny looking for a job with us?
+
+1. ✅ Yes — I want to work as a nanny
+2. 👨‍👩‍👧 No — I need a nanny for my children`;
+
 export const INVALID_CHOICE = '❌ Sorry, I didn\'t understand that. Please reply with one of the listed options.';
 
 export const COMMANDS_HELP = `*Available commands*

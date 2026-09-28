@@ -30,6 +30,97 @@ export const isStartWord = (text) =>
     .filter(Boolean)
     .includes(START_WORD);
 
+/**
+ * What a stranger's first message appears to be about.
+ *
+ * Nobody opens a WhatsApp conversation by saying the trigger word. They write
+ * "I am a nanny looking for a job", or "I need a babysitter", or just "hi" —
+ * and every one of those used to be met with silence, because only the word
+ * "nanny" woke the bot. The message was logged and the person was never
+ * answered.
+ *
+ * So this reads the opening message for what the sender wants:
+ *
+ *   'nanny'  — she is offering to work. Send her straight to registration;
+ *              she has already answered the question the role picker asks.
+ *   'family' — they want childcare. The picker still runs, because the family
+ *              path starts by finding a nanny and the menu is where that is.
+ *   'greet'  — a bare hello. Nothing to go on, so ask who they are.
+ *   null     — no sign this is meant for us. Stay silent, as before.
+ *
+ * Indonesian is matched alongside English: the workforce this serves writes
+ * "saya mau kerja" far more often than "I am looking for a job".
+ *
+ * Deliberately keyword matching and not AI. This decides whether a person is
+ * answered at all, so it has to work when the model is off, out of quota or
+ * slow — and a wrong guess is recoverable, since every path it picks can be
+ * left with *0*.
+ */
+const WORK_INTENT = [
+  // English — offering to work.
+  /\bi\s*(?:'?m|\s+am)?\s+a\s+(?:nanny|babysitter|nurse|carer|caregiver)\b/,
+  /\b(?:looking|look|searching|search)\s+for\s+(?:a\s+)?(?:job|work|employment)\b/,
+  /\b(?:need|want|require)\s+(?:a\s+)?(?:job|work|employment)\b/,
+  /\b(?:any|got|have)\s+(?:a\s+)?(?:job|work|vacancy|vacancies|opening)s?\b/,
+  /\bapply\b.*\b(?:job|work|position|nanny)\b/,
+  /\b(?:i\s+)?(?:can|want\s+to|would\s+like\s+to|wish\s+to)\s+work\b/,
+  /\b(?:job|work)\s+(?:seeker|wanted|available)\b/,
+  /\bhire\s+me\b/,
+  // Indonesian — "I want to work", "looking for work", "is there a job".
+  /\b(?:saya|aku)\s+(?:mau|ingin|pengen|mencari|cari)\s+(?:kerja|kerjaan|pekerjaan|lowongan)\b/,
+  /\b(?:cari|mencari)\s+(?:kerja|kerjaan|pekerjaan|lowongan)\b/,
+  /\b(?:ada|adakah)\s+(?:lowongan|kerja|kerjaan|pekerjaan)\b/,
+  /\b(?:saya|aku)\s+(?:seorang\s+)?(?:pengasuh|baby\s*sitter|perawat)\b/,
+  /\bbutuh\s+(?:kerja|kerjaan|pekerjaan)\b/,
+  /\bmelamar\b/,
+];
+
+/**
+ * "work as a nanny", "job as a babysitter" — someone offering, not seeking.
+ *
+ * Checked before the care patterns, because "I want to work as a nanny" reads
+ * as wanting a nanny to every pattern that looks for want/need near the word.
+ */
+const OFFERING_AS = /\b(?:work|job|position|employment|apply|kerja)\b[^.]{0,20}\bas\s+(?:a|an)\b/;
+
+const CARE_INTENT = [
+  // English — wanting childcare. "for my ..." is what separates these from
+  // the work phrasings above: a parent describes a child, not themselves.
+  /\b(?:need|want|looking\s+for|look\s+for|find|require|searching\s+for)\b.*\b(?:nanny|babysitter|baby\s*sitter|childcare|child\s*care|carer|sitter|au\s*pair|maid|helper)\b/,
+  /\b(?:nanny|babysitter|baby\s*sitter|childcare|child\s*care|sitter)\b.*\bfor\s+my\b/,
+  /\b(?:someone|somebody|help)\b.*\bfor\s+my\s+(?:baby|son|daughter|child|children|kid|kids|twins|newborn)\b/,
+  /\b(?:book|booking|hire|hiring)\b.*\b(?:nanny|babysitter|baby\s*sitter|sitter)\b/,
+  /\bhow\s+much\b.*\b(?:nanny|babysitter|childcare|child\s*care)\b/,
+  // Indonesian — "I need a nanny/babysitter for my child".
+  /\b(?:butuh|cari|mencari|perlu|mau)\b.*\b(?:pengasuh|baby\s*sitter|pengasuh\s+anak|suster|nanny)\b/,
+  /\b(?:untuk|buat)\s+(?:anak|bayi|balita)\s*(?:saya|ku|kami)?\b/,
+];
+
+/** A bare greeting: worth answering, but says nothing about which side. */
+const GREETING = /^(?:hi|hii+|hey+|hello+|helo+|halo+|hai+|yo|good\s+(?:morning|afternoon|evening|day)|selamat\s+(?:pagi|siang|sore|malam)|assalamualaikum|salam|pagi)\b[\s!.,?]*$/;
+
+export function detectOpeningIntent(text) {
+  // Punctuation dropped but digits kept: "nanny 24h" and "2 kids" both carry
+  // meaning, and stripping them changed what the sentence said.
+  const t = lower(text).replace(/[^\p{L}\p{N}\s'’]/gu, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+
+  if (GREETING.test(t)) return 'greet';
+
+  // "work as a nanny" is unambiguous and has to beat the care patterns, which
+  // otherwise read the word "nanny" next to "want" and call it a parent.
+  if (OFFERING_AS.test(t)) return 'nanny';
+
+  // Care is tested next. "I am looking for a nanny for my son" matches a work
+  // pattern too ("looking for"), and the parent is the one who would be sent
+  // to the wrong place — she would be asked for her name to start a work
+  // application. Whoever wants childcare wins the remaining ties.
+  if (CARE_INTENT.some((re) => re.test(t))) return 'family';
+  if (WORK_INTENT.some((re) => re.test(t))) return 'nanny';
+
+  return null;
+}
+
 /** Detect a global command (SKIP / 0 / NEXT / BYE / CANCEL / BACK / NONE). */
 export function detectCommand(text) {
   const t = lower(text);
