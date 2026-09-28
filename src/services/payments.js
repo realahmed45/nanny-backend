@@ -270,8 +270,66 @@ export async function releaseDuePayouts(now = new Date()) {
   return queued;
 }
 
+/**
+ * Take back any advance this nanny still owes, out of a payout about to go.
+ *
+ * An advance is her own salary paid early, so it comes off the next wages
+ * run rather than being chased separately. Oldest first, so the debt clears
+ * in the order it was taken on.
+ *
+ * When an advance is larger than the payout it is recovered from, the payout
+ * goes to zero and the rest stays outstanding for the next one — nothing is
+ * clawed back from somebody who has already spent it.
+ *
+ * Returns what was recovered, so the caller can say so rather than leaving a
+ * nanny to work out why her payment is smaller than she expected.
+ */
+async function recoverAdvances(payout) {
+  // An advance never pays for itself.
+  if (payout.kind === 'advance') return { recovered: 0, from: [] };
+
+  const open = await Payout.find({
+    nanny: payout.nanny,
+    kind: 'advance',
+    'advance.outstanding': { $gt: 0 },
+  }).sort({ createdAt: 1 });
+
+  if (!open.length) return { recovered: 0, from: [] };
+
+  let available = round2(payout.amount || 0);
+  let recovered = 0;
+  const from = [];
+
+  for (const adv of open) {
+    if (available <= 0) break;
+
+    const owed = round2(adv.advance.outstanding);
+    const take = Math.min(owed, available);
+
+    adv.advance.outstanding = round2(owed - take);
+    if (adv.advance.outstanding <= 0) adv.advance.recoveredAt = new Date();
+    // eslint-disable-next-line no-await-in-loop
+    await adv.save();
+
+    available = round2(available - take);
+    recovered = round2(recovered + take);
+    from.push({ reference: adv.reference, amount: take });
+  }
+
+  if (recovered > 0) {
+    payout.amount = round2((payout.amount || 0) - recovered);
+    payout.advanceRecovered = recovered;
+  }
+
+  return { recovered, from };
+}
+
 /** An admin transferred a payout to the nanny and recorded the proof. */
 export async function markPayoutPaid(payout, { adminId = null, proof = {}, note = '' } = {}) {
+  // Before the amount is settled, not after: what she is sent is what is left
+  // once anything she was already paid early has come off.
+  const advance = await recoverAdvances(payout);
+
   payout.status = payout.isFinalForBooking ? PAYOUT_STATUS.FINAL_DONE : PAYOUT_STATUS.COMPLETED;
   payout.releasedAt = new Date();
   payout.releasedBy = adminId;
@@ -282,7 +340,7 @@ export async function markPayoutPaid(payout, { adminId = null, proof = {}, note 
     uploadedAt: proof.url ? new Date() : undefined,
   };
   await payout.save();
-  return { success: true, payout };
+  return { success: true, payout, advance };
 }
 
 /**

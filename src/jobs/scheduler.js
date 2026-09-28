@@ -8,6 +8,7 @@ import {
 import { syncBookingStatus, cancelBooking } from '../services/booking.js';
 import { computeCancellationRefund } from '../services/policy.js';
 import { refundBooking, releaseDuePayouts, queuePayout } from '../services/payments.js';
+import { redactExpiredAdvances } from '../services/finance.js';
 import { findReplacements } from '../services/matching.js';
 import { notifyUser } from '../services/notify.js';
 import { notifyFamilyOfDecline } from '../flows/nannyMenu.js';
@@ -330,6 +331,17 @@ export async function processReferralAbuse() {
   return results;
 }
 
+/**
+ * Wipe the reason, note and proof photo off advances from a month that has
+ * closed. Checked daily rather than only on the 1st, so a server that was
+ * down at midnight still catches up the next time it runs.
+ */
+export async function processAdvanceRedaction(now = new Date()) {
+  const redacted = await redactExpiredAdvances(now);
+  if (redacted) console.log('[finance] redacted', redacted, 'advance(s) from a closed month');
+  return redacted;
+}
+
 /* ------------------------------------------------------------------ *
  * Cron wiring
  * ------------------------------------------------------------------ */
@@ -469,11 +481,14 @@ export function startScheduler() {
   // here blocks anyone — it raises an alert and a person decides.
   tasks.push(cron.schedule('0 3,15 * * *', () => guard('referralAbuse', processReferralAbuse)));
 
+  // Daily at 02:00: clear the personal detail off advances from closed months.
+  tasks.push(cron.schedule('0 2 * * *', () => guard('advanceRedaction', processAdvanceRedaction)));
+
   // End of day: email the backup spreadsheet. Last job of the night so it
   // captures everything that happened today.
   tasks.push(cron.schedule(`0 ${config.backup.hour} * * *`, () => guard('backup', processDailyBackup)));
 
-  console.log('[scheduler] started (8 jobs)');
+  console.log('[scheduler] started (9 jobs)');
   return tasks;
 }
 
@@ -495,4 +510,5 @@ export default {
   startScheduler, stopScheduler, processResponseTimeouts,
   processServiceDayTransitions, processReplacementDeadlines,
   processReminders, processPayouts, processDailyBackup,
+  processAdvanceRedaction,
 };

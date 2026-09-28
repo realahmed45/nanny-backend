@@ -118,9 +118,12 @@ router.use(requireAuth);
  * of adding a role. The two broad roles are unaffected.
  */
 const SCOPED_ROLES = {
-  // Whoever keeps the books: the finance page, the cost ledger, and the
-  // session endpoints any signed-in person needs.
-  finance: [/^\/finance/, /^\/costs/, /^\/auth\//, /^\/settings$/],
+  // Whoever keeps the books: the finance page, the cost ledger, what is paid
+  // out to nannies, and the session endpoints any signed-in person needs.
+  // `/payouts` is theirs because paying a nanny her salary, an advance or a
+  // cost she covered is bookkeeping — the individual routes below still say
+  // which of them finance may write.
+  finance: [/^\/finance/, /^\/costs/, /^\/payouts/, /^\/auth\//, /^\/settings$/],
   // Support answers tickets and calls people back.
   support: [/^\/tickets/, /^\/callbacks/, /^\/conversations/, /^\/notes/, /^\/auth\//],
 };
@@ -2667,7 +2670,7 @@ router.post('/payments/:id/complete-refund', requireRole('admin', 'super_admin')
  * it against, so without them a payment to a person is indistinguishable from
  * a mistake or a favour.
  */
-router.post('/payouts/special', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+router.post('/payouts/special', requireRole('admin', 'super_admin', 'finance'), wrap(async (req, res) => {
   const nanny = await User.findById(req.body?.nannyId);
   if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
 
@@ -2715,6 +2718,119 @@ router.post('/payouts/special', requireRole('admin', 'super_admin'), wrap(async 
 }));
 
 /**
+ * Pay a nanny part of her salary before her salary date.
+ *
+ * Not a cost and not a bonus: it is her own wages, early, and it comes back
+ * off the salary it was drawn against. So it is recorded as outstanding and
+ * stays that way until a payout recovers it.
+ *
+ * Proof of the transfer is required. An advance is money that has left the
+ * business with no booking behind it, and "she says she got it" is not a
+ * record anybody can settle a disagreement with months later.
+ */
+router.post('/payouts/advance', requireRole('admin', 'super_admin', 'finance'), wrap(async (req, res) => {
+  const nanny = await User.findById(req.body?.nannyId);
+  if (!nanny) return res.status(404).json({ error: 'Nanny not found' });
+
+  const raw = req.body?.amount;
+  if (raw === '' || raw === null || raw === undefined) {
+    return res.status(400).json({ error: 'Please enter an amount' });
+  }
+  const amount = Number(raw);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return res.status(400).json({ error: 'Amount must be a positive number' });
+  }
+  if (amount > 1e9) {
+    return res.status(400).json({ error: 'That amount looks wrong — please check it' });
+  }
+
+  const reason = String(req.body?.reason || '').trim();
+  if (!reason) return res.status(400).json({ error: 'Please say why she is being paid early' });
+
+  const proofUrl = String(req.body?.proofUrl || '').trim();
+  if (!proofUrl) {
+    return res.status(400).json({ error: 'Please attach a photo showing the transfer' });
+  }
+
+  // Which month it comes off. Defaults to this one; an advance given late in
+  // a month is often meant to be recovered from the next.
+  const recoverFrom = String(req.body?.recoverFrom || '').trim()
+    || dayjs().format('YYYY-MM');
+  if (!/^\d{4}-\d{2}$/.test(recoverFrom)) {
+    return res.status(400).json({ error: 'The recovery month should look like 2026-09' });
+  }
+
+  const { nextSequence } = await import('../models/index.js');
+  const seq = await nextSequence('payout');
+  const rounded = Math.round(amount * 100) / 100;
+
+  const payout = await Payout.create({
+    reference: `ADV-${String(seq).padStart(6, '0')}`,
+    nanny: nanny._id,
+    kind: 'advance',
+    amount: rounded,
+    reason: reason.slice(0, 500),
+    // Already handed over, so it is settled on our side from the start.
+    status: PAYOUT_STATUS.COMPLETED,
+    scheduledFor: new Date(),
+    releasedAt: new Date(),
+    releasedBy: req.admin?._id,
+    proof: { url: proofUrl, uploadedAt: new Date() },
+    advance: { outstanding: rounded, recoverFrom },
+    notes: String(req.body?.note || '').trim().slice(0, 1000) || undefined,
+  });
+
+  await notifyUser(nanny, `Advance sent — ${money(rounded)}
+
+This comes off your ${recoverFrom} salary.
+Reference: ${payout.reference}`);
+
+  res.status(201).json({ ok: true, payout });
+}));
+
+/** What is due to go out over the next stretch of days. */
+router.get('/payouts/forecast', requireRole('admin', 'super_admin', 'finance'), wrap(async (req, res) => {
+  const { salaryForecast, outstandingAdvances } = await import('../services/finance.js');
+  const days = Math.min(Math.max(Number(req.query.days) || 10, 1), 60);
+  const [forecast, advances] = await Promise.all([
+    salaryForecast({ days }),
+    outstandingAdvances(),
+  ]);
+  res.json({ ...forecast, advances });
+}));
+
+/**
+ * Search nannies by name or phone, for the payment forms.
+ *
+ * A dropdown of every nanny stops being usable at about thirty; this is what
+ * the forms use instead, so somebody can type a name rather than hunt a list.
+ */
+router.get('/payouts/nanny-search', requireRole('admin', 'super_admin', 'finance'), wrap(async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  if (q.length < 2) return res.json({ nannies: [] });
+
+  const rx = new RegExp(escapeRe(q), 'i');
+  const nannies = await User.find({
+    role: USER_ROLE.NANNY,
+    $or: [{ fullName: rx }, { nickname: rx }, { phone: rx }],
+  })
+    .select('fullName nickname phone hourlyRate contract profilePhotoUrl')
+    .limit(20)
+    .lean();
+
+  res.json({
+    nannies: nannies.map((n) => ({
+      id: String(n._id),
+      name: n.fullName || n.nickname,
+      phone: n.phone,
+      photoUrl: n.profilePhotoUrl || null,
+      hourlyRate: n.hourlyRate || 0,
+      salaryPeriod: n.contract?.salaryPeriod || 'weekly',
+    })),
+  });
+}));
+
+/**
  * Upload a photo for a payout — a receipt, or proof of the transfer.
  *
  * Base64 in a JSON body, matching how everything else here uploads, so the
@@ -2722,7 +2838,7 @@ router.post('/payouts/special', requireRole('admin', 'super_admin'), wrap(async 
  * this is; they are kept apart because one shows the expense was real and the
  * other shows we settled it, and a dispute needs whichever it needs.
  */
-router.post('/payouts/proof-upload', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+router.post('/payouts/proof-upload', requireRole('admin', 'super_admin', 'finance'), wrap(async (req, res) => {
   const EXTS = ['.jpg', '.jpeg', '.png', '.webp', '.pdf'];
   const raw = String(req.body?.ext || '').toLowerCase();
   const ext = raw.startsWith('.') ? raw : `.${raw}`;
@@ -2752,14 +2868,27 @@ router.post('/payouts/proof-upload', requireRole('admin', 'super_admin'), wrap(a
   res.json({ ok: true, url });
 }));
 
-/** Mark a nanny payout as transferred, with proof. */
-router.post('/payouts/:id/mark-paid', requireRole('admin', 'super_admin'), wrap(async (req, res) => {
+/**
+ * Mark a nanny payout as transferred, with proof.
+ *
+ * The photo is required, as it is for an advance and a special payout. A salary
+ * is the payment this business makes most often, and it was the only one that
+ * could be recorded on an admin's word alone — the weakest evidence on the
+ * commonest transfer, which is the wrong way round when a nanny disputes months
+ * later whether she was paid.
+ */
+router.post('/payouts/:id/mark-paid', requireRole('admin', 'super_admin', 'finance'), wrap(async (req, res) => {
   const payout = await Payout.findById(req.params.id);
   if (!payout) return res.status(404).json({ error: 'Payout not found' });
 
+  const proofUrl = String(req.body?.proofUrl || '').trim();
+  if (!proofUrl) {
+    return res.status(400).json({ error: 'Please attach a photo showing the transfer' });
+  }
+
   await markPayoutPaid(payout, {
     adminId: req.admin?.id,
-    proof: { url: req.body?.proofUrl, mediaId: req.body?.proofMediaId },
+    proof: { url: proofUrl, mediaId: req.body?.proofMediaId },
     note: req.body?.note || '',
   });
 

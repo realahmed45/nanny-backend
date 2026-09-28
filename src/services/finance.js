@@ -95,7 +95,7 @@ export async function payoutSummary({ from, to } = {}) {
       { releasedAt: { $in: [null, undefined] }, createdAt: { $gte: start, $lte: end } },
     ],
   })
-    .populate('nanny', 'fullName nickname phone')
+    .populate('nanny', 'fullName nickname phone profilePhotoUrl')
     .sort({ createdAt: -1 })
     .lean();
 
@@ -121,6 +121,7 @@ export async function payoutSummary({ from, to } = {}) {
     const row = byNanny.get(id) || {
       nannyId: id,
       name: p.nanny?.fullName || p.nanny?.nickname || 'Unknown',
+      profilePhotoUrl: p.nanny?.profilePhotoUrl || null,
       paid: 0,
       pending: 0,
       count: 0,
@@ -138,6 +139,170 @@ export async function payoutSummary({ from, to } = {}) {
     byStatus,
     byNanny: [...byNanny.values()].sort((a, b) => (b.paid + b.pending) - (a.paid + a.pending)),
   };
+}
+
+
+/**
+ * What is due to go out over the next stretch of days.
+ *
+ * Payouts are scheduled the moment work completes, so the obligation exists
+ * well before the money moves. Knowing the total is not the same as knowing
+ * when: a month that balances overall can still have a Monday that does not,
+ * and the point of a forecast is to see that Monday coming.
+ *
+ * Advances are subtracted from the day they are meant to be recovered on,
+ * because a nanny who has already been paid early is not owed it twice.
+ */
+export async function salaryForecast({ days = 10, from = new Date() } = {}) {
+  const start = dayjs(from).startOf('day');
+  const end = start.add(days - 1, 'day').endOf('day');
+
+  const due = await Payout.find({
+    status: { $in: [PAYOUT_STATUS.PENDING, PAYOUT_STATUS.PROCESSING] },
+    scheduledFor: { $gte: start.toDate(), $lte: end.toDate() },
+  })
+    .populate('nanny', 'fullName nickname')
+    .sort({ scheduledFor: 1 })
+    .lean();
+
+  // One row per day, including the quiet ones — a gap in a forecast reads as
+  // missing data, where a zero reads as nothing due.
+  const byDay = new Map();
+  for (let i = 0; i < days; i += 1) {
+    const d = start.add(i, 'day');
+    byDay.set(d.format('YYYY-MM-DD'), {
+      date: d.format('YYYY-MM-DD'),
+      weekday: d.format('ddd'),
+      amount: 0,
+      advances: 0,
+      count: 0,
+      nannies: [],
+    });
+  }
+
+  let total = 0;
+  let advanceTotal = 0;
+
+  for (const p of due) {
+    const key = dayjs(p.scheduledFor).format('YYYY-MM-DD');
+    const row = byDay.get(key);
+    if (!row) continue;
+
+    const amount = round2(p.amount);
+    const name = p.nanny?.fullName || p.nanny?.nickname || 'Unknown';
+
+    if (p.kind === 'advance') {
+      // Already in her hands. It reduces what is still to be sent.
+      row.advances = round2(row.advances + amount);
+      advanceTotal += amount;
+    } else {
+      row.amount = round2(row.amount + amount);
+      total += amount;
+      row.count += 1;
+      if (!row.nannies.includes(name)) row.nannies.push(name);
+    }
+    byDay.set(key, row);
+  }
+
+  const rows = [...byDay.values()].map((r) => ({
+    ...r,
+    net: round2(r.amount - r.advances),
+  }));
+
+  return {
+    from: start.format('YYYY-MM-DD'),
+    to: end.format('YYYY-MM-DD'),
+    days,
+    rows,
+    total: round2(total),
+    advances: round2(advanceTotal),
+    net: round2(total - advanceTotal),
+    // The single heaviest day, which is the one worth having cash ready for.
+    peak: rows.reduce((max, r) => (r.net > (max?.net ?? -1) ? r : max), null),
+  };
+}
+
+/**
+ * Advances still to be recovered, per nanny.
+ *
+ * An advance is her own salary paid early, so it is tracked until it is taken
+ * back off a payout rather than simply recorded. What is outstanding is what
+ * the business is owed from wages not yet run.
+ */
+export async function outstandingAdvances() {
+  const open = await Payout.find({
+    kind: 'advance',
+    'advance.outstanding': { $gt: 0 },
+  })
+    .populate('nanny', 'fullName nickname profilePhotoUrl')
+    .sort({ createdAt: 1 })
+    .lean();
+
+  const byNanny = new Map();
+  let total = 0;
+
+  for (const a of open) {
+    const id = String(a.nanny?._id || a.nanny || 'unknown');
+    const amount = round2(a.advance?.outstanding || 0);
+    total += amount;
+
+    const row = byNanny.get(id) || {
+      nannyId: id,
+      name: a.nanny?.fullName || a.nanny?.nickname || 'Unknown',
+      profilePhotoUrl: a.nanny?.profilePhotoUrl || null,
+      outstanding: 0,
+      items: [],
+    };
+    row.outstanding = round2(row.outstanding + amount);
+    row.items.push({
+      id: String(a._id),
+      reference: a.reference,
+      amount: round2(a.amount),
+      outstanding: amount,
+      reason: a.reason,
+      recoverFrom: a.advance?.recoverFrom,
+      paidAt: a.createdAt,
+      proofUrl: a.proof?.url || null,
+      redactedAt: a.redactedAt || null,
+    });
+    byNanny.set(id, row);
+  }
+
+  return {
+    total: round2(total),
+    byNanny: [...byNanny.values()].sort((a, b) => b.outstanding - a.outstanding),
+  };
+}
+
+/**
+ * Clear the reason, note and proof photo off advances from months that have
+ * closed.
+ *
+ * Why she needed money early — a family emergency, a medical bill — is hers,
+ * not a record the business needs to keep once the salary it came off has
+ * been run. The advance itself (amount, date, who) stays: only the personal
+ * detail is wiped, once, the first time this runs after her month ends.
+ */
+export async function redactExpiredAdvances(now = new Date()) {
+  const monthStart = dayjs(now).startOf('month').toDate();
+
+  const due = await Payout.find({
+    kind: 'advance',
+    redactedAt: { $in: [null, undefined] },
+    createdAt: { $lt: monthStart },
+  });
+
+  let redacted = 0;
+  for (const payout of due) {
+    payout.reason = undefined;
+    payout.notes = undefined;
+    if (payout.proof) payout.proof.url = undefined;
+    payout.redactedAt = now;
+    // eslint-disable-next-line no-await-in-loop
+    await payout.save();
+    redacted += 1;
+  }
+  return redacted;
 }
 
 /**
@@ -253,4 +418,6 @@ export async function financeSummary({ from, to } = {}) {
   };
 }
 
-export default { financeSummary, costSummary, payoutSummary };
+export default {
+  financeSummary, costSummary, payoutSummary, salaryForecast, outstandingAdvances,
+};
