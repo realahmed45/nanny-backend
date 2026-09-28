@@ -505,11 +505,42 @@ router.get('/referrals', wrap(async (req, res) => {
     .sort({ createdAt: -1 })
     .limit(200);
 
-  const rows = await Promise.all(referred.map(async (u) => {
-    const bookings = await Booking.countDocuments({
-      [u.role === USER_ROLE.NANNY ? 'nanny' : 'family']: u._id,
-      status: { $ne: BOOKING_STATUS.DRAFT },
-    });
+  /**
+   * Who has booked, in two queries rather than one per person.
+   *
+   * This counted bookings inside the loop, so a page of 200 referrals issued 200
+   * separate counts. `Promise.all` made them concurrent, not fewer — it
+   * saturated the connection pool instead of taking longer. Grouping asks the
+   * database to do the counting, which is what it is for.
+   */
+  const nannyIds = referred.filter((u) => u.role === USER_ROLE.NANNY).map((u) => u._id);
+  const familyIds = referred.filter((u) => u.role !== USER_ROLE.NANNY).map((u) => u._id);
+
+  const countsBy = new Map();
+  const tally = (rowsIn, key) => {
+    for (const r of rowsIn) countsBy.set(`${key}:${String(r._id)}`, r.n);
+  };
+
+  const [nannyCounts, familyCounts] = await Promise.all([
+    nannyIds.length
+      ? Booking.aggregate([
+        { $match: { nanny: { $in: nannyIds }, status: { $ne: BOOKING_STATUS.DRAFT } } },
+        { $group: { _id: '$nanny', n: { $sum: 1 } } },
+      ])
+      : [],
+    familyIds.length
+      ? Booking.aggregate([
+        { $match: { family: { $in: familyIds }, status: { $ne: BOOKING_STATUS.DRAFT } } },
+        { $group: { _id: '$family', n: { $sum: 1 } } },
+      ])
+      : [],
+  ]);
+  tally(nannyCounts, 'nanny');
+  tally(familyCounts, 'family');
+
+  const rows = referred.map((u) => {
+    const seat = u.role === USER_ROLE.NANNY ? 'nanny' : 'family';
+    const bookings = countsBy.get(`${seat}:${String(u._id)}`) || 0;
     const verified = u.role === USER_ROLE.NANNY
       ? u.nannyStatus === NANNY_STATUS.VERIFIED
       : Boolean(u.emailVerified);
@@ -529,7 +560,7 @@ router.get('/referrals', wrap(async (req, res) => {
       firstBooking: bookings > 0,
       status: bookings > 0 ? 'successful' : verified ? 'pending' : 'invited',
     };
-  }));
+  });
 
   const successful = rows.filter((r) => r.status === 'successful').length;
   const pending = rows.filter((r) => r.status === 'pending').length;
@@ -2860,7 +2891,9 @@ router.post('/payouts/proof-upload', requireRole('admin', 'super_admin', 'financ
   const { storeBuffer } = await import('../services/mediaArchive.js');
   let url;
   try {
-    url = await storeBuffer(buf, { ext });
+    // A transfer receipt is evidence for the office, never sent to anybody, so
+    // it is stored where a login is needed to see it.
+    url = await storeBuffer(buf, { ext, private: true });
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }
@@ -3134,7 +3167,20 @@ router.get('/conversations', wrap(async (req, res) => {
     { $limit: limit },
   ]);
 
-  const totalRows = await MessageLog.distinct('phone', match);
+  /**
+   * How many conversations there are, counted by the database.
+   *
+   * This used `distinct('phone')`, which returns every unique number as one
+   * array purely so its length could be read. `MessageLog` is the largest
+   * collection here — every WhatsApp message in and out, forever — so that grew
+   * without limit and would eventually exceed the 16MB cap on a single result,
+   * breaking the page outright rather than merely slowing it.
+   */
+  const [{ n: totalConversations = 0 } = {}] = await MessageLog.aggregate([
+    { $match: match },
+    { $group: { _id: '$phone' } },
+    { $count: 'n' },
+  ]);
 
   // Attach the person behind each number where we know them.
   const users = await User.find({ phone: { $in: grouped.map((g) => g._id) } })
@@ -3154,10 +3200,10 @@ router.get('/conversations', wrap(async (req, res) => {
       messageCount: g.total,
       inboundCount: g.inbound,
     })),
-    total: totalRows.length,
+    total: totalConversations,
     page,
     limit,
-    pages: Math.ceil(totalRows.length / limit),
+    pages: Math.ceil(totalConversations / limit),
   });
 }));
 
@@ -3903,7 +3949,8 @@ router.post('/contracts/:id/document', requireRole('admin', 'super_admin'), wrap
   const { storeBuffer } = await import('../services/mediaArchive.js');
   let url;
   try {
-    url = await storeBuffer(buf, { ext });
+    // A signed salary contract carries her name, her pay and her signature.
+    url = await storeBuffer(buf, { ext, private: true });
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }
