@@ -247,9 +247,38 @@ export async function sendDailyBackup({ to = config.backup.email } = {}) {
   const stamp = new Date().toISOString().slice(0, 10);
   const filename = `nanny-in-paradise-backup-${stamp}.xlsx`;
 
-  const counts = book.worksheets
-    .map((s) => `${s.name}: ${Math.max(0, s.rowCount - 1)}`)
-    .join(' · ');
+  const rowsPerSheet = book.worksheets.map((s) => ({
+    name: s.name,
+    rows: Math.max(0, s.rowCount - 1),
+  }));
+
+  const counts = rowsPerSheet.map((s) => `${s.name}: ${s.rows}`).join(' · ');
+
+  /**
+   * Check the file before calling it a backup.
+   *
+   * The counts above were computed and then never compared against anything, so
+   * a night where a query came back empty — a bad reconnect, a dropped
+   * collection — produced a valid, empty workbook, emailed it, and logged
+   * "Families: 0 · Nannies: 0" as a success. The failure alert only fires on a
+   * thrown error, so it never fired for the one failure mode that matters: the
+   * backup that looks fine and contains nothing.
+   *
+   * A business with bookings on the books cannot have an empty sheet for all of
+   * them, so that is the floor. Throwing here is deliberate — the caller turns a
+   * throw into an email and a loud log, which is exactly the handling this
+   * needs.
+   */
+  const totalRows = rowsPerSheet.reduce((sum, s) => sum + s.rows, 0);
+  if (!buffer.length) {
+    throw new Error('backup produced an empty file');
+  }
+  if (buffer.length < 2000) {
+    throw new Error(`backup file is only ${buffer.length} bytes — too small to be real`);
+  }
+  if (totalRows === 0) {
+    throw new Error(`backup contains no rows at all (${counts}) — refusing to call this a backup`);
+  }
 
   await send({
     to,
@@ -262,7 +291,9 @@ export async function sendDailyBackup({ to = config.backup.email } = {}) {
     attachments: [{ filename, content: buffer }],
   });
 
-  return { to, filename, bytes: buffer.length, counts };
+  return {
+    to, filename, bytes: buffer.length, counts, rows: totalRows, sheets: rowsPerSheet,
+  };
 }
 
 /**

@@ -33,6 +33,8 @@ export async function processResponseTimeouts(now = new Date()) {
 
   const handled = [];
   for (const booking of bookings) {
+    // Per booking, so one that throws does not strand the rest of the batch.
+    try {
     const pending = booking.nannyResponses.find((r) => r.outcome === 'pending');
     if (!pending || new Date(pending.expiresAt) > now) continue;
 
@@ -87,6 +89,9 @@ Responding quickly helps you get more bookings.`);
 
     await notifyFamilyOfDecline(booking, isChange);
     handled.push(booking.bookingNumber);
+    } catch (err) {
+      console.error(`[scheduler:responseTimeouts] booking #${booking.bookingNumber}: ${err.message}`);
+    }
   }
   return handled;
 }
@@ -117,6 +122,16 @@ export async function processServiceDayTransitions(now = new Date()) {
 
   const changed = [];
   for (const booking of bookings) {
+    /**
+     * One booking failing must not abandon the rest of the batch.
+     *
+     * The loop had no per-item handling, so a single throw — a WhatsApp send
+     * rejecting, a family record that would not load — stopped the sweep dead
+     * and every booking after it waited for the next tick. Since the order is
+     * not deterministic, a booking that reliably threw could block a different
+     * tail every pass.
+     */
+    try {
     let dirty = false;
 
     for (const day of booking.serviceDays) {
@@ -169,6 +184,9 @@ Please ask the family for the END-OF-SERVICE code and confirm it from *My Bookin
       await booking.save();
       changed.push(booking.bookingNumber);
     }
+    } catch (err) {
+      console.error(`[scheduler:serviceDays] booking #${booking.bookingNumber}: ${err.message}`);
+    }
   }
   return changed;
 }
@@ -188,6 +206,15 @@ export async function processReplacementDeadlines(now = new Date()) {
 
   const results = [];
   for (const booking of bookings) {
+    /**
+     * Per booking. This one cancels, refunds, then queues the nanny's
+     * compensation, and a throw between those steps left a booking cancelled
+     * and refunded with her compensation never queued — and the next pass would
+     * not find it again, because an already-cancelled booking returns early.
+     * It cannot be undone here, but it can at least be named in the log rather
+     * than taking the rest of the batch with it.
+     */
+    try {
     const next = booking.remainingDays()[0];
     if (!next) continue;
 
@@ -239,6 +266,9 @@ Go to *My Bookings > Upcoming* to choose a replacement.`);
       booking.pendingChange = { ...(booking.pendingChange || {}), reminderSent: true };
       await booking.save();
       results.push({ booking: booking.bookingNumber, action: 'reminded' });
+    }
+    } catch (err) {
+      console.error(`[scheduler:replacements] booking #${booking.bookingNumber}: ${err.message}`);
     }
   }
   return results;
@@ -497,12 +527,34 @@ export function stopScheduler() {
   tasks = [];
 }
 
-/** Never let a job crash the process. */
+/**
+ * One run of a job at a time, and never let one crash the process.
+ *
+ * Three of these jobs fire every minute, and cron fires on the minute whether
+ * or not the last run finished. The service-day sweep loads every live booking
+ * and sends two WhatsApp messages per transition, serially — at a few hundred
+ * bookings with a slow provider, one pass comfortably exceeds sixty seconds.
+ *
+ * When it did, the next pass read the same bookings before the first had saved,
+ * flipped the same days, sent the same "your service starts now" message with
+ * the same code a second time, and then the slower run's save overwrote
+ * whatever the faster one had written. A flag is enough here because the app
+ * runs as a single instance; more than one would need a lock in the database.
+ */
+const running = new Set();
+
 async function guard(name, fn) {
+  if (running.has(name)) {
+    console.warn(`[scheduler:${name}] previous run still going — skipping this tick`);
+    return;
+  }
+  running.add(name);
   try {
     await fn(new Date());
   } catch (err) {
     console.error(`[scheduler:${name}] ${err.message}`);
+  } finally {
+    running.delete(name);
   }
 }
 

@@ -6,15 +6,47 @@ import { User, Session } from '../models/index.js';
  * so delivery failures never crash a flow or a scheduled job.
  */
 
+/**
+ * Try again before giving up on a message.
+ *
+ * A failed send was invisible: it was recorded in the message log with its
+ * error, and nothing read that back — no retry, no alert. The messages this
+ * carries are the ones that cannot be missed. If the arrival code fails to
+ * reach a family, the nanny is standing at the door and the code will never be
+ * sent again, because the sweep that sent it has already moved that day on.
+ *
+ * Most provider failures are a moment long — a rate limit, a dropped
+ * connection. Three tries a few seconds apart clears those. A number that is
+ * genuinely unreachable fails all three quickly, so nothing waits long.
+ */
+const SEND_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 1500;
+
 export async function notifyPhone(phone, body, meta = {}) {
   if (!phone) return { skipped: true };
-  try {
-    await sendText(phone, body, meta);
-    return { sent: true };
-  } catch (err) {
-    console.error(`[notify] failed to message ${phone}: ${err.message}`);
-    return { sent: false, error: err.message };
+
+  let lastError;
+  for (let attempt = 1; attempt <= SEND_ATTEMPTS; attempt += 1) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await sendText(phone, body, meta);
+      if (attempt > 1) console.warn(`[notify] message to ${phone} succeeded on attempt ${attempt}`);
+      return { sent: true, attempts: attempt };
+    } catch (err) {
+      lastError = err;
+      if (attempt < SEND_ATTEMPTS) {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * attempt));
+      }
+    }
   }
+
+  // Loud, and named as undelivered rather than merely "failed", because the
+  // recipient does not know a message was meant for them.
+  console.error(
+    `[notify] UNDELIVERED to ${phone} after ${SEND_ATTEMPTS} attempts: ${lastError?.message}`,
+  );
+  return { sent: false, error: lastError?.message, attempts: SEND_ATTEMPTS };
 }
 
 export async function notifyUser(userOrId, body, meta = {}) {
