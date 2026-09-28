@@ -767,7 +767,12 @@ router.post('/media', wrap(async (req, res) => {
   const { storeBuffer } = await import('../services/mediaArchive.js');
   let url;
   try {
-    url = await storeBuffer(buf, { ext });
+    /**
+     * Identity documents are stored behind the dashboard login; photos and
+     * videos are not, because WhatsApp fetches those from this server in order
+     * to deliver them and a family would otherwise never see her picture.
+     */
+    url = await storeBuffer(buf, { ext, private: spec.field === 'documents' });
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }

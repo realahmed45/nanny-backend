@@ -29,6 +29,26 @@ import objectStore from './objectStore.js';
 const ROOT = config.media.dir;
 const PUBLIC_PREFIX = '/media';
 
+/**
+ * Files nobody outside the office may see.
+ *
+ * Everything used to land in one flat, publicly served folder: a nanny's
+ * national ID next to her profile photo, a family's bank transfer receipt next
+ * to a picture of a child. Anyone holding a link had it permanently, because
+ * the files are served `immutable` for a year with no way to withdraw one, and
+ * the names are a hash of the file's own contents rather than a secret.
+ *
+ * Profile photos and work videos genuinely have to stay public: WhatsApp
+ * fetches them from this server in order to deliver them, so locking them away
+ * would stop a family ever seeing a nanny's picture. Identity documents,
+ * certificates, signed contracts and payment proofs are never sent to anybody —
+ * they exist to be checked by an admin — so they go here instead, behind the
+ * same login as the rest of the dashboard.
+ */
+const PRIVATE_PREFIX = '/media-private';
+const PRIVATE_DIRNAME = 'private';
+const PRIVATE_ROOT = path.join(ROOT, PRIVATE_DIRNAME);
+
 /** Extensions we are willing to write, by what the provider called the file. */
 const EXT_BY_TYPE = {
   video: '.mp4',
@@ -66,12 +86,39 @@ async function exists(p) {
  * today is better than no link at all. The failure is logged so the gap is
  * visible.
  */
-export async function store(remoteUrl, { mediaType } = {}) {
+export async function store(remoteUrl, { mediaType, private: isPrivate = false } = {}) {
   if (!remoteUrl || !/^https?:\/\//i.test(remoteUrl)) return remoteUrl;
   if (!config.media.enabled) return remoteUrl;
 
   try {
     const name = safeName(remoteUrl, mediaType);
+
+    /**
+     * An identity document arriving over WhatsApp goes behind the login, the
+     * same as one uploaded from the phone app. It is never sent back out, so
+     * nothing downstream needs it to be publicly reachable.
+     */
+    if (isPrivate) {
+      const privDest = path.join(PRIVATE_ROOT, name);
+      const privUrl = `${PRIVATE_PREFIX}/${name}`;
+      if (await exists(privDest)) return privUrl;
+
+      await fs.mkdir(PRIVATE_ROOT, { recursive: true });
+      const res = await fetch(remoteUrl, { signal: AbortSignal.timeout(60_000) });
+      if (!res.ok) throw new Error(`provider returned ${res.status}`);
+
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (!buf.length) throw new Error('empty file');
+      if (buf.length > config.media.maxBytes) {
+        throw new Error(`file is ${Math.round(buf.length / 1e6)}MB, over the limit`);
+      }
+
+      const privTmp = `${privDest}.part`;
+      await fs.writeFile(privTmp, buf);
+      await fs.rename(privTmp, privDest);
+      return privUrl;
+    }
+
     const dest = path.join(ROOT, name);
     // Stored relative, not as a full URL.
     //
@@ -129,7 +176,7 @@ export async function store(remoteUrl, { mediaType } = {}) {
  * did nothing would leave her looking at a success screen and a profile that
  * never changed.
  */
-export async function storeBuffer(buf, { ext = '.jpg' } = {}) {
+export async function storeBuffer(buf, { ext = '.jpg', private: isPrivate = false } = {}) {
   if (!config.media.enabled) throw new Error('media archive is disabled');
   if (!buf?.length) throw new Error('empty file');
   if (buf.length > config.media.maxBytes) {
@@ -139,6 +186,23 @@ export async function storeBuffer(buf, { ext = '.jpg' } = {}) {
   // Named by content, so the same picture sent twice is stored once.
   const hash = crypto.createHash('sha1').update(buf).digest('hex').slice(0, 20);
   const name = `${hash}${ext}`;
+
+  /**
+   * A private file is never handed to the WhatsApp provider, so it does not
+   * need to be reachable without a login, and it stays on our own disk rather
+   * than going to the public bucket.
+   */
+  if (isPrivate) {
+    const privDest = path.join(PRIVATE_ROOT, name);
+    const privUrl = `${PRIVATE_PREFIX}/${name}`;
+    if (await exists(privDest)) return privUrl;
+
+    await fs.mkdir(PRIVATE_ROOT, { recursive: true });
+    const privTmp = `${privDest}.part`;
+    await fs.writeFile(privTmp, buf);
+    await fs.rename(privTmp, privDest);
+    return privUrl;
+  }
 
   /**
    * Object storage first, when it is configured.
@@ -230,11 +294,39 @@ export function mountMediaRoutes(app, express) {
     return;
   }
 
-  app.use(PUBLIC_PREFIX, express.static(ROOT, {
+  /**
+   * The private folder sits inside the public root, so it shares one disk and
+   * one backup. It must not be reachable through the public mount above it, and
+   * the refusal has to happen before the static handler starts a response —
+   * `setHeaders` runs too late to change the status.
+   */
+  app.use(PUBLIC_PREFIX, (req, res, next) => {
+    const first = req.path.split('/').filter(Boolean)[0];
+    if (first === PRIVATE_DIRNAME) return res.status(404).end();
+    return next();
+  }, express.static(ROOT, {
     maxAge: '365d',
     immutable: true,
     index: false,
     dotfiles: 'deny',
+  }));
+
+  /**
+   * Identity documents, certificates, contracts and payment proofs.
+   *
+   * Behind the same login as the dashboard, and deliberately not cached: an
+   * admin who signs out should not leave a national ID sitting in a shared
+   * browser's cache. `requireAuth` is imported here rather than at the top of
+   * the file because this module is also loaded by scripts that have no
+   * business pulling in the auth middleware.
+   */
+  app.use(PRIVATE_PREFIX, async (req, res, next) => {
+    const { requireAuth } = await import('../middleware/auth.js');
+    return requireAuth(req, res, next);
+  }, express.static(PRIVATE_ROOT, {
+    index: false,
+    dotfiles: 'deny',
+    setHeaders: (res) => res.setHeader('Cache-Control', 'private, no-store'),
   }));
 }
 

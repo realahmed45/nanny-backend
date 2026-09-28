@@ -214,8 +214,10 @@ function docStep(state, type, nextPrompt, nextState) {
       return `📎 Please attach the document as an image or file.\n\nIf you do not have it right now, reply *skip* and we will ask for it later.`;
     }
     // Archived like everything else: an ID or certificate is the evidence a
-    // nanny was verified, and losing it means the check never happened.
-    const url = await store(ctx.mediaUrl, { mediaType: ctx.mediaType });
+    // nanny was verified, and losing it means the check never happened. Stored
+    // behind the dashboard login rather than on the public path — a national ID
+    // is for the office to check, not for anyone holding a link.
+    const url = await store(ctx.mediaUrl, { mediaType: ctx.mediaType, private: true });
     const docs = [...(ctx.get('documents') || []), { type, url, mediaId: ctx.mediaId }];
     ctx.set('documents', docs);
     return { text: nextPrompt, state: nextState };
