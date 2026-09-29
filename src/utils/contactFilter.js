@@ -29,25 +29,57 @@ const DIGIT_WORDS = {
  */
 const MIN_SPELLED_RUN = 4;
 
+/**
+ * How many digit words a message must hold in total before folding.
+ *
+ * A run alone is not enough. "zero eight one two, then three four five six
+ * seven eight" is a whole phone number with one ordinary word dropped into the
+ * middle, which resets the run to zero and splits eight digits into a four and a
+ * six — under the run threshold twice over, and it passed through untouched.
+ * Counting the total as well catches the split, while a sentence that merely
+ * mentions a few numbers stays well under it.
+ */
+const MIN_SPELLED_TOTAL = 7;
+
 function foldSpelledDigits(text) {
   const words = text.split(/(\s+)/);
   let run = 0;
   let longestRun = 0;
+  let total = 0;
   const out = words.map((w) => {
     const key = w.toLowerCase().replace(/[^a-z]/g, '');
     if (DIGIT_WORDS[key] !== undefined) {
       run += 1;
+      total += 1;
       if (run > longestRun) longestRun = run;
       return DIGIT_WORDS[key];
     }
     if (w.trim()) run = 0;
     return w;
   });
-  return longestRun >= MIN_SPELLED_RUN ? out.join('') : text;
+
+  const looksLikeANumber = longestRun >= MIN_SPELLED_RUN || total >= MIN_SPELLED_TOTAL;
+  return looksLikeANumber ? out.join('') : text;
 }
 
-/** Digits once separators people use to dodge filters are removed. */
-const digitsOnly = (s) => s.replace(/[\s.\-()+_/\\]/g, '');
+/**
+ * Digits, once the separators people use to dodge the filter are removed.
+ *
+ * Punctuation alone was not enough: somebody spelling a number out and dropping
+ * one ordinary word into the middle — "zero eight one two, then three four five
+ * six seven eight" — folded to "0812then345678", which holds no run of eight
+ * consecutive digits, so the number went through in full.
+ *
+ * Removing *everything* non-digit is too blunt in the other direction. "I will
+ * arrive at 08:30 and leave at 17:00" collapses to "08301700", eight digits, and
+ * a perfectly ordinary message about working hours is destroyed. Times, prices
+ * and house numbers are the common case in this chat and must survive.
+ *
+ * So short joining words go and everything else stays. A number broken up with
+ * "then" or "dan" closes back up; two separate times do not.
+ */
+const JOINERS = /\b(?:then|and|dan|lalu|kemudian|terus|next|after|plus|dash|strip)\b/gi;
+const digitsOnly = (s) => s.replace(JOINERS, '').replace(/[\s.\-()+_/\\]/g, '');
 
 /**
  * `flat` is the message with separators stripped, and only the digit check may

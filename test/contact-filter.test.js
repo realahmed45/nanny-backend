@@ -50,6 +50,31 @@ test('phone numbers still go, however they are written', () => {
   }
 });
 
+test('a spelled-out number broken up by a word is still caught', () => {
+  // One ordinary word in the middle resets the run, splitting eight digits into
+  // a four and a six — under the run threshold twice over. It went through in
+  // full until the total was counted as well and joining words were removed
+  // before the digit check.
+  for (const said of [
+    'zero eight one two, then three four five six seven eight',
+    'eight one two three and four five six seven',
+    'nol delapan satu dua dan tiga empat lima enam',
+  ]) {
+    const { redacted } = redactContactDetails(said);
+    assert.ok(redacted, said);
+  }
+});
+
+test('two separate times are not a phone number', () => {
+  // The obvious over-correction: removing everything between digits collapses
+  // "08:30 ... 17:00" into eight digits and destroys an ordinary message about
+  // working hours.
+  const said = 'I will arrive at 08:30 and leave at 17:00';
+  const { text, redacted } = redactContactDetails(said);
+  assert.equal(redacted, false, said);
+  assert.equal(text, said);
+});
+
 test('a spelled-out number leaves the words around it intact', () => {
   const { text } = redactContactDetails('call me on zero eight one two three four five six seven eight');
   assert.match(text, /^call me on/, 'the sentence keeps its opening');
