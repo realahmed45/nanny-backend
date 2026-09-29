@@ -158,12 +158,26 @@ test('a cost on the first or last day of the period is counted', async () => {
   const { Cost } = await import('../src/models/index.js');
   const { costSummary } = await import('../src/services/finance.js');
 
-  // Boundaries are where date ranges usually go wrong, so both are asserted.
+  /**
+   * Boundaries are where date ranges usually go wrong, so both are asserted.
+   *
+   * The instants are pinned to business time rather than written bare. A bare
+   * `new Date('2026-09-01T00:00:00')` is read in whatever zone the machine
+   * happens to run in, so this test passed on a developer's laptop and said
+   * nothing about the UTC server the business actually reports from.
+   */
+  const { default: config } = await import('../src/config/index.js');
+  const dayjs = (await import('dayjs')).default;
+  dayjs.extend((await import('dayjs/plugin/utc.js')).default);
+  dayjs.extend((await import('dayjs/plugin/timezone.js')).default);
+
   await Cost.create({
-    spentOn: new Date('2026-09-01T00:00:00'), category: 'fees', description: 'First day', amount: 10,
+    spentOn: dayjs.tz('2026-09-01 00:00', config.timezone).toDate(),
+    category: 'fees', description: 'First day', amount: 10,
   });
   await Cost.create({
-    spentOn: new Date('2026-09-30T23:30:00'), category: 'fees', description: 'Last day', amount: 20,
+    spentOn: dayjs.tz('2026-09-30 23:30', config.timezone).toDate(),
+    category: 'fees', description: 'Last day', amount: 20,
   });
 
   const c = await costSummary({ from: '2026-09-01', to: '2026-09-30' });

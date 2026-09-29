@@ -1,11 +1,16 @@
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek.js';
+import utc from 'dayjs/plugin/utc.js';
+import timezone from 'dayjs/plugin/timezone.js';
+import config from '../config/index.js';
 import { Booking, User } from '../models/index.js';
 import { BOOKING_STATUS, SERVICE_DAY_STATUS } from '../utils/constants.js';
 import { dayEarnings, dayCommission, rateForDay } from './payments.js';
 import { round2 } from './policy.js';
 
 dayjs.extend(isoWeek);
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 /**
  * What the business actually made, and what it owes.
@@ -83,8 +88,18 @@ export function bookingEarnings(booking) {
  * created, because that is when the money was actually earned.
  */
 export async function earningsSummary({ from, to } = {}) {
-  const start = from ? dayjs(from).startOf('day') : dayjs().startOf('month');
-  const end = to ? dayjs(to).endOf('day') : dayjs().endOf('day');
+  /**
+   * The window, in the timezone the business runs in.
+   *
+   * A bare `dayjs()` reads the server's zone. The server runs UTC and the
+   * business runs UTC+8, so "this month" began eight hours late and a day
+   * completed between midnight and 8am Bali time on the 1st was counted as
+   * revenue for the month before. This figure feeds revenue and profit, so the
+   * error lands where it is least welcome: at a month end being closed off.
+   */
+  const tz = config.timezone;
+  const start = from ? dayjs.tz(from, tz).startOf('day') : dayjs().tz(tz).startOf('month');
+  const end = to ? dayjs.tz(to, tz).endOf('day') : dayjs().tz(tz).endOf('day');
 
   const bookings = await Booking.find({
     status: { $in: [BOOKING_STATUS.ONGOING, BOOKING_STATUS.COMPLETED] },

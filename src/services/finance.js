@@ -1,7 +1,41 @@
 import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc.js';
+import timezone from 'dayjs/plugin/timezone.js';
 import { Cost, Payout } from '../models/index.js';
 import { PAYOUT_STATUS } from '../utils/constants.js';
 import { earningsSummary } from './earnings.js';
+import config from '../config/index.js';
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
+
+/**
+ * The reporting window, in the timezone the business actually runs in.
+ *
+ * These used a bare `dayjs()`, which reads the server's zone. The server runs
+ * UTC and the business runs UTC+8, so "this month" began eight hours late:
+ * anything completed between midnight and 8am Bali time on the 1st was counted
+ * in the previous month. Same at the end of a chosen range, and the same for a
+ * day picked in the dashboard — "1 October" meant 08:00 on the 1st.
+ *
+ * Small most days and wrong exactly when it matters: at a month end, when the
+ * figures are being closed off and compared against the bank.
+ */
+const TZ = () => config.timezone;
+
+/** Start of the given day (or of the current month) in business time. */
+function windowStart(from) {
+  return from
+    ? dayjs.tz(from, TZ()).startOf('day').toDate()
+    : dayjs().tz(TZ()).startOf('month').toDate();
+}
+
+/** End of the given day (or of today) in business time. */
+function windowEnd(to) {
+  return to
+    ? dayjs.tz(to, TZ()).endOf('day').toDate()
+    : dayjs().tz(TZ()).endOf('day').toDate();
+}
 
 /**
  * What the business actually made, once everything is set against it.
@@ -39,8 +73,8 @@ const SETTLED = new Set([PAYOUT_STATUS.COMPLETED, PAYOUT_STATUS.FINAL_DONE]);
  * than to the arithmetic.
  */
 export async function costSummary({ from, to } = {}) {
-  const start = from ? dayjs(from).startOf('day').toDate() : dayjs().startOf('month').toDate();
-  const end = to ? dayjs(to).endOf('day').toDate() : dayjs().endOf('day').toDate();
+  const start = windowStart(from);
+  const end = windowEnd(to);
 
   const all = await Cost.find({ spentOn: { $gte: start, $lte: end } })
     .populate('createdBy', 'name email')
@@ -75,8 +109,8 @@ export async function costSummary({ from, to } = {}) {
  * figure ends up describing an obligation.
  */
 export async function payoutSummary({ from, to } = {}) {
-  const start = from ? dayjs(from).startOf('day').toDate() : dayjs().startOf('month').toDate();
-  const end = to ? dayjs(to).endOf('day').toDate() : dayjs().endOf('day').toDate();
+  const start = windowStart(from);
+  const end = windowEnd(to);
 
   /**
    * Dated by when the money moved, not when the row was made.
@@ -154,7 +188,9 @@ export async function payoutSummary({ from, to } = {}) {
  * because a nanny who has already been paid early is not owed it twice.
  */
 export async function salaryForecast({ days = 10, from = new Date() } = {}) {
-  const start = dayjs(from).startOf('day');
+  // Business time, so "the next 10 days" starts at midnight in Bali rather
+  // than at 8am, which would drop the first morning's payouts.
+  const start = dayjs(from).tz(TZ()).startOf('day');
   const end = start.add(days - 1, 'day').endOf('day');
 
   const due = await Payout.find({
@@ -377,8 +413,9 @@ export async function financeSummary({ from, to } = {}) {
 
   return {
     period: {
-      from: from || dayjs().startOf('month').format('YYYY-MM-DD'),
-      to: to || dayjs().format('YYYY-MM-DD'),
+      // The label must name the window that was actually queried.
+      from: from || dayjs().tz(TZ()).startOf('month').format('YYYY-MM-DD'),
+      to: to || dayjs().tz(TZ()).format('YYYY-MM-DD'),
     },
 
     totals: {
