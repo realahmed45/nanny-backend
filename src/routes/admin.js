@@ -3826,6 +3826,19 @@ router.get('/finance', requireRole('admin', 'super_admin', 'finance'), wrap(asyn
   res.json(await financeSummary({ from: req.query.from, to: req.query.to }));
 }));
 
+/**
+ * Are the money safeguards actually holding?
+ *
+ * Each of these was fixed in code and provable only by reading it, which is no
+ * use to whoever runs the business: a fix you cannot see is indistinguishable
+ * from one that quietly stopped working. Read live on every request, so a
+ * check that passes today and fails next month says so by itself.
+ */
+router.get('/finance/health', requireRole('admin', 'super_admin', 'finance'), wrap(async (req, res) => {
+  const { systemHealth } = await import('../services/health.js');
+  res.json(await systemHealth());
+}));
+
 /** The cost ledger for a period, newest first, voided rows included. */
 router.get('/costs', requireRole('admin', 'super_admin', 'finance'), wrap(async (req, res) => {
   const { costSummary } = await import('../services/finance.js');
