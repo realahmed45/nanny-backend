@@ -2745,6 +2745,41 @@ router.post('/payouts/special', requireRole('admin', 'super_admin', 'finance'), 
     notes: String(req.body?.note || '').trim().slice(0, 1000) || undefined,
   });
 
+  /**
+   * Record it as a cost, so it actually reduces reported profit.
+   *
+   * Net profit is commission minus the cost ledger. A special payout appeared
+   * in neither: the money left the business and the profit figure did not
+   * move, so profit was overstated by the total of every special payout ever
+   * made, and the more the feature was used the wider the gap.
+   *
+   * Written here rather than left to somebody to enter by hand, because a
+   * figure that depends on an admin remembering a second step is a figure that
+   * drifts. The `payout` link is unique, so this row can never be duplicated
+   * for the same payout.
+   *
+   * A failure here must not fail the payout — she has been promised the money.
+   * It is logged loudly instead, and the row can be added by hand.
+   */
+  try {
+    const { Cost, COST_CATEGORY } = await import('../models/index.js');
+    await Cost.create({
+      spentOn: new Date(),
+      category: COST_CATEGORY.OTHER,
+      description: `Special payout ${payout.reference} — ${reason.slice(0, 200)}`,
+      amount: payout.amount,
+      paidTo: nanny.fullName,
+      receiptUrl: costProofUrl,
+      payout: payout._id,
+      createdBy: req.admin?._id,
+    });
+  } catch (err) {
+    console.error(
+      `[finance] special payout ${payout.reference} was not recorded as a cost: ${err.message}`,
+    );
+    console.error('[finance] reported profit will be overstated until it is entered by hand');
+  }
+
   res.status(201).json({ ok: true, payout });
 }));
 
@@ -3308,6 +3343,7 @@ const RUNTIME_SETTINGS = new Set([
   'emailVerification',
   'autoVerifyNannies',
   'replySheet',
+  'backupRecipients',
 ]);
 
 /**
@@ -3319,6 +3355,39 @@ const RUNTIME_SETTINGS = new Set([
  */
 function validateSetting(key, value) {
   if (key === 'voiceTranscription') return !!value;
+
+  /**
+   * Who the nightly backup is emailed to.
+   *
+   * An empty list is allowed and means "fall back to the configured address",
+   * so removing everybody cannot silently stop the backups. Addresses are
+   * lowercased and deduplicated here rather than at send time, so what the
+   * dashboard shows back is exactly what will be used.
+   */
+  if (key === 'backupRecipients') {
+    if (!Array.isArray(value)) throw new Error('Backup recipients must be a list');
+    if (value.length > 20) throw new Error('That is more than 20 backup recipients');
+
+    const seen = new Set();
+    const cleaned = [];
+
+    for (const entry of value) {
+      const email = String(entry?.email ?? entry ?? '').trim().toLowerCase();
+      if (!email) continue;
+      // Deliberately loose: the real test is whether mail arrives, and a
+      // pattern strict enough to be useful rejects valid addresses.
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw new Error(`"${email}" does not look like an email address`);
+      }
+      if (seen.has(email)) continue;
+      seen.add(email);
+
+      const label = String(entry?.label ?? '').trim().slice(0, 60);
+      cleaned.push(label ? { email, label } : { email });
+    }
+
+    return cleaned;
+  }
 
   /**
    * What an emergency adds to the transport fee.
@@ -3589,6 +3658,32 @@ router.patch('/settings', requireRole('admin', 'super_admin'), wrap(async (req, 
   }
 
   res.json({ ok: true, settings: await getSettings() });
+}));
+
+/**
+ * Send tonight's backup right now, to whoever is on the list.
+ *
+ * An address that is on the list but never receives anything is the same as no
+ * backup at all, and the only way to know is to send one. Restricted to a
+ * super admin because it emails the whole database.
+ */
+router.post('/backups/test', requireRole('super_admin'), wrap(async (req, res) => {
+  const { sendDailyBackup } = await import('../services/backup.js');
+  try {
+    const result = await sendDailyBackup();
+    res.json({
+      ok: true,
+      sentTo: result.to,
+      failed: result.failed,
+      rows: result.rows,
+      sheets: result.sheets,
+      bytes: result.bytes,
+    });
+  } catch (err) {
+    // The failure is the useful answer here, so it is reported rather than
+    // thrown into the generic handler.
+    res.status(502).json({ error: err.message });
+  }
 }));
 
 router.get('/admins', requireRole('super_admin'), wrap(async (req, res) => {

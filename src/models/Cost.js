@@ -77,6 +77,26 @@ const CostSchema = new mongoose.Schema({
   voidedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'AdminUser' },
   voidReason: String,
 
+  /**
+   * The special payout this cost records, when it came from one.
+   *
+   * A special payout — reimbursing a nanny for a taxi, a uniform, a medical
+   * bill — is real money leaving the business with no booking behind it. It
+   * used to appear in no cost total at all, so reported profit never moved
+   * when one was paid and was overstated by the sum of every one ever made.
+   *
+   * Written automatically when the payout is approved rather than left to
+   * somebody to remember. The link is what stops it being counted twice: the
+   * cost can be found from the payout and the payout from the cost, so a
+   * second approval of the same payout updates this row instead of adding
+   * another.
+   */
+  payout: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Payout',
+    index: { unique: true, sparse: true },
+  },
+
   /** Who entered it, and who last touched it. This is a money record. */
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'AdminUser' },
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'AdminUser' },
