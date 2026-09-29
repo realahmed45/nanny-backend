@@ -1,4 +1,5 @@
 import { Setting } from '../models/index.js';
+import config from '../config/index.js';
 
 /**
  * Runtime settings, cached in memory.
@@ -38,7 +39,41 @@ export const DEFAULTS = {
    * across town at no notice and is therefore worth more.
    */
   transportPayment: null,
+
+  /**
+   * Who the nightly backup is emailed to.
+   *
+   * `null` means fall back to the single configured address. That address was
+   * one person's personal email: if they left, changed it, or their inbox
+   * filled, every backup stopped arriving and nothing said so. A list that the
+   * office can edit means a second person always has a copy.
+   */
+  backupRecipients: null,
 };
+
+/**
+ * The addresses tonight's backup should go to.
+ *
+ * Falls back to the configured address when the list is empty, so turning the
+ * feature on requires no setup and removing everybody cannot silently stop the
+ * backups. Deduplicated and lowercased, because the same address entered twice
+ * would otherwise send two copies.
+ */
+export async function backupRecipients() {
+  const settings = await getSettings();
+  const list = Array.isArray(settings.backupRecipients) ? settings.backupRecipients : [];
+
+  const cleaned = [...new Set(
+    list
+      .map((entry) => String(entry?.email ?? entry ?? '').trim().toLowerCase())
+      .filter((email) => email.includes('@')),
+  )];
+
+  if (cleaned.length) return cleaned;
+
+  const fallback = String(config.backup.email || '').trim().toLowerCase();
+  return fallback ? [fallback] : [];
+}
 
 /** Defaults for the cash-in-hand transport payment, in rupiah per shift. */
 export const TRANSPORT_PAYMENT_DEFAULTS = {

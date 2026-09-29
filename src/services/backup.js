@@ -240,7 +240,25 @@ export async function buildBackupWorkbook() {
  * a silent backup gap is impossible — a backup nobody knows has stopped is
  * worse than no backup at all.
  */
-export async function sendDailyBackup({ to = config.backup.email } = {}) {
+export async function sendDailyBackup({ to } = {}) {
+  /**
+   * Everyone the office has listed, not one hardcoded address.
+   *
+   * The single address was one person's personal email. If they left, changed
+   * it, or their inbox filled, every backup stopped arriving and nothing said
+   * so — the one failure a backup cannot afford. `backupRecipients()` falls
+   * back to the configured address when the list is empty, so this is safe
+   * before anybody has set it up.
+   */
+  const { backupRecipients } = await import('./settings.js');
+  const recipients = to
+    ? [to].flat().filter(Boolean)
+    : await backupRecipients();
+
+  if (!recipients.length) {
+    throw new Error('no backup recipients configured — nobody would receive it');
+  }
+
   const book = await buildBackupWorkbook();
   const buffer = Buffer.from(await book.xlsx.writeBuffer());
 
@@ -280,19 +298,53 @@ export async function sendDailyBackup({ to = config.backup.email } = {}) {
     throw new Error(`backup contains no rows at all (${counts}) — refusing to call this a backup`);
   }
 
-  await send({
-    to,
-    subject: `Daily backup — ${stamp}`,
-    text: `Attached is the end-of-day backup for ${stamp}.\n\n${counts}`,
-    html: brandedEmail(`
-      <p style="color:#333;font-size:15px;margin:0 0 8px">Attached is the end-of-day backup for <strong>${stamp}</strong>.</p>
-      <p style="color:#666;font-size:13px;margin:0">${counts.replace(/ · /g, '<br>')}</p>
-    `),
-    attachments: [{ filename, content: buffer }],
-  });
+  /**
+   * One email each, rather than one email to everybody.
+   *
+   * A single send with several recipients fails as a unit: one address the
+   * provider rejects — a typo, a closed mailbox — and nobody gets the backup.
+   * Sent one at a time, a bad address costs only its own copy, and the others
+   * still have the file.
+   */
+  const delivered = [];
+  const failed = [];
+
+  for (const recipient of recipients) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await send({
+        to: recipient,
+        subject: `Daily backup — ${stamp}`,
+        text: `Attached is the end-of-day backup for ${stamp}.\n\n${counts}`,
+        html: brandedEmail(`
+          <p style="color:#333;font-size:15px;margin:0 0 8px">Attached is the end-of-day backup for <strong>${stamp}</strong>.</p>
+          <p style="color:#666;font-size:13px;margin:0">${counts.replace(/ · /g, '<br>')}</p>
+        `),
+        attachments: [{ filename, content: buffer }],
+      });
+      delivered.push(recipient);
+    } catch (err) {
+      failed.push({ to: recipient, error: err.message });
+      console.error(`[backup] could not send to ${recipient}: ${err.message}`);
+    }
+  }
+
+  // Nobody received it. Thrown rather than returned, because the caller turns
+  // a throw into the alert email that says the backup did not happen.
+  if (!delivered.length) {
+    throw new Error(
+      `backup reached nobody (${failed.map((f) => `${f.to}: ${f.error}`).join('; ')})`,
+    );
+  }
 
   return {
-    to, filename, bytes: buffer.length, counts, rows: totalRows, sheets: rowsPerSheet,
+    to: delivered,
+    failed,
+    filename,
+    bytes: buffer.length,
+    counts,
+    rows: totalRows,
+    sheets: rowsPerSheet,
   };
 }
 
