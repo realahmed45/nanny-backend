@@ -486,6 +486,21 @@ export async function processAutoVerifications(now = new Date()) {
 
 let tasks = [];
 
+/**
+ * Cron reads the server's clock unless it is told otherwise.
+ *
+ * The server runs UTC and the business runs UTC+8, so every job named after a
+ * time of day fired eight hours out. "Mondays at 09:00" released payouts at
+ * 17:00 in Bali — a nanny told she is paid Monday morning waited until the end
+ * of the working day. The end-of-day backup ran at 07:00 the next morning, so
+ * it captured the wrong day's close and its filename was dated a day late.
+ *
+ * The jobs that run every minute or every fifteen are unaffected: an interval
+ * does not care what the clock is called. Only the ones pinned to an hour need
+ * this.
+ */
+const AT = { timezone: config.timezone };
+
 export function startScheduler() {
   stopScheduler();
 
@@ -500,8 +515,8 @@ export function startScheduler() {
   tasks.push(cron.schedule('*/15 * * * *', () => guard('replacements', processReplacementDeadlines)));
   tasks.push(cron.schedule('*/15 * * * *', () => guard('reminders', processReminders)));
 
-  // Mondays at 09:00: release nanny payouts.
-  tasks.push(cron.schedule('0 9 * * 1', () => guard('payouts', processPayouts)));
+  // Mondays at 09:00 in Bali: release nanny payouts.
+  tasks.push(cron.schedule('0 9 * * 1', () => guard('payouts', processPayouts), AT));
 
   // Hourly: expire lapsed referral windows and dead links, so reports stop
   // counting claims that can no longer be earned.
@@ -509,14 +524,15 @@ export function startScheduler() {
 
   // Twice a day: look for referral patterns worth a human review. Nothing
   // here blocks anyone — it raises an alert and a person decides.
-  tasks.push(cron.schedule('0 3,15 * * *', () => guard('referralAbuse', processReferralAbuse)));
+  tasks.push(cron.schedule('0 3,15 * * *', () => guard('referralAbuse', processReferralAbuse), AT));
 
   // Daily at 02:00: clear the personal detail off advances from closed months.
-  tasks.push(cron.schedule('0 2 * * *', () => guard('advanceRedaction', processAdvanceRedaction)));
+  // In business time, so "a closed month" means closed where the office is.
+  tasks.push(cron.schedule('0 2 * * *', () => guard('advanceRedaction', processAdvanceRedaction), AT));
 
   // End of day: email the backup spreadsheet. Last job of the night so it
   // captures everything that happened today.
-  tasks.push(cron.schedule(`0 ${config.backup.hour} * * *`, () => guard('backup', processDailyBackup)));
+  tasks.push(cron.schedule(`0 ${config.backup.hour} * * *`, () => guard('backup', processDailyBackup), AT));
 
   console.log('[scheduler] started (9 jobs)');
   return tasks;
