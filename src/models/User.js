@@ -212,6 +212,13 @@ const UserSchema = new mongoose.Schema({
   hourlyRate: Number,
 
   /**
+   * Our commission on overtime she was paid for in person and has not yet
+   * had taken off a payout. Normally zero; only a commission bigger than the
+   * payout it came with leaves anything here.
+   */
+  overtimeCommissionOwed: { type: Number, default: 0 },
+
+  /**
    * The terms the office agreed with her, where they differ from simply being
    * paid for the hours she works.
    *

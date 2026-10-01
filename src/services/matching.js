@@ -40,7 +40,10 @@ export async function isNannyAvailable(nanny, { serviceDays, hoursPerDay, exclud
    */
   const query = {
     $or: [{ nanny: nanny._id }, { secondNanny: nanny._id }],
-    status: { $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING] },
+    // A booking waiting on a family top-up is still a job she is booked for.
+    status: {
+      $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING, BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT],
+    },
   };
   if (excludeBookingId) query._id = { $ne: excludeBookingId };
 

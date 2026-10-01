@@ -20,6 +20,10 @@ export async function requireAuth(req, res, next) {
     const payload = jwt.verify(token, config.jwtSecret);
     const admin = await AdminUser.findById(payload.sub);
     if (!admin || !admin.active) return res.status(401).json({ error: 'Account is not active' });
+    // Signed before a password change or a switch-off: no longer valid.
+    if (admin.tokensValidAfter && payload.iat * 1000 < admin.tokensValidAfter.getTime() - 1000) {
+      return res.status(401).json({ error: 'Please sign in again' });
+    }
     req.admin = admin;
     return next();
   } catch {

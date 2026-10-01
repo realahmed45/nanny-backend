@@ -91,6 +91,7 @@ test('a private file is never cached by the browser', async (t) => {
 
 test('cleanup', async () => {
   // Remove what these tests wrote, so the archive is not left with junk.
-  const priv = path.join(config.media.dir, 'private');
+  // Private files live outside the public folder now, in their own directory.
+  const priv = config.media.privateDir || path.join(config.media.dir, 'private');
   await fs.rm(priv, { recursive: true, force: true }).catch(() => {});
 });

@@ -12,8 +12,9 @@ import config from '../config/index.js';
  *
  * Tokens last a long time because the alternative is worse: a nanny who is
  * signed out mid-week misses the emergency notification that the app exists
- * to deliver. Her number is the account, so losing the phone is the real
- * revocation, and blocking her account invalidates it server-side anyway.
+ * to deliver. A token is only issued after a code sent to her WhatsApp is
+ * typed back (routes/nannyApp.js), never for a phone number alone, and
+ * blocking or suspending her account invalidates it server-side anyway.
  */
 
 const TOKEN_TTL = '90d';

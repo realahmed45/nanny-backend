@@ -123,9 +123,9 @@ const SCOPED_ROLES = {
   // `/payouts` is theirs because paying a nanny her salary, an advance or a
   // cost she covered is bookkeeping — the individual routes below still say
   // which of them finance may write.
-  finance: [/^\/finance/, /^\/costs/, /^\/payouts/, /^\/auth\//, /^\/settings$/],
+  finance: [/^\/finance/, /^\/costs/, /^\/payouts/, /^\/auth\//, /^\/settings$/, /^\/admins\/me\/password$/],
   // Support answers tickets and calls people back.
-  support: [/^\/tickets/, /^\/callbacks/, /^\/conversations/, /^\/notes/, /^\/auth\//],
+  support: [/^\/tickets/, /^\/callbacks/, /^\/conversations/, /^\/notes/, /^\/auth\//, /^\/admins\/me\/password$/],
 };
 
 router.use((req, res, next) => {
@@ -2104,7 +2104,9 @@ router.get('/bookings/:id/refund-preview', wrap(async (req, res) => {
   const booking = await Booking.findById(req.params.id);
   if (!booking) return res.status(404).json({ error: 'Booking not found' });
   const cancelledBy = req.query.cancelledBy || CANCELLED_BY.ADMIN;
-  res.json(computeCancellationRefund(booking, { cancelledBy }));
+  // The same quote the cancellation itself will use, so the preview matches.
+  const { cancellationQuote } = await import('../services/booking.js');
+  res.json(cancellationQuote(booking, { cancelledBy }));
 }));
 
 router.post('/bookings/:id/cancel', wrap(async (req, res) => {
@@ -2127,12 +2129,8 @@ router.post('/bookings/:id/cancel', wrap(async (req, res) => {
   // rate when she closes it out. This used to pay `completedAmount` on top,
   // which is the family's price for work she had already been paid for.
   // Only the compensation for days she LOSES is owed here.
-  if (breakdown.totalNannyCompensation > 0 && nannyId) {
-    await queuePayout(booking, {
-      nannyId, amount: breakdown.totalNannyCompensation, isFinal: true,
-      notes: 'Cancellation compensation',
-    });
-  }
+  const { payCancellationCompensation } = await import('../services/booking.js');
+  await payCancellationCompensation(booking, breakdown);
 
   const family = await User.findById(booking.family);
   await notifyUser(family, `🔴 *Booking Cancelled by My Nanny*
@@ -2166,7 +2164,10 @@ router.post('/bookings/:id/assign-nanny', wrap(async (req, res) => {
 
   const family = await User.findById(booking.family);
   if (!requiresPayment) {
-    booking.status = BOOKING_STATUS.UPCOMING;
+    // Not simply UPCOMING: a booking under way stays ongoing, and one with a
+    // top-up still owed keeps asking for it.
+    const { restingStatus } = await import('../services/booking.js');
+    booking.status = restingStatus(booking);
     const { expiresAt } = openNannyResponseWindow(booking, nanny._id, 'new_booking');
     await booking.save();
     await notifyUser(nanny, M.nannyBookingRequest(booking, family, expiresAt));
@@ -2472,10 +2473,18 @@ router.get('/payments/summary', wrap(async (req, res) => {
   const weekStart = dayjs().startOf('week').toDate();
   const weekEnd = dayjs().endOf('week').toDate();
 
-  // Payouts are released on Mondays, so "next Monday" is the upcoming release.
-  const nextMonday = dayjs().day() === 1 && dayjs().hour() < 9
-    ? dayjs().startOf('day')
-    : dayjs().add(1, 'week').startOf('week').add(1, 'day');
+  /**
+   * Payouts are released on Mondays, so "next Monday" is the upcoming release.
+   *
+   * Counted forward in days rather than via `startOf('week')`. Weeks start on
+   * Sunday, so on a Sunday "a week on, start of week, plus a day" landed eight
+   * days out: tomorrow's release was skipped and the total summed two Mondays
+   * into one. Read on Bali's clock, like the payouts themselves.
+   */
+  const now = dayjs().tz(config.timezone);
+  const nextMonday = now.day() === 1 && now.hour() < 9
+    ? now.startOf('day')
+    : now.add(((8 - now.day()) % 7) || 7, 'day').startOf('day');
 
   const [familyWeek, nannyWeek, nextRelease, refunds, awaiting] = await Promise.all([
     Payment.aggregate([
@@ -2662,10 +2671,49 @@ router.post('/payments/:id/refund', requireRole('admin', 'super_admin'), wrap(as
   const payment = await Payment.findById(req.params.id);
   if (!payment) return res.status(404).json({ error: 'Payment not found' });
 
+  if (payment.kind === 'refund') {
+    return res.status(400).json({ error: 'A refund cannot itself be refunded' });
+  }
+
   const booking = await Booking.findById(payment.booking);
   if (!booking) return res.status(404).json({ error: 'Booking not found' });
 
+  /**
+   * The amount is checked like every other money route checks its amount.
+   *
+   * This one checked nothing: a typo wrote an absurd refund, a negative figure
+   * reported success, and the same money could be raised again and again. The
+   * ceiling is what the family has actually paid on this booking, less every
+   * refund already sent or waiting to be sent.
+   */
   const amount = Number(req.body?.amount ?? payment.amount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return res.status(400).json({ error: 'Enter a refund amount greater than zero' });
+  }
+
+  const [paidIn, refundedOut] = await Promise.all([
+    Payment.aggregate([
+      { $match: { booking: booking._id, kind: { $ne: 'refund' }, status: PAYMENT_STATUS.COMPLETED } },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ]),
+    Payment.aggregate([
+      {
+        $match: {
+          booking: booking._id,
+          kind: 'refund',
+          status: { $in: [PAYMENT_STATUS.REFUND_IN_PROCESS, PAYMENT_STATUS.REFUNDED] },
+        },
+      },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ]),
+  ]);
+  const refundable = Math.max(0, (paidIn[0]?.total || 0) - (refundedOut[0]?.total || 0));
+  if (amount > refundable) {
+    return res.status(400).json({
+      error: `That is more than can be refunded on this booking. At most ${money(refundable)} is left after earlier refunds.`,
+    });
+  }
+
   const result = await refundBooking(booking, {
     amount,
     reason: req.body?.reason || 'Manual admin refund',
@@ -2681,11 +2729,17 @@ router.post('/payments/:id/complete-refund', requireRole('admin', 'super_admin')
     return res.status(400).json({ error: 'That payment is not a refund' });
   }
 
-  const { booking } = await completeRefund(payment, {
+  const { booking, alreadyDone } = await completeRefund(payment, {
     adminId: req.admin?.id,
     proof: { url: req.body?.proofUrl, mediaId: req.body?.proofMediaId },
     note: req.body?.note || '',
   });
+
+  // Already sent (a second click, or another admin got there first): nothing
+  // moved, so the family must not be told about the same refund twice.
+  if (alreadyDone) {
+    return res.status(409).json({ error: 'This refund has already been marked as sent' });
+  }
 
   const family = await User.findById(payment.family);
   if (family) await notifyUser(family, M.refundIssued(payment.amount, payment.reference));
@@ -2954,18 +3008,27 @@ router.post('/payouts/:id/mark-paid', requireRole('admin', 'super_admin', 'finan
     return res.status(400).json({ error: 'Please attach a photo showing the transfer' });
   }
 
-  await markPayoutPaid(payout, {
+  const result = await markPayoutPaid(payout, {
     adminId: req.admin?.id,
     proof: { url: proofUrl, mediaId: req.body?.proofMediaId },
     note: req.body?.note || '',
   });
 
-  const nanny = await User.findById(payout.nanny);
-  if (nanny) {
-    await notifyUser(nanny, `\u{1F4B0} *Payout sent \u{2014} ${money(payout.amount)}*\n\nWe have transferred your earnings.\nReference: ${payout.reference}`);
+  // A second click, or another admin first: nothing moved, nobody is told twice.
+  if (result.alreadyPaid) {
+    return res.status(409).json({ error: 'This payout has already been marked as paid', payout: result.payout });
   }
 
-  res.json({ ok: true, payout });
+  const paid = result.payout;
+  const nanny = await User.findById(paid.nanny);
+  if (nanny) {
+    const advanceNote = paid.advanceRecovered > 0
+      ? `\n${money(paid.advanceRecovered)} of your advance was taken off this payout.`
+      : '';
+    await notifyUser(nanny, `\u{1F4B0} *Payout sent \u{2014} ${money(paid.amount)}*\n\nWe have transferred your earnings.${advanceNote}\nReference: ${paid.reference}`);
+  }
+
+  res.json({ ok: true, payout: paid });
 }));
 
 /* ------------------------------------------------------------------ *
@@ -3706,6 +3769,51 @@ router.post('/admins', requireRole('super_admin'), wrap(async (req, res) => {
   res.status(201).json({ ok: true, admin: { id: admin._id, email: admin.email, name: admin.name, role: admin.role } });
 }));
 
+/**
+ * Change your own password.
+ *
+ * There was no way to change a password, or to switch an account off, from
+ * the dashboard: changing ADMIN_PASSWORD in the hosting settings does not
+ * touch an account that already exists. Every sign-in issued before the
+ * change stops working at once.
+ */
+router.post('/admins/me/password', wrap(async (req, res) => {
+  const current = String(req.body?.currentPassword || '');
+  const next = String(req.body?.newPassword || '');
+  if (next.length < 10) return res.status(400).json({ error: 'The new password must be at least 10 characters' });
+
+  const me = await AdminUser.findById(req.admin.id);
+  if (!me || !(await bcrypt.compare(current, me.passwordHash))) {
+    return res.status(400).json({ error: 'Your current password is not correct' });
+  }
+  me.passwordHash = await bcrypt.hash(next, 10);
+  me.tokensValidAfter = new Date();
+  await me.save();
+  res.json({ ok: true, token: signToken(me) });
+}));
+
+/** A super admin resets someone's password, or switches an account on or off. */
+router.patch('/admins/:id', requireRole('super_admin'), wrap(async (req, res) => {
+  const target = await AdminUser.findById(req.params.id);
+  if (!target) return res.status(404).json({ error: 'Account not found' });
+
+  if (typeof req.body?.active === 'boolean') {
+    if (String(target._id) === String(req.admin.id) && !req.body.active) {
+      return res.status(400).json({ error: 'You cannot switch off your own account' });
+    }
+    target.active = req.body.active;
+    target.tokensValidAfter = new Date();
+  }
+  if (req.body?.password !== undefined) {
+    const pw = String(req.body.password || '');
+    if (pw.length < 10) return res.status(400).json({ error: 'The password must be at least 10 characters' });
+    target.passwordHash = await bcrypt.hash(pw, 10);
+    target.tokensValidAfter = new Date();
+  }
+  await target.save();
+  res.json({ ok: true, admin: { id: target._id, email: target.email, active: target.active } });
+}));
+
 /* ------------------------------------------------------------------ *
  * Helpers
  * ------------------------------------------------------------------ */
@@ -3755,9 +3863,15 @@ router.get('/earnings/booking/:id', requireRole('admin', 'super_admin'), wrap(as
     .populate('family', 'fullName');
   if (!booking) return res.status(404).json({ error: 'Booking not found' });
 
-  const { bookingEarnings } = await import('../services/earnings.js');
+  const { bookingEarnings, PROFIT_REFUND } = await import('../services/earnings.js');
+  // Only refunds that reduce profit, as the summary counts them — and the
+  // lean record, so days closed before the overtime split read correctly.
+  const [manual] = await Payment.aggregate([
+    { $match: { booking: booking._id, kind: 'refund', status: PAYMENT_STATUS.REFUNDED, ...PROFIT_REFUND } },
+    { $group: { _id: null, total: { $sum: '$amount' } } },
+  ]);
   res.json({
-    ...bookingEarnings(booking),
+    ...bookingEarnings(booking.toObject(), { refunded: manual?.total || 0 }),
     nanny: booking.nanny?.fullName || null,
     family: booking.family?.fullName || null,
     nannyHourlyRate: booking.nannyHourlyRate || 0,

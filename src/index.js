@@ -109,9 +109,13 @@ export function createApp() {
     const objectStore = (await import('./services/objectStore.js')).default;
     const where = objectStore.describe();
 
+    const privateStore = (await import('./services/privateStore.js')).default;
+
     res.json({
       ...where,
       localDir: config.media.dir,
+      // IDs, contracts and receipts: a separate store, so a separate answer.
+      private: { ...privateStore.describe(), localDir: config.media.privateDir },
       warning: where.permanent
         ? null
         : 'Files are on a disk this host replaces on deploy. They will be lost.',
@@ -177,10 +181,18 @@ export function createApp() {
    * useless for working out why nothing has changed. This asks the provider
    * from the server's own network and repeats its answer verbatim.
    *
-   * Open, because it reveals nothing but whether a key is set and what the
-   * model said. The key itself is never returned.
+   * Behind DIAG_KEY like the other diagnostics. It used to be open on the
+   * reasoning that it reveals nothing secret — but every request makes a real,
+   * paid call to the AI provider, so anyone who found the URL could run up the
+   * bill (or exhaust the rate limit the live conversations depend on) with a
+   * loop. Unset DIAG_KEY means the endpoint does not exist.
    */
   app.get('/diag/ai', async (req, res) => {
+    const token = String(req.query.key || '');
+    if (!config.admin.diagKey || token !== config.admin.diagKey) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
     const { isConfigured, converse } = await import('./services/aiConversation.js');
     const { getSettings } = await import('./services/settings.js');
 

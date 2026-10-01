@@ -248,6 +248,60 @@ export const config = {
       region: process.env.MEDIA_S3_REGION || 'auto',
       publicBase: process.env.MEDIA_PUBLIC_BASE || '',
     },
+
+    /**
+     * Identity documents, contracts and payment proofs: never public.
+     *
+     * The private folder used to sit inside the public one (MEDIA_DIR/private)
+     * and was kept out only by a check on the first path segment, which
+     * `/media/%70rivate/...` or `/media/./private/...` walked straight past. It
+     * is now a separate folder outside the publicly served root, so no spelling
+     * of a public URL can reach it. Defaults to a sibling of MEDIA_DIR.
+     */
+    privateDir: process.env.MEDIA_PRIVATE_DIR
+      || `${String(process.env.MEDIA_DIR || 'storage/media').replace(/[\\/]+$/, '')}-private`,
+
+    /**
+     * Who may open a private file. IDs and bank receipts are not for every
+     * dashboard login: support and finance staff saw every nanny's national ID.
+     * Comma-separated admin roles.
+     */
+    privateRoles: (process.env.MEDIA_PRIVATE_ROLES || 'admin,super_admin')
+      .split(',').map((r) => r.trim()).filter(Boolean),
+
+    /**
+     * Private files in object storage, so they survive a deploy.
+     *
+     * Must be a separate bucket from the public one and must never be given a
+     * public domain: on R2 and most providers a public bucket exposes every
+     * key in it, so a "private/" prefix in the public bucket is not private.
+     * Files are served only through the logged-in /media-private route, which
+     * streams them from here. Credentials and endpoint default to the public
+     * bucket's when unset.
+     */
+    privateS3: {
+      bucket: process.env.MEDIA_PRIVATE_S3_BUCKET || '',
+      prefix: process.env.MEDIA_PRIVATE_S3_PREFIX ?? 'private/',
+      endpoint: process.env.MEDIA_PRIVATE_S3_ENDPOINT || process.env.MEDIA_S3_ENDPOINT || '',
+      accessKeyId: process.env.MEDIA_PRIVATE_S3_KEY || process.env.MEDIA_S3_KEY || '',
+      secretAccessKey: process.env.MEDIA_PRIVATE_S3_SECRET || process.env.MEDIA_S3_SECRET || '',
+      region: process.env.MEDIA_PRIVATE_S3_REGION || process.env.MEDIA_S3_REGION || 'auto',
+    },
+
+    /**
+     * Where `store()` may download from.
+     *
+     * It used to fetch any http(s) URL it was handed, from inside our own
+     * network — a way to make the server request internal addresses or cloud
+     * metadata endpoints. Only the WhatsApp provider's media storage is
+     * allowed. Entries are a host ("ultramsgmedia.s3.amazonaws.com"), a
+     * wildcard host ("*.example.com"), or a host plus path prefix
+     * ("s3.eu-central-1.amazonaws.com/ultramsgmedia/") — the path matters on
+     * shared hosts like S3, where any stranger's bucket has the same hostname.
+     */
+    allowedSources: (process.env.MEDIA_ALLOWED_SOURCES
+      || 's3.eu-central-1.amazonaws.com/ultramsgmedia/,ultramsgmedia.s3.eu-central-1.amazonaws.com,ultramsgmedia.s3.amazonaws.com,s3.amazonaws.com/ultramsgmedia/')
+      .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
   },
 
   brand: {
@@ -259,9 +313,35 @@ export const config = {
 
   /** Where the end-of-day backup goes. */
   backup: {
-    email: process.env.BACKUP_EMAIL || 'bassam.agi@gmail.com',
+    /**
+     * No built-in address.
+     *
+     * This defaulted to one person's personal Gmail, so a server deployed
+     * without BACKUP_EMAIL mailed every family's name, phone and address to an
+     * inbox outside the company every night. Now nothing is sent until an
+     * address is configured here or in the dashboard's backup recipients.
+     */
+    email: (process.env.BACKUP_EMAIL || '').trim(),
     // Local hour to send at, in the server's timezone.
     hour: int(process.env.BACKUP_HOUR, 23),
+    /**
+     * Encrypts every backup attachment (AES-256-GCM, key derived with scrypt).
+     *
+     * An emailed spreadsheet of every customer sits in mailboxes, phones and
+     * mail-provider logs for years. Without this set, production refuses to
+     * email the backup at all rather than send it in the clear; decrypt with
+     * `node scripts/decrypt-backup.mjs <file>`.
+     */
+    password: process.env.BACKUP_PASSWORD || '',
+    /**
+     * Where the full database dump is written (gzipped JSON of every
+     * collection, encrypted when BACKUP_PASSWORD is set). Must be persistent
+     * storage to be worth anything; the dump is also uploaded to the private
+     * bucket when one is configured.
+     */
+    dir: process.env.BACKUP_DIR || 'storage/backups',
+    // How many nightly dumps to keep on local disk.
+    keep: int(process.env.BACKUP_KEEP, 14),
   },
 
   // Response windows (spec: 1h new booking, 2h existing booking change)
@@ -270,6 +350,10 @@ export const config = {
 
   reschedulePenaltyPercent: int(process.env.RESCHEDULE_PENALTY_PERCENT, 5),
   freeRescheduleLimit: int(process.env.FREE_RESCHEDULE_LIMIT, 3),
+  // Overtime past this is almost always an end-of-service code entered late
+  // (the next morning), not work. It is not charged automatically; the office
+  // confirms real long overtime by hand.
+  maxAutoOvertimeHours: int(process.env.MAX_AUTO_OVERTIME_HOURS, 4),
   liveLocationWindowHours: int(process.env.LIVE_LOCATION_WINDOW_HOURS, 2),
 };
 

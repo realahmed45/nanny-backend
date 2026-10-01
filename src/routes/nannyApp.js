@@ -1,15 +1,17 @@
+import crypto from 'node:crypto';
 import express from 'express';
 import dayjs from 'dayjs';
 import {
   User, Booking, Otp, ChatThread, Payout,
 } from '../models/index.js';
 import {
-  USER_ROLE, NANNY_STATUS, BOOKING_STATUS, SERVICE_DAY_STATUS,
+  USER_ROLE, NANNY_STATUS, BOOKING_STATUS, SERVICE_DAY_STATUS, PAYOUT_STATUS,
 } from '../utils/constants.js';
+import { dayWorkers, rateForDay } from '../services/payments.js';
+import { round2 } from '../services/policy.js';
 import { signNannyToken, requireNanny } from '../middleware/nannyAuth.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { normalizePhone, sendText } from '../providers/ultramsg.js';
-import { generateOtp } from '../flows/common.js';
 import config from '../config/index.js';
 
 /**
@@ -37,48 +39,12 @@ const wrap = (fn) => (req, res, next) => fn(req, res, next).catch(next);
  * ------------------------------------------------------------------ */
 
 /**
- * Codes are short-lived and few.
- *
- * Without a limit this endpoint sends WhatsApp messages to any number a
- * stranger types, which is both a bill and a way to harass someone.
- */
-const requestLimiter = rateLimit({
-  max: 5,
-  windowMs: 15 * 60_000,
-  lockMs: 15 * 60_000,
-  by: (req) => [
-    `nanny-code:ip:${req.ip}`,
-    req.body?.phone ? `nanny-code:phone:${normalizePhone(req.body.phone)}` : null,
-  ],
-});
-
-/**
- * Sign-in is one step now, so this is the only brake on guessing numbers.
- *
- * Tight on purpose: a real nanny types her own number once and is in. Twenty
- * attempts from one address in fifteen minutes is not someone signing in.
- */
-const signInLimiter = rateLimit({
-  max: 20,
-  windowMs: 15 * 60_000,
-  lockMs: 30 * 60_000,
-  by: (req) => [`nanny-signin:ip:${req.ip}`],
-});
-
-const verifyLimiter = rateLimit({
-  max: 8,
-  windowMs: 15 * 60_000,
-  lockMs: 15 * 60_000,
-  by: (req) => [`nanny-verify:ip:${req.ip}`],
-});
-
-/**
  * The ways one Indonesian number gets written by hand.
  *
  * She registered over WhatsApp, which gave us 6281234567890. Typing her own
  * number into a box, she writes 0812-3456-7890 — that is how it is written
- * here, and being told "we could not find that number" for the version on her
- * own paperwork is a dead end that ends in a phone call to us.
+ * here, and a code that never arrives for the version on her own paperwork is
+ * a dead end that ends in a phone call to us.
  *
  * Only tried at sign-in, where a person is typing. Everywhere else the number
  * arrives from WhatsApp already in one shape, and guessing there would be a
@@ -95,102 +61,183 @@ function phoneVariants(raw) {
 }
 
 /**
- * Sign in with the phone number she registered with.
+ * One spelling per number, for counting attempts against it.
  *
- * One field, no code, no password. The number is the account — it is what she
- * talks to us on, and the only thing she is certain to know.
- *
- * This trusts whoever holds the number. A phone number is not a secret, so
- * anyone who has one can open her bookings, the addresses of the families she
- * works for, and what she has earned. That is the trade that was asked for,
- * and it is worth writing down plainly rather than leaving to be discovered.
- *
- * Adding a code back is a small change: `/auth/verify` below still exists.
+ * Keyed on the raw digits, "0812…" and "62812…" would be two separate buckets
+ * for the same person, so the per-number limit could be doubled just by
+ * switching how the number was written.
  */
-router.post('/auth/sign-in', signInLimiter, wrap(async (req, res) => {
-  const raw = String(req.body?.phone ?? req.body?.identifier ?? req.body?.email ?? '').trim();
+function phoneKey(raw) {
+  const digits = normalizePhone(raw);
+  if (!digits) return null;
+  return digits.startsWith('0') ? `62${digits.slice(1)}` : digits;
+}
 
-  if (!raw) return res.status(400).json({ error: 'Enter your phone number' });
+/**
+ * Codes are short-lived and few.
+ *
+ * Without a limit this endpoint sends WhatsApp messages to any number a
+ * stranger types, which is both a bill and a way to harass someone. Counted by
+ * address and by number: one address is easy to rotate, and one number
+ * hammered from many addresses is the harassment case.
+ */
+const requestLimiter = rateLimit({
+  max: 5,
+  windowMs: 15 * 60_000,
+  lockMs: 15 * 60_000,
+  by: (req) => [`nanny-code:ip:${req.ip}`],
+});
+const requestPhoneLimiter = rateLimit({
+  max: 3,
+  windowMs: 15 * 60_000,
+  lockMs: 30 * 60_000,
+  by: (req) => {
+    const key = phoneKey(req.body?.phone);
+    return [key ? `nanny-code:phone:${key}` : null];
+  },
+});
 
-  const variants = phoneVariants(raw);
-  if (!variants.length || variants[0].length < 8) {
-    return res.status(400).json({ error: 'That does not look like a phone number.' });
-  }
+/**
+ * Guessing a six-digit code.
+ *
+ * Per address and per number. Per address alone lets many machines share out
+ * the guesses; per number alone lets one address try every nanny. The code
+ * itself also dies after MAX_CODE_ATTEMPTS wrong tries, so even a patient
+ * attacker under both limits only ever gets a handful of guesses at any one
+ * code before a new one has to be sent — to her phone, not theirs.
+ */
+const verifyLimiter = rateLimit({
+  max: 8,
+  windowMs: 15 * 60_000,
+  lockMs: 15 * 60_000,
+  by: (req) => [`nanny-verify:ip:${req.ip}`],
+});
+const verifyPhoneLimiter = rateLimit({
+  max: 6,
+  windowMs: 15 * 60_000,
+  lockMs: 30 * 60_000,
+  by: (req) => {
+    const key = phoneKey(req.body?.phone);
+    return [key ? `nanny-verify:phone:${key}` : null];
+  },
+});
 
-  const nanny = await User.findOne({
-    role: USER_ROLE.NANNY,
-    phone: { $in: variants },
-  });
+/** Wrong codes allowed against one issued code before it is thrown away. */
+const MAX_CODE_ATTEMPTS = 5;
+const CODE_TTL_MS = 10 * 60_000;
 
-  // Said plainly. With no code to send there is nothing left to protect by
-  // being vague, and "check the number" is what she can actually act on.
-  if (!nanny) {
-    return res.status(404).json({
-      error: 'We could not find that number. Check it, or message us on WhatsApp.',
-    });
-  }
-
-  if (nanny.blocked) {
-    return res.status(403).json({ error: 'This account is closed. Please message us on WhatsApp.' });
-  }
-
-  nanny.lastSeenAt = new Date();
-  await nanny.save();
-
-  return res.json({
-    token: signNannyToken(nanny),
-    nanny: publicProfile(nanny),
-  });
+/**
+ * Phone-number-only sign-in, switched off.
+ *
+ * This used to hand a ninety-day token to anyone who typed a registered
+ * nanny's number — and a phone number is not a secret: it is on every message
+ * she has ever sent a family. That token opens the addresses of the families
+ * she works for and their children's details. It also answered "We could not
+ * find that number" for an unregistered one, so it doubled as a way to check
+ * which numbers belong to our nannies.
+ *
+ * Kept as a route only so an old copy of the app still on a phone gets a
+ * sentence telling her to update, rather than a bare 404. It never looks
+ * anything up and never issues a token.
+ */
+router.post('/auth/sign-in', (req, res) => res.status(410).json({
+  error: 'Please update the app. Signing in now uses a code we send you on WhatsApp.',
+  codeRequired: true,
 }));
 
 /**
- * The old two-step sign-in, kept working.
+ * Step one: send a code to her WhatsApp.
  *
- * Nothing in the app calls these now. They are left in place because turning
- * the code back on should be a change to one screen rather than to the server
- * as well.
+ * The reply is the same whether or not the number belongs to a nanny — same
+ * status, same body — and the send is not awaited, so the time taken does not
+ * give it away either. Anything else turns this into a way to find out which
+ * numbers are registered with us.
+ *
+ * Only a real, open nanny account is actually sent a code. A family's number,
+ * an unknown one, or a blocked or suspended nanny gets the same polite reply
+ * and nothing on the phone.
  */
-router.post('/auth/request-code', requestLimiter, wrap(async (req, res) => {
-  const phone = normalizePhone(req.body?.phone || '');
-  const generic = { ok: true, message: 'If that number is registered, a code is on its way.' };
+router.post('/auth/request-code', requestLimiter, requestPhoneLimiter, wrap(async (req, res) => {
+  const variants = phoneVariants(req.body?.phone || '');
+  const generic = { ok: true, message: 'If that number is registered, a code is on its way on WhatsApp.' };
 
-  if (!phone) return res.status(400).json({ error: 'A phone number is required' });
+  if (!variants.length || variants[0].length < 8) {
+    return res.status(400).json({ error: 'Enter the phone number you registered with.' });
+  }
 
-  const nanny = await User.findOne({ role: USER_ROLE.NANNY, phone });
-  if (!nanny || nanny.blocked) return res.json(generic);
+  const nanny = await User.findOne({ role: USER_ROLE.NANNY, phone: { $in: variants } });
+  if (!nanny || nanny.blocked || nanny.nannyStatus === NANNY_STATUS.SUSPENDED) {
+    return res.json(generic);
+  }
 
+  // Filed under the number as we hold it, not as she typed it, so verify finds
+  // it whichever way she writes it the second time.
+  const { phone } = nanny;
   await Otp.deleteMany({ phone, purpose: 'nanny_login' });
-  const code = generateOtp();
+  // crypto rather than Math.random: this code is now the whole of the login.
+  const code = String(crypto.randomInt(100000, 1000000));
   await Otp.create({
     phone,
     code,
     purpose: 'nanny_login',
-    expiresAt: new Date(Date.now() + 10 * 60_000),
+    attempts: 0,
+    expiresAt: new Date(Date.now() + CODE_TTL_MS),
   });
 
-  await sendText(phone, `🔐 Your ${config.brand.name} app code is *${code}*.\n\nIt expires in 10 minutes. If you did not ask for it, ignore this message.`)
+  sendText(phone, `🔐 Your ${config.brand.name} app code is *${code}*.\n\nIt expires in 10 minutes. Never share it — we will never ask you for it. If you did not ask for it, ignore this message.`)
     .catch((err) => console.error(`[nanny-app] could not send code: ${err.message}`));
 
   return res.json(generic);
 }));
 
-/** Exchange a code for a token. */
-router.post('/auth/verify', verifyLimiter, wrap(async (req, res) => {
-  const phone = normalizePhone(req.body?.phone || '');
-  const code = String(req.body?.code || '').trim();
-  if (!phone || !code) return res.status(400).json({ error: 'Phone and code are required' });
+/** Constant-time comparison, so response timing says nothing about the code. */
+function sameCode(a, b) {
+  const x = Buffer.from(String(a));
+  const y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
 
-  const record = await Otp.findOne({ phone, code, purpose: 'nanny_login', consumed: false });
-  if (!record) return res.status(401).json({ error: 'That code is not right. Please check and try again.' });
-  if (new Date(record.expiresAt) < new Date()) {
-    return res.status(401).json({ error: 'That code has expired. Please ask for a new one.' });
+/**
+ * Step two: exchange the code for a token.
+ *
+ * Every failure gets the same answer, so this cannot tell a registered number
+ * from an unregistered one either. Each wrong guess counts against the code
+ * itself and the code is discarded after MAX_CODE_ATTEMPTS — the rate limits
+ * alone would still allow hundreds of guesses over a day, which is a real
+ * chance at six digits.
+ */
+router.post('/auth/verify', verifyLimiter, verifyPhoneLimiter, wrap(async (req, res) => {
+  const variants = phoneVariants(req.body?.phone || '');
+  const code = String(req.body?.code || '').replace(/\D/g, '');
+  if (!variants.length || !code) return res.status(400).json({ error: 'Phone and code are required' });
+
+  const wrong = { error: 'That code is not right, or it has expired. Check it, or ask for a new one.' };
+
+  const record = await Otp.findOne({
+    phone: { $in: variants }, purpose: 'nanny_login', consumed: false,
+  }).sort({ createdAt: -1 });
+  if (!record || new Date(record.expiresAt) < new Date()) return res.status(401).json(wrong);
+
+  if (!sameCode(record.code, code)) {
+    record.attempts = (record.attempts || 0) + 1;
+    if (record.attempts >= MAX_CODE_ATTEMPTS) record.consumed = true;
+    await record.save();
+    return res.status(401).json(wrong);
   }
 
-  const nanny = await User.findOne({ role: USER_ROLE.NANNY, phone });
-  if (!nanny) return res.status(401).json({ error: 'Account not found' });
+  // Burned atomically before anything else, so one code cannot be raced into
+  // two sessions.
+  const burned = await Otp.updateOne(
+    { _id: record._id, consumed: false },
+    { $set: { consumed: true } },
+  );
+  if (!burned.modifiedCount) return res.status(401).json(wrong);
 
-  record.consumed = true;
-  await record.save();
+  const nanny = await User.findOne({ role: USER_ROLE.NANNY, phone: record.phone });
+  if (!nanny) return res.status(401).json(wrong);
+  if (nanny.blocked || nanny.nannyStatus === NANNY_STATUS.SUSPENDED) {
+    return res.status(403).json({ error: 'Your account is on hold. Please message us on WhatsApp.' });
+  }
 
   nanny.lastSeenAt = new Date();
   await nanny.save();
@@ -440,37 +487,90 @@ router.post('/emergency-availability', wrap(async (req, res) => {
  * Bookings
  * ------------------------------------------------------------------ */
 
-const bookingSummary = (b) => ({
-  id: b._id,
-  bookingNumber: b.bookingNumber,
-  status: b.status,
-  subStatus: b.subStatus,
-  family: b.family?.fullName,
-  startDate: b.startDate,
-  endDate: b.endDate,
-  startTime: b.startTime,
-  hoursPerDay: b.hoursPerDay,
-  days: (b.serviceDays || []).length,
-  address: b.address,
-  children: b.children,
-  isEmergency: b.isEmergency,
-  emergencySurcharge: b.emergencySurcharge,
-  otherInstructions: b.otherInstructions,
-  // What she earns, which is not what the family pays.
-  hourlyRate: b.hourlyRate,
-  totalAmount: b.totalAmount,
-});
+/**
+ * What she earns on a booking: her own rate on every day not cancelled.
+ *
+ * The app labels `totalAmount` "What you earn", and it used to be sent the
+ * family's price — so every nanny was shown the full amount the family pays,
+ * and with it our commission. The field keeps its name so the app already in
+ * nannies' hands shows the right figure without an update.
+ */
+/*
+ * Summed from `dayWorkers`, the same per-day split payouts use. Working it out
+ * here from her rate × the day's hours showed each nanny on a two-nanny 24h
+ * booking the whole day's pay, when she is paid for her own shift (half), and
+ * left out the emergency bonus for the nanny who claimed the job. A day she is
+ * not working on (the other nanny's, or before she joined) counts as nothing.
+ */
+function nannyPay(b, nannyId) {
+  const rate = rateForDay(b, null, nannyId);
+  const me = String(nannyId);
+  const days = (b.serviceDays || []).filter((d) => d.status !== SERVICE_DAY_STATUS.CANCELLED);
+  return {
+    rate,
+    total: round2(days.reduce((sum, d) => {
+      const mine = dayWorkers(b, d).find((w) => String(w.nannyId) === me);
+      return sum + (mine?.base || 0);
+    }, 0)),
+  };
+}
+
+/**
+ * Is this still a job she is doing, so she still needs to know where and for whom?
+ *
+ * The past list returned cancelled bookings in full — the family's address,
+ * the map pin, every child's name, age and allergies, the free-text
+ * instructions — long after she was taken off the job or the family called it
+ * off. A nanny removed for cause kept a permanent record of where the children
+ * live. Once a booking is cancelled, or she is no longer one of its nannies,
+ * she keeps the dates and her pay for it and nothing that locates the family.
+ */
+function stillHers(b, nannyId) {
+  if (b.status === BOOKING_STATUS.CANCELLED) return false;
+  const me = String(nannyId);
+  const id = (v) => String(v?._id || v || '');
+  return id(b.nanny) === me || id(b.secondNanny) === me;
+}
+
+const bookingSummary = (b, nannyId) => {
+  const pay = nannyPay(b, nannyId);
+  const current = stillHers(b, nannyId);
+  return {
+    id: b._id,
+    bookingNumber: b.bookingNumber,
+    status: b.status,
+    subStatus: b.subStatus,
+    family: b.family?.fullName,
+    startDate: b.startDate,
+    endDate: b.endDate,
+    startTime: b.startTime,
+    hoursPerDay: b.hoursPerDay,
+    days: (b.serviceDays || []).length,
+    // Withheld, not blanked to look like missing data: the app can say why.
+    address: current ? b.address : null,
+    children: current ? b.children : [],
+    otherInstructions: current ? b.otherInstructions : undefined,
+    detailsWithheld: !current,
+    isEmergency: b.isEmergency,
+    emergencySurcharge: b.emergencySurcharge,
+    // What she earns, which is not what the family pays.
+    hourlyRate: pay.rate,
+    totalAmount: pay.total,
+  };
+};
 
 router.get('/bookings', wrap(async (req, res) => {
   const group = String(req.query.group || 'upcoming');
   const filters = {
-    upcoming: { status: BOOKING_STATUS.UPCOMING },
-    ongoing: { status: BOOKING_STATUS.ONGOING },
+    // A booking waiting on a family top-up is still her job; it is sorted into
+    // upcoming or ongoing below by whether its days have started.
+    upcoming: { status: { $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT] } },
+    ongoing: { status: { $in: [BOOKING_STATUS.ONGOING, BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT] } },
     past: { status: { $in: [BOOKING_STATUS.COMPLETED, BOOKING_STATUS.CANCELLED] } },
   };
   if (!filters[group]) return res.status(400).json({ error: 'Unknown group' });
 
-  const items = await Booking.find({
+  const found = await Booking.find({
     $or: [{ nanny: req.nanny._id }, { secondNanny: req.nanny._id }],
     ...filters[group],
   })
@@ -479,7 +579,15 @@ router.get('/bookings', wrap(async (req, res) => {
     .limit(100)
     .lean();
 
-  return res.json({ items: items.map(bookingSummary) });
+  const started = (b) => (b.serviceDays || []).some(
+    (d) => ![SERVICE_DAY_STATUS.SCHEDULED, SERVICE_DAY_STATUS.CANCELLED].includes(d.status),
+  );
+  const items = found.filter((b) => {
+    if (b.status !== BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT) return true;
+    return group === 'ongoing' ? started(b) : !started(b);
+  });
+
+  return res.json({ items: items.map((b) => bookingSummary(b, req.nanny._id)) });
 }));
 
 router.get('/bookings/:id', wrap(async (req, res) => {
@@ -491,8 +599,13 @@ router.get('/bookings/:id', wrap(async (req, res) => {
   if (!b) return res.status(404).json({ error: 'Booking not found' });
   return res.json({
     booking: {
-      ...bookingSummary(b),
-      serviceDays: b.serviceDays,
+      ...bookingSummary(b, req.nanny._id),
+      // Only what the app shows. The full day carried the family's price for
+      // it and the family's arrival and end-of-service codes — the codes the
+      // family gives her to prove she arrived and stayed.
+      serviceDays: (b.serviceDays || []).map((d) => ({
+        _id: d._id, date: d.date, startAt: d.startAt, endAt: d.endAt, status: d.status,
+      })),
       // Only her own half of the sharing state. Whether the family is sharing
       // back is theirs to know.
       liveLocation: { nannySharing: !!b.liveLocation?.nannySharing },
@@ -501,9 +614,14 @@ router.get('/bookings/:id', wrap(async (req, res) => {
 }));
 
 /** Requests waiting on her answer, with how long is left. */
+/*
+ * Matched on either seat. The second nanny on a 24h booking is asked too, but
+ * these used to look only at `nanny`, so her requests never appeared and her
+ * answer was a 404 — she could only reply over WhatsApp, if at all.
+ */
 router.get('/requests', wrap(async (req, res) => {
   const bookings = await Booking.find({
-    nanny: req.nanny._id,
+    $or: [{ nanny: req.nanny._id }, { secondNanny: req.nanny._id }],
     'nannyResponses': { $elemMatch: { nanny: req.nanny._id, outcome: 'pending' } },
   }).populate('family', 'fullName').lean();
 
@@ -512,7 +630,7 @@ router.get('/requests', wrap(async (req, res) => {
       (r) => String(r.nanny) === String(req.nanny._id) && r.outcome === 'pending',
     );
     return {
-      ...bookingSummary(b),
+      ...bookingSummary(b, req.nanny._id),
       expiresAt: pending?.expiresAt,
       minutesLeft: pending?.expiresAt
         ? Math.max(0, Math.round((new Date(pending.expiresAt) - Date.now()) / 60000))
@@ -532,7 +650,10 @@ router.get('/requests', wrap(async (req, res) => {
  */
 router.post('/requests/:id/respond', wrap(async (req, res) => {
   const accept = req.body?.accept === true;
-  const booking = await Booking.findOne({ _id: req.params.id, nanny: req.nanny._id });
+  const booking = await Booking.findOne({
+    _id: req.params.id,
+    $or: [{ nanny: req.nanny._id }, { secondNanny: req.nanny._id }],
+  });
   if (!booking) return res.status(404).json({ error: 'Booking not found' });
 
   const pending = (booking.nannyResponses || []).find(
@@ -551,31 +672,131 @@ router.post('/requests/:id/respond', wrap(async (req, res) => {
     reason: String(req.body?.reason || '').slice(0, 200),
   });
 
-  return res.json({ ok: true, ...result });
+  /**
+   * A refusal from the service is a refusal here.
+   *
+   * The result used to be spread into `{ ok: true, ...result }`, so a booking
+   * the family had already cancelled, or a job taken by someone else, came
+   * back as ok and the app showed her a confirmation for work she did not
+   * have. It also sent the whole booking document — including the family's
+   * arrival and end-of-service codes — to the app.
+   */
+  if (!result?.ok) {
+    const message = {
+      booking_closed: 'This booking has been closed or cancelled, so there is nothing to accept.',
+      no_longer_available: 'This job is no longer available — it has been filled or changed.',
+      expired: 'The time to respond has passed',
+      no_pending_request: 'This request is no longer waiting on you',
+    }[result?.reason] || 'This request could not be completed. Please check your bookings.';
+    return res.status(409).json({ ok: false, reason: result?.reason, error: message });
+  }
+
+  return res.json({
+    ok: true,
+    accepted: !!result.accepted,
+    isChange: !!result.isChange,
+    bookingId: booking._id,
+  });
 }));
 
 /* ------------------------------------------------------------------ *
  * Earnings
  * ------------------------------------------------------------------ */
 
+/**
+ * One payout, as she is allowed to see it.
+ *
+ * The whole record used to be sent: the office's internal notes, why a
+ * transfer failed, which admin released or reviewed it, and the links to the
+ * proof photos. None of that is hers to read, and an advance's `reason` is the
+ * personal detail the month-end wipe exists to remove. This is what a payslip
+ * would show, and nothing more.
+ */
+function payoutForApp(p) {
+  return {
+    id: p._id,
+    reference: p.reference,
+    amount: p.amount,
+    currency: p.currency,
+    status: p.status,
+    kind: p.kind || 'earnings',
+    scheduledFor: p.scheduledFor,
+    releasedAt: p.releasedAt,
+    bookingNumber: p.booking?.bookingNumber,
+    advanceRecovered: p.advanceRecovered || 0,
+    // Why a salary was smaller than the day's pay: our share of overtime the
+    // family paid her in cash. She needs this to check her money; the rest of
+    // the overtime breakdown is office bookkeeping.
+    overtime: p.overtime?.commissionDeducted || p.overtime?.stillOwed
+      ? {
+        commissionDeducted: p.overtime.commissionDeducted || 0,
+        stillOwed: p.overtime.stillOwed || 0,
+      }
+      : undefined,
+  };
+}
+
 router.get('/earnings', wrap(async (req, res) => {
   const [completed, payouts] = await Promise.all([
     Booking.find({
-      nanny: req.nanny._id,
+      $or: [{ nanny: req.nanny._id }, { secondNanny: req.nanny._id }],
       status: BOOKING_STATUS.COMPLETED,
-    }).select('bookingNumber totalAmount completedAt startDate').sort({ completedAt: -1 }).limit(50).lean(),
-    Payout.find({ nanny: req.nanny._id }).sort({ createdAt: -1 }).limit(50).lean(),
+    }).select('bookingNumber completedAt startDate').sort({ completedAt: -1 }).limit(50).lean(),
+    Payout.find({ nanny: req.nanny._id })
+      .populate('booking', 'bookingNumber')
+      .sort({ createdAt: -1 })
+      .lean(),
   ]);
 
-  const earned = completed.reduce((s, b) => s + (b.totalAmount || 0), 0);
-  const paid = payouts.filter((p) => p.status === 'paid').reduce((s, p) => s + (p.amount || 0), 0);
+  /**
+   * Built from her payouts, which are what she is actually owed and sent.
+   *
+   * This used to add up the family's price for each booking as "earned" and
+   * count payouts with status 'paid' as "paid" — a status that does not exist,
+   * so every nanny was shown the family's full price as owed to her and Rp 0
+   * paid, however much she had been sent.
+   */
+  const settled = new Set([PAYOUT_STATUS.COMPLETED, PAYOUT_STATUS.FINAL_DONE]);
+  const open = new Set([PAYOUT_STATUS.PENDING, PAYOUT_STATUS.PROCESSING]);
+
+  const paid = round2(payouts
+    .filter((p) => settled.has(p.status))
+    .reduce((s, p) => s + (p.amount || 0), 0));
+
+  /**
+   * An advance is counted once, as money she already has.
+   *
+   * A paid advance is in `paid` above. The wages it was drawn against are
+   * still queued at their full amount — the advance only comes off them when
+   * the salary is released — so adding the two counted the advance twice:
+   * a nanny who drew 1,000,000 early against a 3,000,000 month was shown
+   * 4,000,000 earned. Whatever of an advance is still to be recovered is
+   * taken off what is still to come, which is what she will actually receive.
+   */
+  const outstandingAdvance = round2(payouts
+    .filter((p) => p.kind === 'advance' && settled.has(p.status) && (p.advance?.outstanding || 0) > 0)
+    .reduce((s, p) => s + (p.advance.outstanding || 0), 0));
+  const queued = round2(payouts
+    .filter((p) => open.has(p.status) && p.kind !== 'advance')
+    .reduce((s, p) => s + (p.amount || 0), 0));
+  const pending = round2(Math.max(0, queued - outstandingAdvance));
+
+  const byBooking = new Map();
+  for (const p of payouts) {
+    if (!p.booking || p.status === PAYOUT_STATUS.FAILED) continue;
+    const key = String(p.booking._id || p.booking);
+    byBooking.set(key, round2((byBooking.get(key) || 0) + (p.amount || 0)));
+  }
 
   return res.json({
-    earned,
+    earned: round2(paid + pending),
     paid,
-    pending: Math.max(0, earned - paid),
-    recentBookings: completed,
-    payouts,
+    pending,
+    // Shown so the drop from "queued" to "pending" is explained, not a mystery.
+    advanceOutstanding: outstandingAdvance,
+    // `totalAmount` is her pay on the booking, under the name the app reads.
+    recentBookings: completed.map((b) => ({ ...b, totalAmount: byBooking.get(String(b._id)) || 0 })),
+    payouts: payouts.slice(0, 50).map(payoutForApp),
   });
 }));
 
@@ -631,6 +852,8 @@ router.post('/chats/:id/messages', wrap(async (req, res) => {
   if (!thread) return res.status(404).json({ error: 'Conversation not found' });
   if (thread.closed) return res.status(409).json({ error: 'This conversation is closed' });
 
+  // Same filter, same direction as the WhatsApp side: what is stored and what
+  // the family receives are both the redacted text.
   const { redactContactDetails } = await import('../utils/contactFilter.js');
   const safe = redactContactDetails(body);
 
@@ -639,14 +862,53 @@ router.post('/chats/:id/messages', wrap(async (req, res) => {
   thread.nannyActive = true;
   await thread.save();
 
+  /**
+   * Relayed, not merely notified.
+   *
+   * This used `notifyUser(...).catch(() => {})` and answered ok regardless.
+   * Two things went wrong with that. The family's WhatsApp session was left
+   * wherever it was, so their reply was read as a menu choice and never came
+   * back into this thread — from her side the family simply ignored her. And a
+   * message that never left our server showed in her app as sent. The relay
+   * moves the family into this chat (when it is safe to interrupt them) and
+   * says whether the message actually went, and that is passed back to her.
+   */
   const family = await User.findById(thread.family);
+  let delivered = { sent: false, live: false, skipped: !family };
   if (family) {
-    const { notifyUser } = await import('../services/notify.js');
+    const { relayChatMessage } = await import('../services/notify.js');
     const { nannyDisplayName } = await import('../utils/format.js');
-    await notifyUser(family, `👩 ${nannyDisplayName(req.nanny)}:\n${safe.text}`).catch(() => {});
+    try {
+      delivered = await relayChatMessage(family, `👩 ${nannyDisplayName(req.nanny)}:\n${safe.text}`, {
+        threadId: thread._id,
+      });
+    } catch (err) {
+      console.error(`[nanny-app] chat relay failed for thread ${thread._id}: ${err.message}`);
+      delivered = { sent: false, live: false, error: err.message };
+    }
   }
 
-  return res.json({ ok: true, redacted: safe.redacted });
+  const sent = !delivered.skipped && delivered.sent !== false;
+  if (!sent) {
+    // Saved in the thread, so she must not resend it (that would duplicate
+    // it); she is told it has not reached them yet.
+    return res.status(502).json({
+      ok: false,
+      saved: true,
+      delivered: false,
+      redacted: safe.redacted,
+      error: 'Your message is saved, but it did not reach the family. Please try again in a moment, or message us if it keeps happening.',
+    });
+  }
+
+  return res.json({
+    ok: true,
+    delivered: true,
+    // Whether the family is in the chat right now, so their next message
+    // comes straight back here.
+    live: !!delivered.live,
+    redacted: safe.redacted,
+  });
 }));
 
 /* ------------------------------------------------------------------ *

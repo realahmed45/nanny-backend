@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { on, mainMenuFor, mainMenuState } from './engine.js';
 import { User, Session, Otp } from '../models/index.js';
 import { USER_ROLE, NANNY_STATUS } from '../utils/constants.js';
@@ -10,7 +11,9 @@ import * as M from '../utils/messages.js';
 
 /** Six-digit email verification code. */
 export function generateOtp() {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  // From a cryptographic source: Math.random is predictable enough to guess
+  // a sign-in code from ones seen before.
+  return String(crypto.randomInt(100000, 1000000));
 }
 
 /**

@@ -1,3 +1,9 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import zlib from 'node:zlib';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import mongoose from 'mongoose';
 import ExcelJS from 'exceljs';
 import {
   User, Booking, Payment, Note, CallbackRequest, Ticket,
@@ -6,6 +12,7 @@ import { send, brandedEmail } from '../providers/email.js';
 import config from '../config/index.js';
 import { money } from '../utils/format.js';
 import { USER_ROLE } from '../utils/constants.js';
+import { encryptBuffer, encryptStream } from '../utils/backupCrypto.js';
 
 /**
  * The end-of-day backup.
@@ -15,10 +22,13 @@ import { USER_ROLE } from '../utils/constants.js';
  * booking and payment, and a file in somebody's inbox is a copy that survives
  * losing the database entirely.
  *
- * It is deliberately a plain export rather than a dump: the columns are the
- * ones a person would want if they had to rebuild from it or answer a question
- * without the dashboard. Money is written as numbers so the file can be
- * summed, and ids are included so rows can be matched back up.
+ * The spreadsheet is deliberately a plain export: the columns are the ones a
+ * person would want to answer a question without the dashboard. Money is
+ * written as numbers so the file can be summed, and ids are included so rows
+ * can be matched back up. It is not something a database can be restored
+ * from, so a full dump of every collection is written alongside it
+ * (`writeDatabaseDump` below). Both are encrypted with BACKUP_PASSWORD before
+ * they go anywhere near an email.
  */
 
 /** Ids are objects until they are strings; dates are dates until they are not. */
@@ -233,8 +243,220 @@ export async function buildBackupWorkbook() {
   return book;
 }
 
+/* ------------------------------------------------------------------ *
+ * The real database dump
+ * ------------------------------------------------------------------ */
+
 /**
- * Build today's workbook and email it.
+ * Every collection, every field, in a form that can be loaded back.
+ *
+ * The spreadsheet above is for a person to read; it is not a backup anyone
+ * could restore from — it drops most fields, every nested record (service
+ * days, payouts' proofs, chat messages, sessions) and every collection it was
+ * not written for. If the database were lost, the business would have been
+ * rebuilt by hand from a summary. This is the whole database: one JSON line
+ * per document in Extended JSON (so ObjectIds and dates come back as
+ * themselves), gzipped, and encrypted with BACKUP_PASSWORD when it is set.
+ *
+ * Restore with: node scripts/restore-backup.mjs <file> --uri <mongo> --confirm <db>
+ *
+ * Line shapes:
+ *   {"type":"meta", ...}                 first line: when, which database, versions
+ *   {"type":"doc","c":"<collection>","d":<EJSON document>}
+ *   {"type":"media","manifest":{...}}    last line: every archived media file we know of
+ */
+
+/** Every object in a bucket, for the manifest. Capped so a huge bucket cannot stall the job. */
+async function listBucket({ bucket, endpoint, accessKeyId, secretAccessKey, region, prefix = '' }, cap = 200_000) {
+  if (!(bucket && endpoint && accessKeyId && secretAccessKey)) return null;
+  const { S3Client, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
+  const client = new S3Client({
+    region: region || 'auto', endpoint, forcePathStyle: true, credentials: { accessKeyId, secretAccessKey },
+  });
+  const objects = [];
+  let token;
+  do {
+    // eslint-disable-next-line no-await-in-loop
+    const out = await client.send(new ListObjectsV2Command({
+      Bucket: bucket, Prefix: prefix || undefined, ContinuationToken: token,
+    }));
+    for (const o of out.Contents || []) objects.push({ key: o.Key, size: o.Size, modified: o.LastModified });
+    token = out.IsTruncated ? out.NextContinuationToken : undefined;
+  } while (token && objects.length < cap);
+  return { bucket, prefix, count: objects.length, truncated: Boolean(token), objects };
+}
+
+/** Files in one local folder (not recursive: the archive is flat). */
+async function listDir(dir) {
+  try {
+    const names = await fs.promises.readdir(dir);
+    const files = [];
+    for (const name of names) {
+      if (name.endsWith('.part')) continue;
+      // eslint-disable-next-line no-await-in-loop
+      const st = await fs.promises.stat(path.join(dir, name)).catch(() => null);
+      if (st?.isFile()) files.push({ name, size: st.size, modified: st.mtime });
+    }
+    return { dir, count: files.length, files };
+  } catch {
+    return { dir, count: 0, files: [], missing: true };
+  }
+}
+
+/**
+ * What media exists and where, so a restore knows what the URLs in the
+ * database should point at — and a missing file can be noticed rather than
+ * discovered by a family looking at a broken photo.
+ */
+export async function buildMediaManifest() {
+  const m = config.media;
+  const safe = (p) => p.catch((err) => ({ error: err.message }));
+  const [publicLocal, privateLocal, legacyPrivate, publicBucket, privateBucket] = await Promise.all([
+    listDir(m.dir),
+    listDir(m.privateDir),
+    listDir(path.join(m.dir, 'private')),
+    safe(listBucket(m.s3 || {})),
+    safe(listBucket(m.privateS3 || {})),
+  ]);
+  return {
+    generatedAt: new Date().toISOString(),
+    publicLocal,
+    privateLocal,
+    legacyPrivate,
+    publicBucket,
+    privateBucket,
+  };
+}
+
+/** Keep the newest `keep` dumps in the folder and delete the rest. */
+async function pruneDumps(dir, keep) {
+  const names = (await fs.promises.readdir(dir).catch(() => []))
+    .filter((n) => /^nip-db-.*\.jsonl\.gz(\.enc)?$/.test(n))
+    .sort();
+  const stale = names.slice(0, Math.max(0, names.length - keep));
+  await Promise.all(stale.map((n) => fs.promises.unlink(path.join(dir, n)).catch(() => {})));
+}
+
+/**
+ * Write the dump to BACKUP_DIR, and copy it to the private bucket if there is one.
+ *
+ * Streamed collection by collection, so a large database is never held in
+ * memory whole. Returns where it went and how much is in it.
+ */
+export async function writeDatabaseDump({
+  dir = config.backup.dir,
+  password = config.backup.password,
+  db = mongoose.connection.db,
+} = {}) {
+  if (!db) throw new Error('database is not connected');
+  const { EJSON } = mongoose.mongo.BSON;
+
+  await fs.promises.mkdir(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const encrypted = Boolean(password);
+  const filename = `nip-db-${stamp}.jsonl.gz${encrypted ? '.enc' : ''}`;
+  const dest = path.join(dir, filename);
+
+  const collections = (await db.listCollections({}, { nameOnly: true }).toArray())
+    .map((c) => c.name)
+    .filter((n) => !n.startsWith('system.'))
+    .sort();
+
+  const counts = {};
+  const manifest = await buildMediaManifest().catch((err) => ({ error: err.message }));
+
+  async function* lines() {
+    yield `${JSON.stringify({
+      type: 'meta',
+      format: 'nip-db-dump/1',
+      createdAt: new Date().toISOString(),
+      database: db.databaseName,
+      collections,
+    })}\n`;
+    for (const name of collections) {
+      counts[name] = 0;
+      const cursor = db.collection(name).find({}, { batchSize: 500 });
+      for await (const doc of cursor) {
+        counts[name] += 1;
+        yield `${JSON.stringify({ type: 'doc', c: name, d: EJSON.serialize(doc, { relaxed: false }) })}\n`;
+      }
+    }
+    yield `${JSON.stringify({ type: 'media', manifest })}\n`;
+  }
+
+  const tmp = `${dest}.part`;
+  const stages = [Readable.from(lines()), zlib.createGzip({ level: 6 })];
+  if (encrypted) stages.push(encryptStream(password));
+  stages.push(fs.createWriteStream(tmp));
+  await pipeline(...stages);
+  await fs.promises.rename(tmp, dest);
+
+  const { size } = await fs.promises.stat(dest);
+  const documents = Object.values(counts).reduce((a, b) => a + b, 0);
+  if (!documents) throw new Error('database dump contains no documents — refusing to call this a backup');
+
+  // A copy off this machine, when there is somewhere private to put it. The
+  // local disk on most hosts is wiped on deploy, so the local file alone is
+  // only good until the next release.
+  let uploaded = null;
+  const privateStore = (await import('./privateStore.js')).default;
+  if (privateStore.isConfigured()) {
+    try {
+      uploaded = await privateStore.putRaw(`backups/${filename}`, await fs.promises.readFile(dest),
+        encrypted ? 'application/octet-stream' : 'application/gzip');
+    } catch (err) {
+      console.error(`[backup] could not upload the database dump to the private bucket: ${err.message}`);
+    }
+  } else {
+    console.warn('[backup] no private bucket configured — the database dump exists only on this server\'s disk.');
+  }
+
+  await pruneDumps(dir, Math.max(1, config.backup.keep || 14));
+
+  return {
+    path: dest,
+    filename,
+    bytes: size,
+    encrypted,
+    collections: collections.length,
+    documents,
+    counts,
+    uploaded,
+    mediaFiles: {
+      publicLocal: manifest?.publicLocal?.count ?? null,
+      privateLocal: manifest?.privateLocal?.count ?? null,
+      publicBucket: manifest?.publicBucket?.count ?? null,
+      privateBucket: manifest?.privateBucket?.count ?? null,
+    },
+  };
+}
+
+/**
+ * May customer data be emailed at all, and how?
+ *
+ * Production without BACKUP_PASSWORD is a refusal: the alternative is a file
+ * of every family's phone and address sitting readable in inboxes for years.
+ * Locally there is nothing real to protect, so it still sends (with a warning)
+ * and development does not need a password configured to work.
+ */
+function emailPolicy() {
+  const password = config.backup.password;
+  if (password) return { encrypt: true, password };
+  if (config.env === 'production') {
+    return {
+      refuse: 'BACKUP_PASSWORD is not set, so the backup was NOT emailed — it would have sent every '
+        + "customer's details unencrypted. Set BACKUP_PASSWORD and send it again.",
+    };
+  }
+  console.warn('[backup] BACKUP_PASSWORD is not set — emailing the backup UNENCRYPTED (allowed outside production only).');
+  return { encrypt: false };
+}
+
+/** Largest dump we will attach to an email; bigger ones are only stored. */
+const MAX_DUMP_ATTACHMENT = 15 * 1024 * 1024;
+
+/**
+ * Build today's workbook and database dump, store the dump, and email them.
  *
  * Returns what was sent so the scheduler can log it, and throws on failure so
  * a silent backup gap is impossible — a backup nobody knows has stopped is
@@ -242,13 +464,29 @@ export async function buildBackupWorkbook() {
  */
 export async function sendDailyBackup({ to } = {}) {
   /**
+   * The full dump first, and whatever happens to the email.
+   *
+   * A backup that only exists if the mail provider is up is not a backup. The
+   * dump is written to disk (and the private bucket) before anything is sent;
+   * if it fails the email still goes, and says so loudly.
+   */
+  let dump = null;
+  let dumpError = null;
+  try {
+    dump = await writeDatabaseDump();
+  } catch (err) {
+    dumpError = err.message;
+    console.error(`[backup] DATABASE DUMP FAILED: ${err.message}`);
+  }
+
+  /**
    * Everyone the office has listed, not one hardcoded address.
    *
    * The single address was one person's personal email. If they left, changed
    * it, or their inbox filled, every backup stopped arriving and nothing said
    * so — the one failure a backup cannot afford. `backupRecipients()` falls
-   * back to the configured address when the list is empty, so this is safe
-   * before anybody has set it up.
+   * back to BACKUP_EMAIL when the list is empty; with neither set there is
+   * nobody to send to, which is reported as a failure rather than skipped.
    */
   const { backupRecipients } = await import('./settings.js');
   const recipients = to
@@ -256,14 +494,20 @@ export async function sendDailyBackup({ to } = {}) {
     : await backupRecipients();
 
   if (!recipients.length) {
-    throw new Error('no backup recipients configured — nobody would receive it');
+    throw new Error(`no backup recipients configured — nobody would receive it${dump ? ` (the database dump was saved to ${dump.path})` : ''}`);
+  }
+
+  const policy = emailPolicy();
+  if (policy.refuse) {
+    console.error(`[backup] REFUSED TO EMAIL: ${policy.refuse}`);
+    throw new Error(`${policy.refuse}${dump ? ` The database dump was still saved to ${dump.path}.` : ''}`);
   }
 
   const book = await buildBackupWorkbook();
   const buffer = Buffer.from(await book.xlsx.writeBuffer());
 
   const stamp = new Date().toISOString().slice(0, 10);
-  const filename = `nanny-in-paradise-backup-${stamp}.xlsx`;
+  const sheetName = `nanny-in-paradise-backup-${stamp}.xlsx`;
 
   const rowsPerSheet = book.worksheets.map((s) => ({
     name: s.name,
@@ -298,6 +542,32 @@ export async function sendDailyBackup({ to } = {}) {
     throw new Error(`backup contains no rows at all (${counts}) — refusing to call this a backup`);
   }
 
+  const attachments = [policy.encrypt
+    ? { filename: `${sheetName}.enc`, content: encryptBuffer(buffer, policy.password) }
+    : { filename: sheetName, content: buffer }];
+
+  // The dump goes along when it is small enough for a mail provider, so the
+  // inbox copy is a complete backup on its own. Larger ones stay in storage.
+  let dumpNote;
+  if (dump && dump.bytes <= MAX_DUMP_ATTACHMENT && dump.encrypted === policy.encrypt) {
+    attachments.push({ filename: dump.filename, content: await fs.promises.readFile(dump.path) });
+    dumpNote = `Database dump attached (${dump.filename}, ${dump.documents} documents in ${dump.collections} collections).`;
+  } else if (dump) {
+    dumpNote = `Database dump saved as ${dump.filename} (${Math.round(dump.bytes / 1e6)}MB, ${dump.documents} documents)`
+      + `${dump.uploaded ? ' and copied to the private bucket' : ' on the server disk only'}; too large to attach.`;
+  } else {
+    dumpNote = `⚠️ The full database dump FAILED tonight: ${dumpError}. Only the spreadsheet below exists.`;
+  }
+  const mediaNote = dump?.mediaFiles
+    ? `Media files — public disk: ${dump.mediaFiles.publicLocal ?? '?'}, private disk: ${dump.mediaFiles.privateLocal ?? '?'}, `
+      + `public bucket: ${dump.mediaFiles.publicBucket ?? 'n/a'}, private bucket: ${dump.mediaFiles.privateBucket ?? 'n/a'} (full list inside the dump).`
+    : '';
+  const howToOpen = policy.encrypt
+    ? 'The attachments are encrypted. To open them: node scripts/decrypt-backup.mjs <file> (it asks for BACKUP_PASSWORD).'
+    : '';
+
+  const bodyLines = [dumpNote, mediaNote, howToOpen].filter(Boolean);
+
   /**
    * One email each, rather than one email to everybody.
    *
@@ -314,13 +584,14 @@ export async function sendDailyBackup({ to } = {}) {
       // eslint-disable-next-line no-await-in-loop
       await send({
         to: recipient,
-        subject: `Daily backup — ${stamp}`,
-        text: `Attached is the end-of-day backup for ${stamp}.\n\n${counts}`,
+        subject: `Daily backup — ${stamp}${dump ? '' : ' (DATABASE DUMP FAILED)'}`,
+        text: `Attached is the end-of-day backup for ${stamp}.\n\n${counts}\n\n${bodyLines.join('\n')}`,
         html: brandedEmail(`
           <p style="color:#333;font-size:15px;margin:0 0 8px">Attached is the end-of-day backup for <strong>${stamp}</strong>.</p>
-          <p style="color:#666;font-size:13px;margin:0">${counts.replace(/ · /g, '<br>')}</p>
+          <p style="color:#666;font-size:13px;margin:0 0 8px">${counts.replace(/ · /g, '<br>')}</p>
+          ${bodyLines.map((l) => `<p style="color:#666;font-size:13px;margin:0 0 6px">${escapeHtml(l)}</p>`).join('')}
         `),
-        attachments: [{ filename, content: buffer }],
+        attachments,
       });
       delivered.push(recipient);
     } catch (err) {
@@ -340,13 +611,22 @@ export async function sendDailyBackup({ to } = {}) {
   return {
     to: delivered,
     failed,
-    filename,
-    bytes: buffer.length,
+    filename: attachments[0].filename,
+    encrypted: policy.encrypt,
+    bytes: attachments[0].content.length,
     counts,
     rows: totalRows,
     sheets: rowsPerSheet,
+    dump: dump ? {
+      filename: dump.filename, bytes: dump.bytes, documents: dump.documents, uploaded: Boolean(dump.uploaded),
+    } : null,
+    dumpError,
   };
 }
+
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+}[c]));
 
 /**
  * A record of one order, emailed the moment it is paid for.
@@ -356,11 +636,32 @@ export async function sendDailyBackup({ to } = {}) {
  * different jobs, so two different emails: if the nightly one ever fails, the
  * per-order trail still reconstructs every booking that was actually paid.
  *
+ * Same rules as the nightly file: it goes to the backup recipients (there is
+ * no built-in personal address any more), the family's phone and address are
+ * only ever inside the encrypted attachment, and in production nothing is sent
+ * without BACKUP_PASSWORD.
+ *
  * Failure is logged, never thrown — a bookkeeping email must not be able to
  * fail a payment that has already been approved.
  */
-export async function sendOrderBackup(booking, { to = config.backup.email } = {}) {
+export async function sendOrderBackup(booking, { to } = {}) {
   if (!booking) return null;
+
+  let recipients = to ? [to].flat().filter(Boolean) : [];
+  if (!recipients.length) {
+    const { backupRecipients } = await import('./settings.js');
+    recipients = await backupRecipients().catch(() => []);
+  }
+  if (!recipients.length) {
+    console.warn(`[backup] order receipt for #${booking.bookingNumber} not sent — no backup recipients configured`);
+    return null;
+  }
+
+  const policy = emailPolicy();
+  if (policy.refuse) {
+    console.error(`[backup] order receipt for #${booking.bookingNumber} NOT emailed: ${policy.refuse}`);
+    return null;
+  }
 
   const { User } = await import('../models/index.js');
   const [family, nanny] = await Promise.all([
@@ -399,26 +700,40 @@ export async function sendOrderBackup(booking, { to = config.backup.email } = {}
   const buffer = Buffer.from(await book.xlsx.writeBuffer());
   const filename = `order-${booking.bookingNumber}.xlsx`;
 
-  await send({
-    to,
-    subject: `Order paid — #${booking.bookingNumber} — ${money(booking.totalAmount || 0)}`,
-    text: rows.map(([k, v]) => `${k}: ${v}`).join('\n'),
-    html: brandedEmail(`
-      <p style="color:#333;font-size:15px;margin:0 0 14px">
-        Payment confirmed for booking <strong>#${booking.bookingNumber}</strong>.
-      </p>
-      <table style="border-collapse:collapse;font-size:14px">
-        ${rows.map(([k, v]) => `
-          <tr>
-            <td style="padding:4px 14px 4px 0;color:#777;white-space:nowrap">${k}</td>
-            <td style="padding:4px 0;color:#111"><strong>${v}</strong></td>
-          </tr>`).join('')}
-      </table>
-    `),
-    attachments: [{ filename, content: buffer }],
-  });
+  // With encryption on, the email body carries nothing personal: the
+  // family's name, phone and address are only in the encrypted file.
+  const shown = policy.encrypt
+    ? rows.filter(([k]) => ['Booking', 'Status', 'Dates', 'Days booked', 'Total', 'Paid'].includes(k))
+    : rows;
+  const attachment = policy.encrypt
+    ? { filename: `${filename}.enc`, content: encryptBuffer(buffer, policy.password) }
+    : { filename, content: buffer };
 
-  return { to, filename, bookingNumber: booking.bookingNumber };
+  for (const recipient of recipients) {
+    // eslint-disable-next-line no-await-in-loop
+    await send({
+      to: recipient,
+      subject: `Order paid — #${booking.bookingNumber} — ${money(booking.totalAmount || 0)}`,
+      text: shown.map(([k, v]) => `${k}: ${v}`).join('\n'),
+      html: brandedEmail(`
+        <p style="color:#333;font-size:15px;margin:0 0 14px">
+          Payment confirmed for booking <strong>#${booking.bookingNumber}</strong>.
+        </p>
+        <table style="border-collapse:collapse;font-size:14px">
+          ${shown.map(([k, v]) => `
+            <tr>
+              <td style="padding:4px 14px 4px 0;color:#777;white-space:nowrap">${k}</td>
+              <td style="padding:4px 0;color:#111"><strong>${escapeHtml(v)}</strong></td>
+            </tr>`).join('')}
+        </table>
+      `),
+      attachments: [attachment],
+    });
+  }
+
+  return { to: recipients, filename: attachment.filename, bookingNumber: booking.bookingNumber };
 }
 
-export default { sendDailyBackup, buildBackupWorkbook, sendOrderBackup };
+export default {
+  sendDailyBackup, buildBackupWorkbook, sendOrderBackup, writeDatabaseDump, buildMediaManifest,
+};

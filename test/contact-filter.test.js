@@ -109,3 +109,99 @@ test('the things families and nannies actually write are left alone', () => {
     assert.equal(text, said, said);
   }
 });
+
+/**
+ * Bug #8: the detector flattened the message (spaces, dots, "and" stripped),
+ * found eight digits across separate times or dates, could not find them in
+ * the real text, and replaced the whole message with "[removed]". Each of these
+ * came out as that single word.
+ */
+test('medicine times, meal times and allergies survive intact', () => {
+  for (const said of [
+    'Give Emma her medicine at 10.00 and 14.00, she has a nut allergy',
+    'Kids eat at 12.30 and 18.30. Leo is allergic to peanuts, EpiPen in the kitchen drawer',
+    'Booking dates 12/10/2026 and 14/10/2026 please bring snacks',
+    'Kids eat at 12.30 18.30 19.00, nap 13:00 15:00',
+    'Booking 2026-10-12 to 2026-10-14, or 12 Oct to 14 Oct',
+    'Wake at 9am, lunch 12:30, medicine 10.00 14.00 18.00 22.00',
+    'Salary Rp 1.500.000 plus Rp 150.000 transport, 150,000 for food',
+    'Leo is 4, Emma is 7, we are at Jl. Melati no. 12, RT 03 RW 08',
+  ]) {
+    const { text, redacted, kinds } = redactContactDetails(said);
+    assert.equal(text, said, said);
+    assert.equal(redacted, false, said);
+    assert.deepEqual(kinds, [], said);
+  }
+});
+
+test('spelled digits are cut in place, never the whole message', () => {
+  const bare = redactContactDetails('one one one one one one one one');
+  assert.ok(bare.redacted);
+  assert.ok(bare.kinds.includes('phone number'));
+
+  const { text } = redactContactDetails(
+    'Leo has a nut allergy. My number is one one one one one one one one, call me',
+  );
+  assert.equal(text, 'Leo has a nut allergy. My number is [removed], call me');
+});
+
+test('a phone number next to a safety instruction removes only the number', () => {
+  const { text, redacted, kinds } = redactContactDetails(
+    'Give Emma her medicine at 10.00, nut allergy. Call 0812 3456 7890 if worried',
+  );
+  assert.ok(redacted);
+  assert.deepEqual(kinds, ['phone number']);
+  assert.equal(text, 'Give Emma her medicine at 10.00, nut allergy. Call [removed] if worried');
+});
+
+test('every common way of writing a phone number is caught, in place', () => {
+  for (const number of [
+    '+62 812-3456-7890',
+    '0812 3456 7890',
+    '081234567890',
+    '62812345678',
+    '0812.3456.7890',
+    '0812-3456-7890',
+    '(0812) 3456 7890',
+    '0 8 1 2 3 4 5 6 7 8 9 0',
+    'nol delapan satu dua tiga empat lima enam tujuh delapan',
+    'zero eight one two three four five six seven eight nine',
+    'zero 8 one 2 three 4 five 6 seven 8',
+  ]) {
+    const said = `Hi bu, ${number} ok? Leo has asthma`;
+    const { text, redacted, kinds } = redactContactDetails(said);
+    assert.ok(redacted, number);
+    assert.ok(kinds.includes('phone number'), number);
+    assert.equal(text, 'Hi bu, [removed] ok? Leo has asthma', number);
+  }
+});
+
+test('emails, links and handles go; the rest of the sentence stays', () => {
+  const cases = [
+    ['Leo has asthma, email me jane.doe+x@gmail.com thanks', 'email address'],
+    ['Leo has asthma, chat at wa.me/6281234567890 thanks', 'contact handle'],
+    ['Leo has asthma, chat at t.me/nannyjane thanks', 'contact handle'],
+    ['Leo has asthma, see instagram.com/nannyjane thanks', 'contact handle'],
+    ['Leo has asthma, add me @nannyjane thanks', 'contact handle'],
+    ['Leo has asthma, telegram me thanks', 'contact handle'],
+    ['Leo has asthma, ig: @nannyjane thanks', 'contact handle'],
+    ['Leo has asthma, whatsapp me thanks', 'contact handle'],
+    ['Leo has asthma, signal me thanks', 'contact handle'],
+  ];
+  for (const [said, kind] of cases) {
+    const { text, redacted, kinds } = redactContactDetails(said);
+    assert.ok(redacted, said);
+    assert.ok(kinds.includes(kind), said);
+    assert.match(text, /^Leo has asthma, /, said);
+    assert.match(text, /\[removed\]/, said);
+    assert.match(text, /thanks$/, said);
+    assert.doesNotMatch(text, /nannyjane|gmail|6281234567890/, said);
+  }
+});
+
+test('scattered spelled digits are reported but nothing is destroyed', () => {
+  const said = 'zero eight one two, by the way, three four five six seven eight';
+  const { text, kinds } = redactContactDetails(said);
+  assert.ok(kinds.includes('phone number'), 'flagged for the caller');
+  assert.match(text, /by the way/, 'the message survives');
+});

@@ -21,16 +21,39 @@ const ServiceDaySchema = new mongoose.Schema({
   arrivalConfirmedAt: Date,
   endOtp: String,
   endConfirmedAt: Date,
+  // Wrong codes entered for this day. Entry locks at five until the office
+  // unlocks it, so the codes cannot be guessed by trying them all.
+  codeAttempts: { type: Number, default: 0 },
+  // When each reminder for this day went out, so none is sent twice.
+  remindersSent: {
+    dayBefore: Date,
+    twoHours: Date,
+  },
 
   overtimeMinutes: { type: Number, default: 0 },
   overtimeHours: { type: Number, default: 0 },
-  overtimeAmount: { type: Number, default: 0 },
+  overtimeAmount: { type: Number, default: 0 },   // family rate x hours, paid to the nanny in person
+
+  /**
+   * How the overtime was settled. The family pays `overtimeAmount` to the
+   * nanny who stayed on; `overtimeNannyPay` is her share at her own rate and
+   * `overtimeCommission` is ours, taken back off her next payout.
+   */
+  overtimeNanny: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  overtimeNannyPay: { type: Number, default: 0 },
+  overtimeCommission: { type: Number, default: 0 },
+  overtimeCollectedByNanny: { type: Boolean, default: false },
 
   nanny: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // may differ after replacement
+  // Her agreed rate for this day, written when the day is completed or handed
+  // to a replacement, so a later change of nanny cannot change what she earned.
+  nannyRate: Number,
   rescheduledFrom: String,
   cancelledAt: Date,
   refundAmount: { type: Number, default: 0 },
   nannyCompensation: { type: Number, default: 0 },
+  // Of a cancelled day's price, what the family did not get back — revenue.
+  cancellationKept: { type: Number, default: 0 },
 }, { _id: true });
 
 /** Snapshot of the family's requirements; used for matching + re-matching. */
@@ -124,6 +147,12 @@ const BookingSchema = new mongoose.Schema({
   agentCallRequested: { type: Boolean, default: false },
   // Same-day request the family flagged as urgent.
   isEmergency: { type: Boolean, default: false },
+  /**
+   * The emergency bonus promised in the broadcast, per hour, and the nanny it
+   * was promised to. Paid on top of her own rate for each day she works.
+   */
+  emergencyBonusHourly: { type: Number, default: 0 },
+  emergencyBonusNanny: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 
   hourlyRate: Number,                // locked at booking time; nanny rate changes don't apply
   totalAmount: Number,
@@ -150,6 +179,13 @@ const BookingSchema = new mongoose.Schema({
   standardHourlyRate: Number,
   referralDiscountApplied: { type: Boolean, default: false },
   paidAmount: { type: Number, default: 0 },
+
+  /**
+   * Reschedule penalties: what is still owed inside a top-up, and each one
+   * once paid, so it counts as revenue in the period it arrived.
+   */
+  reschedulePenaltyDue: { type: Number, default: 0 },
+  reschedulePenalties: [{ amount: Number, paidAt: Date, _id: false }],
   additionalDue: { type: Number, default: 0 },
   refundDue: { type: Number, default: 0 },        // owed per policy
   refundedAmount: { type: Number, default: 0 },   // actually transferred back

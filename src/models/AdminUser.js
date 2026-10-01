@@ -17,6 +17,12 @@ const AdminUserSchema = new mongoose.Schema({
     default: 'admin',
   },
   active: { type: Boolean, default: true },
+  /**
+   * Sign-ins issued before this moment no longer work. Set when the password
+   * changes or the account is switched off, so a leaked login is shut out at
+   * once rather than when its 12-hour token happens to expire.
+   */
+  tokensValidAfter: Date,
   lastLoginAt: Date,
 }, { timestamps: true });
 

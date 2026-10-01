@@ -140,9 +140,17 @@ const chattingHandler = async (ctx) => {
     await import('../utils/contactFilter.js');
   const safe = redactContactDetails(text);
 
+  // A photo is copied to our own server first: WhatsApp's links expire, and the
+  // copy is what the other side is sent and what the office can look at later.
+  let photo = null;
+  if (ctx.mediaUrl) {
+    const { store } = await import('../services/mediaArchive.js');
+    photo = await store(ctx.mediaUrl, { mediaType: ctx.mediaType }).catch(() => ctx.mediaUrl);
+  }
+
   const family = await User.findById(ctx.session.user);
   thread.messages.push({
-    from: 'family', sender: family?._id, body: safe.text, mediaUrl: ctx.mediaUrl,
+    from: 'family', sender: family?._id, body: safe.text, mediaUrl: photo || undefined,
   });
   thread.lastMessageAt = new Date();
   await thread.save();
@@ -155,6 +163,7 @@ const chattingHandler = async (ctx) => {
     const { relayChatMessage } = await import('../services/notify.js');
     delivered = await relayChatMessage(nanny, `${label}:\n${safe.text}`, {
       threadId: thread._id,
+      mediaUrl: photo,
     });
   }
 
@@ -243,11 +252,25 @@ on('FF_PAY_ABORT_CONFIRM', async (ctx) => {
   return { text: M.PAY_FIRST_NOTICE(nannyDisplayName(nanny)), state: 'FF_PAY_CONFIRM' };
 });
 
+/**
+ * Copy a family's ID scan or transfer receipt onto our own server.
+ *
+ * WhatsApp's media links expire. Storing the link itself meant every family ID
+ * and every payment receipt would eventually point at nothing — and a receipt
+ * is the proof a family paid. Kept behind the dashboard login, like a nanny's
+ * ID: both carry personal and bank details. If the copy fails the original
+ * link is kept, which is no worse than before.
+ */
+async function keepPrivate(ctx) {
+  const { store } = await import('../services/mediaArchive.js');
+  return store(ctx.mediaUrl, { mediaType: ctx.mediaType, private: true });
+}
+
 const idFrontHandler = async (ctx) => {
   if (!ctx.mediaUrl) return `📎 Please attach a photo.\n\n${M.ASK_ID_FRONT}`;
   const family = await User.findById(ctx.session.user);
   family.idDocuments = (family.idDocuments || []).filter((d) => d.type !== 'id_front');
-  family.idDocuments.push({ type: 'id_front', url: ctx.mediaUrl, mediaId: ctx.mediaId });
+  family.idDocuments.push({ type: 'id_front', url: await keepPrivate(ctx), mediaId: ctx.mediaId });
   await family.save();
   return { text: M.ASK_ID_BACK, state: 'FF_ID_BACK' };
 };
@@ -258,7 +281,7 @@ const idBackHandler = async (ctx) => {
   if (!ctx.mediaUrl) return `📎 Please attach a photo.\n\n${M.ASK_ID_BACK}`;
   const family = await User.findById(ctx.session.user);
   family.idDocuments = (family.idDocuments || []).filter((d) => d.type !== 'id_back');
-  family.idDocuments.push({ type: 'id_back', url: ctx.mediaUrl, mediaId: ctx.mediaId });
+  family.idDocuments.push({ type: 'id_back', url: await keepPrivate(ctx), mediaId: ctx.mediaId });
   await family.save();
   return beginTransfer(ctx);
 };
@@ -328,7 +351,7 @@ const awaitProofHandler = async (ctx) => {
   await recordTransfer(booking, {
     amount: isAdditional ? booking.additionalDue : booking.totalAmount,
     kind: isAdditional ? 'additional' : 'booking',
-    proof: { url: ctx.mediaUrl, mediaId: ctx.mediaId, note: clean(ctx.text) },
+    proof: { url: await keepPrivate(ctx), mediaId: ctx.mediaId, note: clean(ctx.text) },
   });
 
   // A top-up must stay in PENDING_ADDITIONAL_PAYMENT. Stomping it to

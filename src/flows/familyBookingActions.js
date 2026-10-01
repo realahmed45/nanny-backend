@@ -180,6 +180,9 @@ async function startReschedule(ctx, booking) {
     ];
   }
 
+  // A fresh reschedule starts with no changes collected.
+  ctx.set('rescheduleFields', {});
+
   const info = computeReschedulePenalty(booking, booking.remainingDays().map((d) => d._id));
   const warn = info.free
     ? `You have used *${info.reschedulesUsed}* of *${info.freeLimit}* free reschedules.`
@@ -201,7 +204,7 @@ Type *Back* to cancel rescheduling.`,
   };
 }
 
-on('FB_RESCHEDULE_MENU', async (ctx) => {
+const rescheduleMenuHandler = async (ctx) => {
   const booking = await activeBooking(ctx);
   if (!booking) return { text: MY_BOOKINGS_MENU, state: 'FB_BOOKINGS_MENU' };
   const max = booking.isMultiDay ? 4 : 3;
@@ -215,7 +218,23 @@ on('FB_RESCHEDULE_MENU', async (ctx) => {
     4: { text: M.ASK_REPEAT_DAYS, state: 'FB_RESCHEDULE_DAYS' },
   };
   return routes[choice];
-});
+};
+/**
+ * What "Back" shows when it lands here: the list of things to change, with
+ * the changes chosen so far kept. Without a prompt, Back from any reschedule
+ * question dropped the family on the main menu and lost the reschedule.
+ */
+rescheduleMenuHandler.prompt = async (ctx) => {
+  const booking = await activeBooking(ctx);
+  return `What would you like to change?
+
+1. Start Date
+2. Start Time
+3. Duration per day
+${booking?.isMultiDay ? '4. Repeat Days\n' : ''}
+Type *Back* to cancel rescheduling.`;
+};
+on('FB_RESCHEDULE_MENU', rescheduleMenuHandler);
 
 function rescheduleStep(state, parse, field) {
   const handler = async (ctx) => {
@@ -223,10 +242,56 @@ function rescheduleStep(state, parse, field) {
     if (!booking) return { text: MY_BOOKINGS_MENU, state: 'FB_BOOKINGS_MENU' };
     const value = parse(ctx.text);
     if (value === null || value === undefined) return '❌ I couldn\'t read that. Please try again.';
-    ctx.set('pendingReschedule', { [field]: value });
-    return confirmReschedule(ctx, booking, { [field]: value });
+    /**
+     * Changes collect until the family confirms, so a new date and a new time
+     * are one reschedule. Each used to replace the last, so moving both cost
+     * two of the family's three free reschedules.
+     */
+    const changes = { ...(ctx.get('rescheduleFields') || {}), [field]: value };
+
+    const problem = await rescheduleProblem(booking, changes);
+    if (problem) return problem;
+
+    ctx.set('rescheduleFields', changes);
+    return confirmReschedule(ctx, booking, { ...changes });
   };
   on(state, handler);
+}
+
+/**
+ * Why a rescheduled start cannot work, or null when it can.
+ *
+ * Nothing was checked before: a booking could be moved to a date already gone
+ * or onto a day the island is closed (Nyepi), which booking creation refuses.
+ */
+async function rescheduleProblem(booking, changes) {
+  const tz = config.timezone;
+  // A time-only change on a booking already under way applies to the days
+  // still to come, so it is checked against the next of those — not the
+  // booking's first day, which is in the past and would refuse every time.
+  const nextDay = (booking.remainingDays?.() || [])[0];
+  const date = changes.startDate || nextDay?.date || booking.startDate;
+  const time = changes.startTime || booking.startTime || '00:00';
+
+  if (changes.startDate) {
+    const today = dayjs().tz(tz).format('YYYY-MM-DD');
+    if (changes.startDate < today) {
+      return `❌ ${prettyDate(changes.startDate)} has already passed. Please choose today or a later date.`;
+    }
+    const { checkDateBookable } = await import('../services/calendar.js');
+    const day = await checkDateBookable(changes.startDate).catch(() => ({ ok: true }));
+    if (!day.ok) {
+      return `❌ ${day.reason || `We are not taking bookings on ${prettyDate(changes.startDate)}.`}\n\nPlease choose another date.`;
+    }
+  }
+
+  if (changes.startDate || changes.startTime) {
+    const start = dayjs.tz(`${date} ${time}`, 'YYYY-MM-DD HH:mm', tz);
+    if (start.isValid() && start.isBefore(dayjs())) {
+      return '❌ That start time has already passed. Please choose a later time.';
+    }
+  }
+  return null;
 }
 
 rescheduleStep('FB_RESCHEDULE_DATE', (t) => parseDate(t), 'startDate');
@@ -246,7 +311,16 @@ async function confirmReschedule(ctx, booking, changes) {
     changes.endDate = changes.startDate;
   }
 
-  const { serviceDays, totalAmount } = await recalcServiceDays(booking, changes);
+  const { serviceDays, totalAmount, merged } = await recalcServiceDays(booking, changes);
+
+  // Closed days anywhere in the new dates, not only the first one. They are
+  // skipped (nobody works them, nobody pays for them), and the family is told
+  // which ones before confirming rather than finding a gap afterwards.
+  const { getCalendar, daysInRange } = await import('../services/calendar.js');
+  const calendar = await getCalendar().catch(() => null);
+  const closedDays = calendar && merged?.startDate
+    ? daysInRange(merged.startDate, merged.endDate || merged.startDate, calendar).filter((d) => d.closed)
+    : [];
   const affected = serviceDays.filter((d) => d.status === SERVICE_DAY_STATUS.SCHEDULED);
   const penaltyInfo = computeReschedulePenalty(booking, booking.remainingDays().map((d) => d._id));
   const difference = round2(totalAmount - (booking.totalAmount || 0));
@@ -259,21 +333,38 @@ async function confirmReschedule(ctx, booking, changes) {
   if (changes.startTime) lines.push(`🕘 New time: ${timeRange(changes.startTime, changes.hoursPerDay ?? booking.hoursPerDay)}`);
   if (changes.hoursPerDay) lines.push(`⏱ New duration: ${changes.hoursPerDay} hrs per day`);
   if (changes.repeatDays) lines.push(`🔄 Repeat on: ${changes.repeatDays.join(', ')}`);
+  if (closedDays.length) {
+    lines.push('', `⚠️ We are closed on ${closedDays.map((d) => prettyDate(d.date)).join(', ')}. No service is scheduled or charged on ${closedDays.length === 1 ? 'that day' : 'those days'}.`);
+  }
   lines.push('', `Service days: *${affected.length}*`, `New total: *${money(totalAmount)}*`);
   if (difference > 0) lines.push(`💰 Additional payment due: *${money(difference)}*`);
   if (difference < 0) lines.push(`💰 Refund due: *${money(Math.abs(difference))}*`);
   if (penaltyInfo.penalty > 0) lines.push(`⚠️ Reschedule penalty (${penaltyInfo.percent}%): *${money(penaltyInfo.penalty)}*`);
-  lines.push('', 'The nanny has *2 hours* to accept these changes.', '', '1. Confirm Changes', '2. Cancel');
+  lines.push('', 'The nanny has *2 hours* to accept these changes.', '', '1. Confirm Changes', '2. Cancel', '3. Change something else as well');
 
   return { text: lines.join('\n'), state: 'FB_RESCHEDULE_CONFIRM' };
 }
 
 on('FB_RESCHEDULE_CONFIRM', async (ctx) => {
-  const choice = parseChoice(ctx.text, 2);
+  const choice = parseChoice(ctx.text, 3);
   if (!choice) return M.INVALID_CHOICE;
 
   const booking = await activeBooking(ctx);
   if (!booking) return { text: MY_BOOKINGS_MENU, state: 'FB_BOOKINGS_MENU' };
+
+  // Back to the list of things to change, keeping what is already chosen.
+  if (choice === 3) {
+    return {
+      text: `What else would you like to change?
+
+1. Start Date
+2. Start Time
+3. Duration per day
+${booking.isMultiDay ? '4. Repeat Days\n' : ''}
+Your changes so far are kept. Type *Back* to cancel rescheduling.`,
+      state: 'FB_RESCHEDULE_MENU',
+    };
+  }
 
   if (choice === 2) {
     const menu = await bookingActionMenu(booking);
@@ -296,8 +387,9 @@ on('FB_RESCHEDULE_CONFIRM', async (ctx) => {
 
     const nanny = await User.findById(booking.nanny);
     const preview = { ...booking.toObject(), ...pending };
-    await notifyUser(nanny, M.nannyBookingRequest(preview, family, expiresAt, { isChange: true }));
+    await notifyUser(nanny, M.nannyBookingRequest(preview, family, expiresAt, { isChange: true, nannyId: nanny?._id }));
     await setNannyRequestState(nanny, booking);
+    await askSecondNanny(booking, family, preview);
 
     return {
       text: `✅ Your change request has been sent to ${nannyDisplayName(nanny)}.
@@ -318,6 +410,23 @@ Type *0* to return to the Main Menu.`,
     state: 'FAMILY_MAIN_MENU',
   };
 });
+
+/**
+ * The second nanny on a 24-hour booking is asked about a change too.
+ *
+ * Changes went to the first nanny only, so the second one's dates moved
+ * without her ever being asked. The change now applies once both have said
+ * yes (see `changeStillAwaited`).
+ */
+async function askSecondNanny(booking, family, preview) {
+  if (!booking.secondNanny || String(booking.secondNanny) === String(booking.nanny)) return;
+  const { expiresAt } = openNannyResponseWindow(booking, booking.secondNanny, 'booking_change');
+  await booking.save();
+  const second = await User.findById(booking.secondNanny);
+  if (!second) return;
+  await notifyUser(second, M.nannyBookingRequest(preview, family, expiresAt, { isChange: true, nannyId: second._id }));
+  await setNannyRequestState(second, booking);
+}
 
 /** Apply a change the nanny accepted (or that needed no approval). */
 export async function applyPendingChange(booking) {
@@ -356,15 +465,23 @@ export async function applyPendingChange(booking) {
     booking.rescheduleCount = (booking.rescheduleCount || 0) + 1;
 
     const difference = round2((totalAmount - previousTotal) + (penaltyInfo.penalty || 0));
+    const penalty = round2(penaltyInfo.penalty || 0);
 
     if (difference > 0) {
       booking.additionalDue = round2((booking.additionalDue || 0) + difference);
       booking.status = BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT;
-    } else if (difference < 0) {
-      await refundBooking(booking, {
-        amount: Math.abs(difference),
-        reason: 'Reschedule reduced the booking',
-      });
+      // Counted as revenue once the top-up carrying it is paid.
+      if (penalty > 0) booking.reschedulePenaltyDue = round2((booking.reschedulePenaltyDue || 0) + penalty);
+    } else {
+      // Taken out of a refund instead, so it is received now.
+      if (penalty > 0) booking.reschedulePenalties.push({ amount: penalty, paidAt: new Date() });
+      if (difference < 0) {
+        await refundBooking(booking, {
+          amount: Math.abs(difference),
+          reason: 'Reschedule reduced the booking',
+          category: 'reschedule',
+        });
+      }
     }
   } else if (change.kind === 'address') {
     booking.address = change.address;
@@ -462,8 +579,9 @@ async function sendChangeToNanny(ctx, booking, label) {
 
   const nanny = await User.findById(booking.nanny);
   const preview = { ...booking.toObject(), ...(booking.pendingChange?.address ? { address: booking.pendingChange.address } : {}) };
-  await notifyUser(nanny, M.nannyBookingRequest(preview, family, expiresAt, { isChange: true }));
+  await notifyUser(nanny, M.nannyBookingRequest(preview, family, expiresAt, { isChange: true, nannyId: nanny?._id }));
   await setNannyRequestState(nanny, booking);
+  await askSecondNanny(booking, family, preview);
 
   // The menu has to come with the confirmation, not just the state change.
   // Landing someone in FAMILY_MAIN_MENU with nothing on screen leaves them
@@ -483,11 +601,19 @@ She has *2 hours* to accept. We'll notify you as soon as she responds.`,
  * Replacement / change nanny
  * ------------------------------------------------------------------ */
 
+on('FB_NO_REPLACEMENT', async (ctx) => {
+  const choice = parseChoice(ctx.text, 2);
+  if (!choice) return '1. Cancel Booking\n2. Contact Support';
+  const booking = await activeBooking(ctx);
+  if (!booking) return { text: MY_BOOKINGS_MENU, state: 'FB_BOOKINGS_MENU' };
+  return dispatchAction(ctx, booking, choice === 1 ? 'Cancel Booking' : 'Contact Support');
+});
+
 async function showReplacementNannies(ctx, booking, { withinBudget = false } = {}) {
   // Spec: never show alternatives while the current nanny still owns the clock.
-  const { isInResponseWindow } = await import('../services/booking.js');
+  const { isInResponseWindow, pendingResponse } = await import('../services/booking.js');
   if (isInResponseWindow(booking) && booking.nanny) {
-    const pending = booking.nannyResponses.find((r) => r.outcome === 'pending');
+    const pending = pendingResponse(booking);
     const mins = Math.max(1, Math.round((new Date(pending.expiresAt) - Date.now()) / 60000));
     return `⏳ Your nanny still has *${mins} minutes* to respond.
 
@@ -496,10 +622,16 @@ We'll show you other nannies if she declines or doesn't respond in time.`;
 
   const nannies = await findReplacements(booking, { includeOverBudget: !withinBudget });
   if (!nannies.length) {
-    return `😔 We couldn't find a replacement nanny right now.
+    // Its own step, so the numbers do what they say. This used to be plain
+    // text: the reply was matched against the booking's action menu instead,
+    // where 1 showed this message again and 2 started a cancellation.
+    return {
+      text: `😔 We couldn't find a replacement nanny right now.
 
 1. Cancel Booking
-2. Contact Support`;
+2. Contact Support`,
+      state: 'FB_NO_REPLACEMENT',
+    };
   }
 
   const ids = nannies.map((n) => String(n._id));
@@ -586,7 +718,10 @@ Your booking will move to *Pending for Additional Payment* until this is paid.
 
   const family = await User.findById(booking.family);
   const { expiresAt } = openNannyResponseWindow(booking, nanny._id, 'new_booking');
-  booking.status = BOOKING_STATUS.UPCOMING;
+  // Not simply UPCOMING: a booking already under way stays ongoing, and one
+  // with a top-up still owed keeps asking for it.
+  const { restingStatus } = await import('../services/booking.js');
+  booking.status = restingStatus(booking);
   await booking.save();
 
   await notifyUser(nanny, M.nannyBookingRequest(booking, family, expiresAt));
@@ -603,6 +738,16 @@ Type *0* to return to the Main Menu.`,
 });
 
 async function startAdditionalPayment(ctx, booking) {
+  // A booking that was never paid is paid in full, not as a top-up.
+  if (booking.status === BOOKING_STATUS.PENDING_PAYMENT) {
+    ctx.set('additionalPaymentBookingId', null);
+    ctx.set('payingBookingId', String(booking._id));
+    return {
+      text: M.bankTransferInstructions(booking.totalAmount),
+      state: 'FF_AWAIT_PROOF',
+    };
+  }
+  ctx.set('payingBookingId', null);
   ctx.set('additionalPaymentBookingId', String(booking._id));
   return {
     text: M.bankTransferInstructions(booking.additionalDue),
@@ -615,7 +760,8 @@ async function startAdditionalPayment(ctx, booking) {
  * ------------------------------------------------------------------ */
 
 async function startCancellation(ctx, booking) {
-  const preview = computeCancellationRefund(booking, { cancelledBy: CANCELLED_BY.FAMILY });
+  const { cancellationQuote } = await import('../services/booking.js');
+  const preview = cancellationQuote(booking, { cancelledBy: CANCELLED_BY.FAMILY });
   const lines = ['❌ *Cancel Booking*', '', `Booking ID# ${booking.bookingNumber}`, ''];
 
   if (preview.completedAmount > 0) {
@@ -655,23 +801,20 @@ on('FB_CANCEL_CONFIRM', async (ctx) => {
       amount: breakdown.totalRefund, breakdown, reason: 'Family cancellation',
     });
   }
-  if (breakdown.totalNannyCompensation > 0 && nannyId) {
-    await queuePayout(booking, {
-      nannyId,
-      amount: breakdown.totalNannyCompensation,
-      isFinal: true,
-      notes: 'Cancellation compensation',
-    });
-  }
+  const { payCancellationCompensation } = await import('../services/booking.js');
+  const owed = await payCancellationCompensation(booking, breakdown);
 
-  if (nannyId) {
-    const nanny = await User.findById(nannyId);
+  // Every nanny still on the booking is told, with her own compensation.
+  for (const id of [nannyId, booking.secondNanny].filter(Boolean)) {
+    const nanny = await User.findById(id);
+    if (!nanny) continue;
+    const mine = owed.get(String(id)) || 0;
     await notifyUser(nanny, `🔴 *Booking Cancelled*
 
 Booking ID# ${booking.bookingNumber} has been cancelled by the family.
 
-${breakdown.totalNannyCompensation > 0
-      ? `💰 You will receive *${money(breakdown.totalNannyCompensation)}* in compensation, released on the next payout Monday.`
+${mine > 0
+      ? `💰 You will receive *${money(mine)}* in compensation, released on the next payout Monday.`
       : 'No compensation applies to this cancellation.'}`);
   }
 

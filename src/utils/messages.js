@@ -6,6 +6,7 @@ import {
   LANGUAGES, SKILLS, SUBJECTS, WEEKDAYS, MAX_FEATURED_VIDEOS, MAX_FEATURED_PHOTOS,
 } from './constants.js';
 import config from '../config/index.js';
+import { nannyBookingPay } from '../services/payments.js';
 import { languageMenu, LOCALE_CODES } from './locales.js';
 
 /** Rendered once at load: the list does not change while the process runs. */
@@ -417,8 +418,8 @@ export function emergencyBroadcast(b, { hourlyBonus = 0, surcharge = 0, family }
     '',
     '⚡ *First to accept gets the job.*',
     '',
-    'Reply *YES* to take it — we will send you the full address straight away.',
-    'Reply *NO* if you cannot.',
+    'Reply *TAKE* to take it — we will send you the full address straight away.',
+    'Reply *PASS* if you cannot.',
   );
 
   return lines.join('\n');
@@ -1062,7 +1063,7 @@ Good luck, and we wish you many successful bookings! 💛`;
 export const NANNY_REJECTED = (reason) =>
   `❌ We could not verify your profile at this time.\n\n*Reason:* ${reason || 'Documents could not be verified.'}\n\nPlease contact support or resubmit your documents.`;
 
-export function nannyBookingRequest(b, family, expiresAt, { isChange = false } = {}) {
+export function nannyBookingRequest(b, family, expiresAt, { isChange = false, nannyId = null } = {}) {
   const dayCount = (b.serviceDays || []).length;
   const dateLine = b.isMultiDay
     ? `📅 ${prettyDate(b.startDate)} – ${prettyDate(b.endDate)} (${dayCount} days)`
@@ -1086,8 +1087,11 @@ export function nannyBookingRequest(b, family, expiresAt, { isChange = false } =
   if (b.otherInstructions && b.otherInstructions !== 'None') {
     lines.push('', `*Other Instructions:*\n ${b.otherInstructions}`);
   }
-  lines.push('', '*💰 Your Earnings*', `Rate: ${money(b.hourlyRate)}/hr`);
-  lines.push(`Total: *${money(b.totalAmount)}*`);
+  // Her own rate and her own total — never the family's price, which showed
+  // every nanny our commission and a figure she would not be paid.
+  const pay = nannyBookingPay(b, nannyId || b.nanny);
+  lines.push('', '*💰 Your Earnings*', `Rate: ${money(pay.rate)}/hr`);
+  lines.push(`Total: *${money(pay.total)}*`);
   // She is the one collecting it, so she is told before she accepts.
   if (b.isEmergency && b.emergencySurcharge) {
     lines.push('', `⚡ *Emergency booking* — the family pays you an extra ${money(b.emergencySurcharge)} in cash on top of the usual transport fee when you arrive.`);

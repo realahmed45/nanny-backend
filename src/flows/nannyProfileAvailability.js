@@ -273,11 +273,21 @@ on('NP_DOC_UPLOAD', async (ctx) => {
   const type = ctx.get('uploadDocType');
   const user = await User.findById(ctx.session.user);
 
-  if (type === 'profile_photo') {
-    user.profilePhotoUrl = ctx.mediaUrl;
+  /**
+   * Archived, as at registration: the provider's link expires and is public
+   * to anyone holding it. An ID or certificate goes behind the dashboard
+   * login; a profile photo stays public because WhatsApp fetches it from us to
+   * show families. A failed copy keeps the original link.
+   */
+  const { store } = await import('../services/mediaArchive.js');
+  const isPhoto = type === 'profile_photo';
+  const url = await store(ctx.mediaUrl, { mediaType: ctx.mediaType, private: !isPhoto });
+
+  if (isPhoto) {
+    user.profilePhotoUrl = url;
   } else {
     user.documents = (user.documents || []).filter((d) => d.type !== type);
-    user.documents.push({ type, url: ctx.mediaUrl, mediaId: ctx.mediaId, verified: false });
+    user.documents.push({ type, url, mediaId: ctx.mediaId, verified: false });
   }
   await user.save();
 

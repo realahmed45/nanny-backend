@@ -34,11 +34,18 @@ test('everyone listed receives it', async () => {
   assert.deepEqual(list, ['owner@example.com', 'finance@example.com']);
 });
 
-test('an empty list falls back to the configured address', async () => {
-  // Removing everybody must not silently stop the backups.
+test('an empty list falls back to the configured address, and there is no built-in one', async () => {
+  // Removing everybody falls back to BACKUP_EMAIL. There is deliberately no
+  // hard-coded default any more: it was a personal inbox receiving every
+  // customer's details each night.
+  const config = (await import('../src/config/index.js')).default;
   const list = await recipientsAfter([]);
-  assert.equal(list.length, 1, 'one fallback address');
-  assert.ok(list[0].includes('@'));
+  if (config.backup.email) {
+    assert.equal(list.length, 1, 'one fallback address');
+    assert.ok(list[0].includes('@'));
+  } else {
+    assert.deepEqual(list, []);
+  }
 });
 
 test('the same address twice is only sent once', async () => {

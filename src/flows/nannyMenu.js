@@ -13,11 +13,16 @@ import {
   syncBookingStatus, markNannyCancelled, cancelBooking,
 } from '../services/booking.js';
 import { computeCancellationRefund, computeOvertimeHours, round2 } from '../services/policy.js';
-import { queuePayout, refundBooking, dayEarnings, rateForDay } from '../services/payments.js';
+import {
+  queuePayout, refundBooking, dayWorkers, recordOvertime, takeOvertimeCommission, nannyBookingPay,
+  rateForDay,
+} from '../services/payments.js';
 import { findReplacements } from '../services/matching.js';
 import { notifyUser } from '../services/notify.js';
 import { applyPendingChange } from './familyBookingActions.js';
-import { statusLabel, prettyDate, timeRange, money, nannyDisplayName } from '../utils/format.js';
+import {
+  statusLabel, prettyDate, timeRange, money, nannyDisplayName, firstName,
+} from '../utils/format.js';
 import config from '../config/index.js';
 import * as M from '../utils/messages.js';
 
@@ -133,10 +138,14 @@ function pendingFor(booking, nannyId) {
 }
 
 async function showPendingRequests(ctx) {
+  // Either seat: the second nanny on a 24h booking has requests too, and
+  // could only answer one if her very next message happened to be 1 or 2.
   const bookings = await Booking.find({
-    nanny: ctx.session.user,
+    $or: [{ nanny: ctx.session.user }, { secondNanny: ctx.session.user }],
     'nannyResponses.outcome': 'pending',
-    status: { $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING] },
+    status: {
+      $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING, BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT],
+    },
   });
 
   const live = bookings.filter((b) => {
@@ -154,14 +163,14 @@ async function showPendingRequests(ctx) {
     const p = pendingFor(b, ctx.session.user);
     ctx.set('requestBookingId', String(b._id));
     return {
-      text: M.nannyBookingRequest(b, family, p.expiresAt, { isChange: p.kind === 'booking_change' }),
+      text: M.nannyBookingRequest(b, family, p.expiresAt, { isChange: p.kind === 'booking_change', nannyId: ctx.session.user }),
       state: 'NANNY_BOOKING_REQUEST',
     };
   }
 
   const rows = await Promise.all(live.map(async (b, i) => {
     const family = await User.findById(b.family).select('fullName');
-    return `*${i + 1}. Booking ID #${b.bookingNumber}*\n👨‍👩‍👧 ${family?.fullName || 'Family'}\n📅 ${prettyDate(b.startDate)}\n⏰ ${timeRange(b.startTime, b.hoursPerDay)}\n💰 ${money(b.totalAmount)}`;
+    return `*${i + 1}. Booking ID #${b.bookingNumber}*\n👨‍👩‍👧 ${family?.fullName || 'Family'}\n📅 ${prettyDate(b.startDate)}\n⏰ ${timeRange(b.startTime, b.hoursPerDay)}\n💰 ${money(nannyBookingPay(b, ctx.session.user).total)}`;
   }));
 
   return {
@@ -184,7 +193,7 @@ on('NANNY_REQUEST_LIST', async (ctx) => {
   ctx.set('requestBookingId', String(booking._id));
 
   return {
-    text: M.nannyBookingRequest(booking, family, p?.expiresAt, { isChange: p?.kind === 'booking_change' }),
+    text: M.nannyBookingRequest(booking, family, p?.expiresAt, { isChange: p?.kind === 'booking_change', nannyId: ctx.session.user }),
     state: 'NANNY_BOOKING_REQUEST',
   };
 });
@@ -223,19 +232,38 @@ requestHandler.prompt = async (ctx) => {
   if (!booking) return M.NANNY_MAIN_MENU;
   const family = await User.findById(booking.family);
   const p = pendingFor(booking, ctx.session.user);
-  return M.nannyBookingRequest(booking, family, p?.expiresAt, { isChange: p?.kind === 'booking_change' });
+  return M.nannyBookingRequest(booking, family, p?.expiresAt, { isChange: p?.kind === 'booking_change', nannyId: ctx.session.user });
 };
 on('NANNY_BOOKING_REQUEST', requestHandler);
 
 async function acceptRequest(ctx, booking, pending) {
+  const nanny = await User.findById(ctx.session.user);
+
+  // The same check the app makes: still open, and she is still free.
+  const { acceptBlocker } = await import('../services/booking.js');
+  const blocker = await acceptBlocker(booking, nanny, pending);
+  if (blocker === 'closed') {
+    pending.outcome = 'declined';
+    pending.declineReason = 'Booking no longer active';
+    await booking.save();
+    return { text: `Booking #${booking.bookingNumber} is no longer active, so there is nothing to accept.\n\nType *0* to return to the Main Menu.`, state: 'NANNY_MAIN_MENU' };
+  }
+  if (blocker === 'busy') {
+    return { text: `You already have another booking at that time, so you cannot accept Booking #${booking.bookingNumber}.\n\nPlease decline it so the family can choose someone else.\n\n1. Accept\n2. Decline` };
+  }
+
   pending.outcome = 'accepted';
   pending.respondedAt = new Date();
 
   const isChange = pending.kind === 'booking_change';
   const family = await User.findById(booking.family);
-  const nanny = await User.findById(ctx.session.user);
 
-  if (isChange) {
+  const { changeStillAwaited } = await import('../services/booking.js');
+  if (isChange && changeStillAwaited(booking, pending)) {
+    // The other nanny on this 24h booking has not answered yet; the change
+    // waits for her.
+    await booking.save();
+  } else if (isChange) {
     await applyPendingChange(booking);
     await notifyUser(family, `✅ *Booking Updated*
 
@@ -244,7 +272,11 @@ ${nannyDisplayName(nanny)} has accepted your changes to Booking #${booking.booki
 ${M.bookingSummary(booking, { showId: true, nanny, paid: true, showStatus: true })}`);
   } else {
     booking.subStatus = BOOKING_SUBSTATUS.NANNY_CONFIRMED;
-    if (booking.status !== BOOKING_STATUS.ONGOING) booking.status = BOOKING_STATUS.UPCOMING;
+    // A top-up still owed keeps the booking asking for it; accepting the job
+    // does not pay it.
+    const owesTopUp = booking.status === BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT
+      && (booking.additionalDue || 0) > 0;
+    if (booking.status !== BOOKING_STATUS.ONGOING && !owesTopUp) booking.status = BOOKING_STATUS.UPCOMING;
     await booking.save();
     await notifyUser(family, `🎉 *Booking Confirmed!*
 
@@ -259,7 +291,7 @@ ${M.bookingSummary(booking, { showId: true, nanny, paid: true, showStatus: true 
 Booking ID# ${booking.bookingNumber}
 📅 ${prettyDate(booking.startDate)}${booking.isMultiDay ? ` – ${prettyDate(booking.endDate)}` : ''}
 ⏰ ${timeRange(booking.startTime, booking.hoursPerDay)}
-💰 ${money(booking.totalAmount)}
+💰 ${money(nannyBookingPay(booking, ctx.session.user).total)}
 
 The family has been notified. You'll get a reminder before the service starts.
 
@@ -301,7 +333,9 @@ on('NANNY_DECLINE_REASON', async (ctx) => {
     if (nannyId && !booking.rejectedNannies.some((id) => String(id) === String(nannyId))) {
       booking.rejectedNannies.push(nannyId);
     }
-    booking.nanny = undefined;
+    // Her seat, not the first one: on a 24h booking she may be the second nanny.
+    const { removeNannyFromBooking } = await import('../services/booking.js');
+    if (!removeNannyFromBooking(booking, nannyId)) booking.nanny = undefined;
     booking.subStatus = BOOKING_SUBSTATUS.NANNY_CANCELLED_AWAITING_REPLACEMENT;
     await booking.save();
   }
@@ -464,8 +498,16 @@ const nannyChatHandler = async (ctx) => {
     await import('../utils/contactFilter.js');
   const safe = redactContactDetails(text);
 
+  // A photo is copied to our own server first: WhatsApp's links expire, and the
+  // copy is what the other side is sent and what the office can look at later.
+  let photo = null;
+  if (ctx.mediaUrl) {
+    const { store } = await import('../services/mediaArchive.js');
+    photo = await store(ctx.mediaUrl, { mediaType: ctx.mediaType }).catch(() => ctx.mediaUrl);
+  }
+
   const nanny = await User.findById(ctx.session.user);
-  thread.messages.push({ from: 'nanny', sender: nanny?._id, body: safe.text, mediaUrl: ctx.mediaUrl });
+  thread.messages.push({ from: 'nanny', sender: nanny?._id, body: safe.text, mediaUrl: photo || undefined });
   thread.lastMessageAt = new Date();
   await thread.save();
 
@@ -475,6 +517,7 @@ const nannyChatHandler = async (ctx) => {
     const { relayChatMessage } = await import('../services/notify.js');
     delivered = await relayChatMessage(family, `👩 ${nannyDisplayName(nanny)}:\n${safe.text}`, {
       threadId: thread._id,
+      mediaUrl: photo,
     });
   }
 
@@ -503,7 +546,14 @@ on('NB_BOOKINGS_MENU', async (ctx) => {
     BOOKING_STATUS.COMPLETED, BOOKING_STATUS.CANCELLED];
   const status = statuses[choice - 1];
 
-  const bookings = await Booking.find({ nanny: ctx.session.user, status }).sort({ startDate: 1 });
+  // A booking waiting on a family top-up is listed under upcoming or ongoing,
+  // wherever its days stand; otherwise she could not reach it to check in.
+  const live = status === BOOKING_STATUS.UPCOMING || status === BOOKING_STATUS.ONGOING;
+  const found = await Booking.find({
+    $or: [{ nanny: ctx.session.user }, { secondNanny: ctx.session.user }],
+    status: live ? { $in: [status, BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT] } : status,
+  }).sort({ startDate: 1 });
+  const bookings = found.filter((b) => nannyStatus(b) === status);
   if (!bookings.length) {
     return `You have no ${status} bookings.\n\nType *Back* for My Bookings, or *0* for the Main Menu.`;
   }
@@ -513,7 +563,7 @@ on('NB_BOOKINGS_MENU', async (ctx) => {
     const dateLine = b.isMultiDay
       ? `📅  ${prettyDate(b.startDate)} – ${prettyDate(b.endDate)} (${(b.serviceDays || []).length} days)`
       : `📅  ${prettyDate(b.startDate)}`;
-    return `*${i + 1}. Booking ID #${b.bookingNumber}*\n\n👨‍👩‍👧  ${family?.fullName || 'Family'}\n${dateLine}\n⏰  ${timeRange(b.startTime, b.hoursPerDay)}\n💰  ${money(b.totalAmount)}\nStatus: ${statusLabel(b)}`;
+    return `*${i + 1}. Booking ID #${b.bookingNumber}*\n\n👨‍👩‍👧  ${family?.fullName || 'Family'}\n${dateLine}\n⏰  ${timeRange(b.startTime, b.hoursPerDay)}\n💰  ${money(nannyBookingPay(b, ctx.session.user).total)}\nStatus: ${statusLabel(b)}`;
   }));
 
   return {
@@ -536,12 +586,12 @@ on('NB_BOOKING_LIST', async (ctx) => {
   const menu = nannyBookingActionMenu(booking);
 
   return [
-    { text: nannyBookingDetail(booking, family) },
+    { text: nannyBookingDetail(booking, family, ctx.session.user) },
     { text: menu.text, state: menu.state },
   ];
 });
 
-export function nannyBookingDetail(booking, family) {
+export function nannyBookingDetail(booking, family, nannyId = null) {
   const dateLine = booking.isMultiDay
     ? `📅 ${prettyDate(booking.startDate)} – ${prettyDate(booking.endDate)} (${(booking.serviceDays || []).length} days)`
     : `📅 ${prettyDate(booking.startDate)}`;
@@ -568,14 +618,31 @@ export function nannyBookingDetail(booking, family) {
     });
   }
   if (booking.otherInstructions) lines.push('', `*Other Instructions:*\n ${booking.otherInstructions}`);
-  lines.push('', '*💰 Your Earnings*', `Rate: ${money(booking.hourlyRate)}/hr`, `Total: *${money(booking.totalAmount)}*`);
+  const pay = nannyBookingPay(booking, nannyId || booking.nanny);
+  lines.push('', '*💰 Your Earnings*', `Rate: ${money(pay.rate)}/hr`, `Total: *${money(pay.total)}*`);
   lines.push('', `Status: ${statusLabel(booking)}`);
   return lines.join('\n');
 }
 
+/**
+ * The status a nanny should see a booking as.
+ *
+ * A booking waiting on a family top-up is still a job she is working: its days
+ * run and she has to check in and out of them. The top-up is between us and
+ * the family, so to her it reads as upcoming or ongoing like any other.
+ */
+export function nannyStatus(booking) {
+  if (booking.status !== BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT) return booking.status;
+  const started = (booking.serviceDays || []).some((d) => ![
+    SERVICE_DAY_STATUS.SCHEDULED, SERVICE_DAY_STATUS.CANCELLED,
+  ].includes(d.status));
+  return started ? BOOKING_STATUS.ONGOING : BOOKING_STATUS.UPCOMING;
+}
+
 export function nannyBookingActionMenu(booking) {
   const opts = [];
-  if (booking.status === BOOKING_STATUS.ONGOING) {
+  const status = nannyStatus(booking);
+  if (status === BOOKING_STATUS.ONGOING) {
     const sub = booking.subStatus;
     if (sub === BOOKING_SUBSTATUS.AWAITING_ARRIVAL) opts.push('Confirm My Arrival (enter code)');
     if (sub === BOOKING_SUBSTATUS.ARRIVAL_CONFIRMED || sub === BOOKING_SUBSTATUS.AWAITING_END_OF_SERVICE) {
@@ -586,7 +653,7 @@ export function nannyBookingActionMenu(booking) {
     opts.push('Report an Issue', 'Request Cancellation');
     return { text: menuText(opts), state: 'NB_ACTION_ONGOING' };
   }
-  if (booking.status === BOOKING_STATUS.UPCOMING) {
+  if (status === BOOKING_STATUS.UPCOMING) {
     opts.push('Message Family', 'View Family Details', 'Report an Issue', 'Request Cancellation');
     return { text: menuText(opts), state: 'NB_ACTION_UPCOMING' };
   }
@@ -640,7 +707,7 @@ async function dispatchNannyAction(ctx, booking, label) {
     case 'View Family Details': {
       const family = await User.findById(booking.family);
       const menu = nannyBookingActionMenu(booking);
-      return [{ text: nannyBookingDetail(booking, family) }, { text: menu.text, state: menu.state }];
+      return [{ text: nannyBookingDetail(booking, family, ctx.session.user) }, { text: menu.text, state: menu.state }];
     }
     case 'Share My Live Location':
       booking.liveLocation = { ...(booking.liveLocation || {}), nannySharing: true, updatedAt: new Date() };
@@ -670,16 +737,54 @@ async function dispatchNannyAction(ctx, booking, label) {
  * Arrival / end-of-service confirmation
  * ------------------------------------------------------------------ */
 
+/** How many wrong codes a day allows before entry locks. */
+const MAX_CODE_ATTEMPTS = 5;
+
+/**
+ * A wrong code was entered: count it, and lock and alert the office at five.
+ * Returns the message to send her.
+ */
+async function wrongCode(ctx, booking, day, which) {
+  day.codeAttempts = (day.codeAttempts || 0) + 1;
+  booking.markModified('serviceDays');
+  await booking.save();
+
+  if (day.codeAttempts >= MAX_CODE_ATTEMPTS) {
+    const ticketNumber = `T-${await nextSequence('ticket', 1000)}`;
+    await Ticket.create({
+      ticketNumber,
+      raisedBy: ctx.session.user,
+      raisedByRole: 'nanny',
+      booking: booking._id,
+      category: TICKET_CATEGORY.BOOKING,
+      subject: `Code entry locked on Booking #${booking.bookingNumber}`,
+      description: `${MAX_CODE_ATTEMPTS} wrong ${which} codes were entered for ${day.date}. `
+        + 'Check with the family and the nanny before unlocking.',
+    });
+    return `🔒 Too many wrong codes. Code entry for this booking is locked and our team has been alerted (ticket ${ticketNumber}). They will contact you shortly.`;
+  }
+  const left = MAX_CODE_ATTEMPTS - day.codeAttempts;
+  return `❌ That code is incorrect. Please ask the family for the ${which} code. (${left} ${left === 1 ? 'try' : 'tries'} left)`;
+}
+
 on('NB_ENTER_ARRIVAL_CODE', async (ctx) => {
   const code = parseServiceCode(ctx.text);
-  if (!code) return '❌ That code doesn\'t look right. It should look like *A123*.';
+  if (!code) return '❌ That code doesn\'t look right. It is the 6-digit code the family received.';
 
   const booking = await Booking.findById(ctx.get('activeBookingId'));
   if (!booking) return { text: NANNY_BOOKINGS_MENU, state: 'NB_BOOKINGS_MENU' };
 
   const day = booking.currentDay();
-  if (!day) return 'There is no service scheduled right now.';
-  if (day.arrivalOtp !== code) return '❌ That code is incorrect. Please ask the family for the ARRIVAL code.';
+  // Only a day actually waiting for her arrival — or about to start, so a
+  // nanny who arrives a little early can still check in.
+  const startsSoon = day?.status === SERVICE_DAY_STATUS.SCHEDULED
+    && new Date(day.startAt) - Date.now() <= 2 * 3600e3;
+  if (!day || (day.status !== SERVICE_DAY_STATUS.AWAITING_ARRIVAL && !startsSoon)) {
+    return 'There is no service waiting for your arrival right now.';
+  }
+  if ((day.codeAttempts || 0) >= MAX_CODE_ATTEMPTS) return '🔒 Code entry for this booking is locked. Our team will contact you.';
+  if (day.arrivalOtp !== code) return wrongCode(ctx, booking, day, 'ARRIVAL');
+  day.codeAttempts = 0;
 
   day.status = SERVICE_DAY_STATUS.ARRIVAL_CONFIRMED;
   day.arrivalConfirmedAt = new Date();
@@ -705,14 +810,19 @@ ${nannyDisplayName(nanny)} has arrived and her service has started.
 
 on('NB_ENTER_END_CODE', async (ctx) => {
   const code = parseServiceCode(ctx.text);
-  if (!code) return '❌ That code doesn\'t look right. It should look like *A123*.';
+  if (!code) return '❌ That code doesn\'t look right. It is the 6-digit code the family received.';
 
   const booking = await Booking.findById(ctx.get('activeBookingId'));
   if (!booking) return { text: NANNY_BOOKINGS_MENU, state: 'NB_BOOKINGS_MENU' };
 
   const day = booking.currentDay();
-  if (!day) return 'There is no service in progress right now.';
-  if (day.endOtp !== code) return '❌ That code is incorrect. Please ask the family for the END-OF-SERVICE code.';
+  // Only a day she has actually arrived for.
+  if (!day || ![SERVICE_DAY_STATUS.ARRIVAL_CONFIRMED, SERVICE_DAY_STATUS.AWAITING_END_OF_SERVICE].includes(day.status)) {
+    return 'There is no service in progress right now.';
+  }
+  if ((day.codeAttempts || 0) >= MAX_CODE_ATTEMPTS) return '🔒 Code entry for this booking is locked. Our team will contact you.';
+  if (day.endOtp !== code) return wrongCode(ctx, booking, day, 'END-OF-SERVICE');
+  day.codeAttempts = 0;
 
   return completeServiceDay(ctx, booking, day);
 });
@@ -723,13 +833,41 @@ export async function completeServiceDay(ctx, booking, day) {
   day.status = SERVICE_DAY_STATUS.COMPLETED;
   day.endConfirmedAt = now;
 
-  // Overtime: anything past the scheduled end, rounded per the spec.
+  // Who worked it and at what rate, written now. Unstamped days were later
+  // credited to whoever held the booking — a replacement got the credit for
+  // days her predecessor had worked.
+  if (!day.nanny && booking.nanny) day.nanny = booking.nanny;
+  if (!day.nannyRate) day.nannyRate = rateForDay(booking, day, day.nanny) || undefined;
+
+  // Whoever closes the day is the one who stayed on, so any overtime is hers.
+  // On a 24h booking that can be either nanny; anyone else falls back to the
+  // booking's own nanny rather than being paid for a booking she is not on.
+  const onBooking = [day.nanny || booking.nanny, booking.secondNanny]
+    .filter(Boolean).map(String);
+  const closer = onBooking.includes(String(ctx.session.user))
+    ? String(ctx.session.user)
+    : onBooking[0];
+
+  // Overtime: anything past the scheduled end, rounded per the spec. The
+  // family pays it to her in person; our commission on it is taken off her
+  // payout below.
   const extraMinutes = Math.max(0, Math.round((now - new Date(day.endAt)) / 60000));
+  let overtimeHeld = false;
   if (extraMinutes >= 15) {
     const hours = computeOvertimeHours(extraMinutes);
     day.overtimeMinutes = extraMinutes;
-    day.overtimeHours = hours;
-    day.overtimeAmount = round2(hours * (booking.hourlyRate || 0));
+
+    /**
+     * Only a plausible overrun is charged automatically.
+     *
+     * Overtime is measured from when the end code is typed, and the family is
+     * asked to pay it in cash on the spot. A code forgotten until the next
+     * morning read as sixteen hours of overtime and a demand for over a
+     * million rupiah. Anything past the limit is left for the office to
+     * confirm rather than billed.
+     */
+    if (hours > config.maxAutoOvertimeHours) overtimeHeld = true;
+    else if (hours > 0) recordOvertime(booking, day, closer, hours);
   }
 
   booking.markModified('serviceDays');
@@ -741,29 +879,70 @@ export async function completeServiceDay(ctx, booking, day) {
   );
   const isFinal = remaining.length === 0;
 
-  await queuePayout(booking, {
-    nannyId: booking.nanny,
-    // Her own rate, not whichever nanny the booking lists first: on a 24h
-    // booking both cover the same days, so the day cannot say who worked it.
-    amount: dayEarnings(booking, day, rateForDay(booking, day, booking.nanny)),
-    serviceDayIds: [day._id],
-    isFinal,
-    notes: `Service on ${day.date}`,
-  });
+  /**
+   * One payout per nanny who worked the day, each at her own rate.
+   *
+   * This used to queue a single payout to `booking.nanny`, whoever had closed
+   * the day — so on a 24h booking the second nanny was told one figure while
+   * a payout for a different figure was filed against the first nanny.
+   *
+   * The payout covers her scheduled hours only. Overtime was paid to her in
+   * person by the family, so paying it again here would pay it twice; instead
+   * our commission on it comes off, and the payout records both.
+   */
+  const settled = [];
+  for (const w of dayWorkers(booking, day)) {
+    if (!w.nannyId) continue;
+    // eslint-disable-next-line no-await-in-loop
+    const { taken, stillOwed } = await takeOvertimeCommission(w.nannyId, {
+      add: w.commission,
+      available: w.base,
+    });
+    const net = round2(w.base - taken);
+    const hadOvertime = w.commission > 0;
+
+    // eslint-disable-next-line no-await-in-loop
+    await queuePayout(booking, {
+      nannyId: w.nannyId,
+      amount: net,
+      serviceDayIds: [day._id],
+      isFinal,
+      notes: `Service on ${day.date}`,
+      overtime: (hadOvertime || taken > 0) ? {
+        hours: hadOvertime ? day.overtimeHours : 0,
+        collectedByNanny: hadOvertime ? day.overtimeAmount : 0,
+        nannyShare: w.overtimePay,
+        commission: w.commission,
+        grossPay: w.base,
+        commissionDeducted: taken,
+        stillOwed,
+      } : null,
+    });
+    settled.push({ ...w, taken, net, stillOwed });
+  }
 
   const family = await User.findById(booking.family);
   const nanny = await User.findById(booking.nanny);
+  const closerDoc = closer && closer !== String(booking.nanny)
+    ? await User.findById(closer)
+    : nanny;
+
+  // The family is asked for overtime here, at the door, because this is the
+  // only moment they are told about it — nothing else ever invoices it.
+  const familyOvertime = day.overtimeCollectedByNanny && day.overtimeAmount > 0
+    ? `\n\n⏰ *Overtime:* ${day.overtimeHours} hr past the booked time.\nPlease pay *${money(day.overtimeAmount)}* directly to ${nannyDisplayName(closerDoc)}.`
+    : '';
 
   if (isFinal) {
     await notifyUser(family, `🎉 *Booking Completed*
 
-Booking #${booking.bookingNumber} is now complete.
+Booking #${booking.bookingNumber} is now complete.${familyOvertime}
 
 Thank you for using My Nanny! ❤️
 
 Would you like to rate ${nannyDisplayName(nanny)}? Go to *My Bookings > Completed*.`);
   } else {
-    await notifyUser(family, `✅ Today's service for *${prettyDate(day.date)}* has been successfully completed.
+    await notifyUser(family, `✅ Today's service for *${prettyDate(day.date)}* has been successfully completed.${familyOvertime}
 
 *Remaining service days: ${remaining.length}*
 Your overall Booking *#${booking.bookingNumber}* is still Ongoing
@@ -771,16 +950,24 @@ Your overall Booking *#${booking.bookingNumber}* is still Ongoing
 Thank you for using My Nanny! ❤️`);
   }
 
-  const overtimeNote = day.overtimeAmount > 0
-    ? `\n⏰ Overtime: ${day.overtimeHours} hr (+${money(day.overtimeAmount)})`
-    : '';
+  // The other nanny on a 24h booking did not close the day, but she worked it
+  // and is being paid for it, so she is told what was queued for her.
+  for (const s of settled) {
+    if (s.nannyId === closer) continue;
+    // eslint-disable-next-line no-await-in-loop
+    const other = await User.findById(s.nannyId);
+    // eslint-disable-next-line no-await-in-loop
+    if (other) await notifyUser(other, payoutNote(booking, day, s));
+  }
+
+  const mine = settled.find((s) => s.nannyId === closer) || settled[0];
 
   return {
     text: `✅ *Service Completed*
 
-${prettyDate(day.date)} — ${timeRange(booking.startTime, booking.hoursPerDay)}${overtimeNote}
+${prettyDate(day.date)} — ${timeRange(booking.startTime, booking.hoursPerDay)}
 
-💰 Earnings for today: *${money(dayEarnings(booking, day, rateForDay(booking, day, ctx.session.user)))}*
+${mine ? payoutLines(day, mine) : ''}${overtimeHeld ? `\n⏰ The end code was entered ${Math.round(extraMinutes / 60)} hours after the booked end, so no overtime was charged. If you really worked that long, please contact support and the office will confirm it.\n` : ''}
 Payment will be released on the next payout Monday.
 
 ${isFinal ? '🎉 This booking is now fully complete!' : `📅 Remaining service days: *${remaining.length}*`}
@@ -788,6 +975,33 @@ ${isFinal ? '🎉 This booking is now fully complete!' : `📅 Remaining service
 Type *0* to return to the Main Menu.`,
     state: 'NANNY_MAIN_MENU',
   };
+}
+
+/** What one nanny was paid for a day, including any overtime settlement. */
+function payoutLines(day, s) {
+  const lines = [`💰 Earnings for today: *${money(s.base)}*`];
+  if (s.commission > 0) {
+    lines.push(
+      '',
+      `⏰ Overtime: ${day.overtimeHours} hr`,
+      `Please collect *${money(day.overtimeAmount)}* from the family in person.`,
+      `Your share is ${money(s.overtimePay)}. The My Nanny commission of ${money(s.commission)} comes off your payout.`,
+    );
+  }
+  if (s.taken > 0) {
+    lines.push('', `🧾 Payout after commission: *${money(s.net)}*`);
+    if (s.stillOwed > 0) lines.push(`Still to come off your next payout: ${money(s.stillOwed)}`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function payoutNote(booking, day, s) {
+  return `✅ *Service Completed* — Booking #${booking.bookingNumber}
+
+${prettyDate(day.date)}
+
+${payoutLines(day, s)}
+Payment will be released on the next payout Monday.`;
 }
 
 on('NB_SHARING_LOCATION', async (ctx) => {
@@ -896,7 +1110,7 @@ on('NB_CANCEL_CONFIRM', async (ctx) => {
   const reason = ctx.get('cancelReason', 'Nanny cancelled');
 
   // Spec: the booking enters replacement-needed rather than being cancelled.
-  await markNannyCancelled(booking, { reason });
+  await markNannyCancelled(booking, { reason, nannyId: ctx.session.user });
 
   const family = await User.findById(booking.family);
   const replacements = await findReplacements(booking);
@@ -949,7 +1163,7 @@ async function showBookingPayment(ctx, booking) {
     {
       text: `💰 *Payment details — Booking #${booking.bookingNumber}*
 
-Rate: ${money(booking.hourlyRate)}/hr
+Rate: ${money(nannyBookingPay(booking, ctx.session.user).rate)}/hr
 Service days completed: ${booking.completedDays().length}
 
 ${rows.join('\n') || 'No payouts recorded yet.'}

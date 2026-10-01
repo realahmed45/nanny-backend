@@ -436,88 +436,23 @@ test('she can withdraw something still waiting, but not something approved', asy
 });
 
 /* ------------------------------------------------------------------ *
- * Signing in — phone number only, no code
+ * Signing in — the phone number alone no longer opens the app
  * ------------------------------------------------------------------ */
 
-test('her phone number signs her in on its own', async () => {
+test('the phone-number-only sign-in is closed, and hands out nothing', async () => {
+  // Anyone who knew a nanny's number used to be signed in as her for 90 days,
+  // and a 404 told them which numbers were registered.
   await makeNanny('999100000050');
-  const res = await call('/auth/sign-in', {
-    method: 'POST', body: { phone: '999100000050' },
-  });
-  assert.equal(res.status, 200);
-  assert.ok(res.data.token);
-});
-
-test('a number written any of the usual ways finds the same person', async () => {
-  await makeNanny('6281234567890');
-
-  for (const typed of ['6281234567890', '+62 812 3456 7890', '081234567890']) {
-    const res = await call('/auth/sign-in', { method: 'POST', body: { phone: typed } });
-    assert.equal(res.status, 200, 'failed for ' + typed);
+  for (const phone of ['999100000050', '999100009999']) {
+    // eslint-disable-next-line no-await-in-loop
+    const res = await call('/auth/sign-in', { method: 'POST', body: { phone } });
+    assert.equal(res.status, 410, 'old app builds are told to update');
+    assert.equal(res.data.token, undefined);
   }
 });
 
-test('an unknown number is told so plainly', async () => {
-  const res = await call('/auth/sign-in', {
-    method: 'POST', body: { phone: '999100009999' },
-  });
-  assert.equal(res.status, 404);
-  assert.equal(res.data.token, undefined);
-});
-
-test('a blocked nanny cannot sign in', async () => {
-  const { nanny } = await makeNanny('999100000053');
-  nanny.blocked = true;
-  await nanny.save();
-
-  const res = await call('/auth/sign-in', {
-    method: 'POST', body: { phone: '999100000053' },
-  });
-  assert.equal(res.status, 403);
-  assert.equal(res.data.token, undefined);
-});
-
-test('an empty box is refused rather than signing in whoever comes first', async () => {
-  await makeNanny('999100000054');
-  const res = await call('/auth/sign-in', { method: 'POST', body: { phone: '   ' } });
-  assert.equal(res.status, 400);
-  assert.equal(res.data.token, undefined);
-});
-
-test('something far too short is refused before it reaches the lookup', async () => {
-  await makeNanny('999100000055');
-  const res = await call('/auth/sign-in', { method: 'POST', body: { phone: '123' } });
-  assert.equal(res.status, 400);
-  assert.equal(res.data.token, undefined);
-});
-
-test("a family's number does not open the nanny app", async () => {
-  const { User } = await import('../src/models/index.js');
-  const { USER_ROLE } = await import('../src/utils/constants.js');
-  await User.create({
-    role: USER_ROLE.FAMILY, phone: '999200000050', fullName: 'A Family',
-  });
-
-  const res = await call('/auth/sign-in', {
-    method: 'POST', body: { phone: '999200000050' },
-  });
-  assert.equal(res.status, 404);
-  assert.equal(res.data.token, undefined);
-});
-
-test('the token it hands back actually works', async () => {
-  await makeNanny('999100000057');
-  const signedIn = await call('/auth/sign-in', {
-    method: 'POST', body: { phone: '999100000057' },
-  });
-
-  const me = await call('/me', { token: signedIn.data.token });
-  assert.equal(me.status, 200);
-  assert.equal(me.data.nanny.phone, '999100000057');
-});
-
 /* ------------------------------------------------------------------ *
- * Signing in — the older two-step flow, still present
+ * Signing in — the code sent by WhatsApp
  * ------------------------------------------------------------------ */
 
 test('a sign-in code is sent, and the same answer comes back for an unknown number', async () => {

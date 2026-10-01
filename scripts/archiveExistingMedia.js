@@ -19,8 +19,17 @@ import config from '../src/config/index.js';
 
 const apply = process.argv.includes('--apply');
 
-/** Ours already? Then there is nothing to do. */
-const isOurs = (url) => !url || url.startsWith(config.publicBaseUrl);
+/**
+ * Ours already? Then there is nothing to do.
+ *
+ * Archived URLs are stored relative ("/media/…", "/media-private/…"), so a
+ * check against PUBLIC_BASE_URL alone treated every one of them as remote and
+ * reported it as a failed download on each run.
+ */
+const isOurs = (url) => !url
+  || !/^https?:///i.test(url)
+  || url.startsWith(config.publicBaseUrl)
+  || (config.media.s3?.publicBase && url.startsWith(config.media.s3.publicBase));
 
 await mongoose.connect(process.env.MONGODB_URI);
 
@@ -32,14 +41,14 @@ let failed = 0;
 for (const nanny of nannies) {
   let dirty = false;
 
-  const fix = async (item, kind) => {
+  const fix = async (item, kind, opts = {}) => {
     if (isOurs(item.url)) return;
     checked += 1;
     if (!apply) {
       console.log(`  would archive ${kind}: ${item.url.slice(-40)}`);
       return;
     }
-    const stored = await store(item.url, { mediaType: kind });
+    const stored = await store(item.url, { mediaType: kind, ...opts });
     if (stored === item.url) {
       failed += 1;
       console.log(`  FAILED ${kind}: ${item.url.slice(-40)}`);
@@ -52,7 +61,12 @@ for (const nanny of nannies) {
 
   for (const v of nanny.videos || []) await fix(v, 'video');
   for (const p of nanny.photos || []) await fix(p, 'image');
-  for (const d of nanny.documents || []) await fix(d, 'image');
+  // Identity documents and certificates go behind the login. They were
+  // archived to the public folder here, which made every ID this script
+  // touched readable by anyone with the link.
+  for (const d of nanny.documents || []) {
+    await fix(d, 'image', { private: d.type !== 'profile_photo' });
+  }
 
   if (!isOurs(nanny.profilePhotoUrl)) {
     checked += 1;

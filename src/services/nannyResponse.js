@@ -33,9 +33,26 @@ export async function respondToBookingRequest({ booking, nanny, accept, reason =
   pending.respondedAt = new Date();
 
   if (accept) {
+    const { acceptBlocker } = await import('./booking.js');
+    const blocker = await acceptBlocker(booking, nanny, pending);
+    if (blocker === 'closed') {
+      pending.outcome = 'declined';
+      pending.declineReason = 'Booking no longer active';
+      await booking.save();
+      return { ok: false, reason: 'booking_closed' };
+    }
+    if (blocker === 'busy') {
+      pending.respondedAt = undefined;
+      return { ok: false, reason: 'no_longer_available' };
+    }
+
     pending.outcome = 'accepted';
 
-    if (isChange) {
+    const { changeStillAwaited } = await import('./booking.js');
+    if (isChange && changeStillAwaited(booking, pending)) {
+      // The other nanny on this 24h booking still has to answer.
+      await booking.save();
+    } else if (isChange) {
       const { applyPendingChange } = await import('../flows/familyBookingActions.js');
       await applyPendingChange(booking);
       await notifyUser(family, `✅ *Booking Updated*
@@ -65,7 +82,10 @@ ${M.bookingSummary(booking, { showId: true, nanny, paid: true, showStatus: true 
 
       booking.subStatus = BOOKING_SUBSTATUS.NANNY_CONFIRMED;
       // An ongoing booking stays ongoing; only a not-yet-started one moves up.
-      if (booking.status !== BOOKING_STATUS.ONGOING) booking.status = BOOKING_STATUS.UPCOMING;
+      // A top-up still owed keeps the booking asking for it.
+      const owesTopUp = booking.status === BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT
+        && (booking.additionalDue || 0) > 0;
+      if (booking.status !== BOOKING_STATUS.ONGOING && !owesTopUp) booking.status = BOOKING_STATUS.UPCOMING;
       await booking.save();
       await notifyUser(family, `🎉 *Booking Confirmed!*
 

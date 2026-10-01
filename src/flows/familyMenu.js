@@ -267,6 +267,15 @@ export async function bookingActionMenu(booking) {
     return { text: menuText(opts), state: 'FB_ACTION_REPLACEMENT' };
   }
 
+  // --- Not paid yet ---
+  // Only paying or cancelling. This fell through to the full "upcoming" menu,
+  // so "Change Nanny" sent a real job request for a booking nobody had paid
+  // for, and the service could run without a rupiah received.
+  if (booking.status === BOOKING_STATUS.PENDING_PAYMENT) {
+    opts.push('Pay Now', 'Cancel Booking');
+    return { text: menuText(opts), state: 'FB_ACTION_ADDITIONAL' };
+  }
+
   // --- Pending additional payment ---
   if (booking.status === BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT) {
     opts.push('Pay Now', 'Show nannies within my previous budget', 'Cancel Booking');

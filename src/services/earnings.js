@@ -3,9 +3,9 @@ import isoWeek from 'dayjs/plugin/isoWeek.js';
 import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
 import config from '../config/index.js';
-import { Booking, User } from '../models/index.js';
-import { BOOKING_STATUS, SERVICE_DAY_STATUS } from '../utils/constants.js';
-import { dayEarnings, dayCommission, rateForDay } from './payments.js';
+import { Booking, User, Payment } from '../models/index.js';
+import { BOOKING_STATUS, SERVICE_DAY_STATUS, PAYMENT_STATUS } from '../utils/constants.js';
+import { dayWorkers } from './payments.js';
 import { round2 } from './policy.js';
 
 dayjs.extend(isoWeek);
@@ -46,21 +46,80 @@ function completedDays(booking) {
  * leaving the business — a nanny compensated for a late family cancellation
  * is owed it whether or not she worked.
  */
-export function bookingEarnings(booking) {
+/**
+ * Refunds that reduce profit: manual ones, given back on work that was done.
+ *
+ * A cancellation or reschedule refund returns money for days that were never
+ * counted as revenue, so subtracting it as well lost the same money twice —
+ * a booking that made Rp 800,000 showed a loss of Rp 2,800,000.
+ */
+export const PROFIT_REFUND = {
+  $or: [
+    { refundCategory: 'manual' },
+    {
+      refundCategory: { $exists: false },
+      breakdown: null,
+      reviewNote: { $ne: 'Reschedule reduced the booking' },
+    },
+  ],
+};
+
+export function bookingEarnings(booking, { refunded = null, penalties = null } = {}) {
   const days = completedDays(booking);
 
   let charged = 0;
   let paidToNannies = 0;
+  let overtimeCollectedByNannies = 0;
+  let overtimeCommission = 0;
+  // What each nanny on the booking earned, so a two-nanny booking can be
+  // credited to both of them on the per-nanny figures.
+  const shares = new Map();
 
   for (const day of days) {
-    const rate = rateForDay(booking, day);
     charged += round2((day.amount || 0) + (day.overtimeAmount || 0));
-    paidToNannies += dayEarnings(booking, day, rate);
+
+    /**
+     * Everyone who worked the day, each at her own rate — the same answer the
+     * payouts are built from.
+     *
+     * This used to count one nanny per day at the first nanny's rate, so on a
+     * 24h booking the second nanny's whole pay was missing and profit was
+     * overstated by exactly that much.
+     *
+     * Overtime counts at her share only. The family paid the whole overtime to
+     * her in person: it is still revenue (in `charged`), what she keeps of it
+     * is paid out, and the rest is our commission, which comes off her payout.
+     */
+    for (const w of dayWorkers(booking, day)) {
+      paidToNannies += w.base + w.overtimePay;
+      shares.set(w.nannyId, round2((shares.get(w.nannyId) || 0) + w.base + w.overtimePay));
+    }
+    if (day.overtimeCollectedByNanny) {
+      overtimeCollectedByNannies += day.overtimeAmount || 0;
+      overtimeCommission += day.overtimeCommission || 0;
+    }
   }
 
   // Compensation for cancelled days: paid to her, never charged to anyone.
   const compensation = (booking.serviceDays || [])
     .reduce((sum, d) => sum + (d.nannyCompensation || 0), 0);
+
+  // What we kept of each cancelled day's price, and reschedule penalties paid:
+  // both money received that no worked day accounts for.
+  const kept = (booking.serviceDays || [])
+    .filter((d) => d.status === SERVICE_DAY_STATUS.CANCELLED)
+    .reduce((sum, d) => sum + (d.cancellationKept || 0), 0);
+  const penaltyTotal = penalties ?? (booking.reschedulePenalties || [])
+    .reduce((sum, p) => sum + (p.amount || 0), 0);
+  charged += kept + penaltyTotal;
+
+  // Credited to the nanny it is queued for, so her per-nanny figure matches
+  // what she is actually paid.
+  if (compensation > 0) {
+    const to = booking.nanny || booking.replacementOfNanny;
+    const key = to ? String(to?._id || to) : '';
+    shares.set(key, round2((shares.get(key) || 0) + compensation));
+  }
 
   charged = round2(charged);
   paidToNannies = round2(paidToNannies + compensation);
@@ -73,8 +132,14 @@ export function bookingEarnings(booking) {
     paidToNannies,
     compensation: round2(compensation),
     // Refunds already sent come off what we kept — that money went back.
-    refunded: round2(booking.refundedAmount || 0),
-    commission: round2(charged - paidToNannies - (booking.refundedAmount || 0)),
+    // A period passes in only the refunds sent inside it; see earningsSummary.
+    refunded: round2(refunded ?? booking.refundedAmount ?? 0),
+    commission: round2(charged - paidToNannies - (refunded ?? booking.refundedAmount ?? 0)),
+    // Overtime the family paid the nanny in person, and our part of it, which
+    // is recovered from her payouts rather than received from the family.
+    overtimeCollectedByNannies: round2(overtimeCollectedByNannies),
+    overtimeCommission: round2(overtimeCommission),
+    nannyShares: [...shares.entries()].map(([nannyId, earned]) => ({ nannyId, earned })),
     // Flagged rather than silently zeroed: a booking with no recorded nanny
     // rate cannot be settled, and someone has to notice.
     missingNannyRate: days.length > 0 && !booking.nannyHourlyRate,
@@ -101,16 +166,46 @@ export async function earningsSummary({ from, to } = {}) {
   const start = from ? dayjs.tz(from, tz).startOf('day') : dayjs().tz(tz).startOf('month');
   const end = to ? dayjs.tz(to, tz).endOf('day') : dayjs().tz(tz).endOf('day');
 
+  // Every status a booking with money in it can be in. Waiting on a top-up
+  // still has worked days; a cancelled booking can have worked days, kept
+  // money and compensation. Both used to drop out of revenue entirely.
   const bookings = await Booking.find({
-    status: { $in: [BOOKING_STATUS.ONGOING, BOOKING_STATUS.COMPLETED] },
-    'serviceDays.status': SERVICE_DAY_STATUS.COMPLETED,
+    status: {
+      $in: [BOOKING_STATUS.ONGOING, BOOKING_STATUS.COMPLETED,
+        BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT, BOOKING_STATUS.CANCELLED],
+    },
   })
     .populate('nanny', 'fullName nickname phone hourlyRate')
+    .populate('secondNanny', 'fullName nickname')
     .populate('family', 'fullName phone')
     .lean({ virtuals: false });
 
+  /**
+   * Refunds, by the period they were sent in.
+   *
+   * The whole booking's `refundedAmount` used to be subtracted in every period
+   * the booking had a worked day in, so one refund on a booking spanning two
+   * months was counted twice and profit understated twice. A refund now lands
+   * once: in the period the money actually went back.
+   */
+  const refundRows = await Payment.aggregate([
+    {
+      $match: {
+        kind: 'refund',
+        status: PAYMENT_STATUS.REFUNDED,
+        processedAt: { $gte: start.toDate(), $lte: end.toDate() },
+        ...PROFIT_REFUND,
+      },
+    },
+    { $group: { _id: '$booking', total: { $sum: '$amount' } } },
+  ]);
+  const refundsInPeriod = new Map(refundRows.map((r) => [String(r._id), r.total]));
+
   const rows = [];
-  const totals = { charged: 0, paidToNannies: 0, commission: 0, refunded: 0, bookings: 0, days: 0 };
+  const totals = {
+    charged: 0, paidToNannies: 0, commission: 0, refunded: 0, bookings: 0, days: 0,
+    overtimeCollectedByNannies: 0, overtimeCommission: 0,
+  };
   const unpriced = [];
 
   for (const booking of bookings) {
@@ -135,13 +230,20 @@ export async function earningsSummary({ from, to } = {}) {
      * for the period read higher than it was.
      */
     const compensated = (booking.serviceDays || []).filter(
-      (d) => (d.nannyCompensation || 0) > 0 && within(d.cancelledAt || d.startAt),
+      (d) => d.status === SERVICE_DAY_STATUS.CANCELLED
+        && ((d.nannyCompensation || 0) > 0 || (d.cancellationKept || 0) > 0)
+        && within(d.cancelledAt || d.startAt),
     );
+    const penalties = (booking.reschedulePenalties || [])
+      .filter((p) => within(p.paidAt))
+      .reduce((sum, p) => sum + (p.amount || 0), 0);
 
-    if (!inRange.length && !compensated.length) continue;
+    const refunded = refundsInPeriod.get(String(booking._id)) || 0;
+
+    if (!inRange.length && !compensated.length && !refunded && !penalties) continue;
 
     const scoped = { ...booking, serviceDays: [...inRange, ...compensated] };
-    const money = bookingEarnings(scoped);
+    const money = bookingEarnings(scoped, { refunded, penalties });
 
     if (money.missingNannyRate) {
       unpriced.push({
@@ -160,17 +262,22 @@ export async function earningsSummary({ from, to } = {}) {
       familyId: booking.family?._id ? String(booking.family._id) : null,
       nannyHourlyRate: booking.nannyHourlyRate || 0,
       familyHourlyRate: booking.hourlyRate || 0,
+      secondNannyId: booking.secondNanny?._id ? String(booking.secondNanny._id) : null,
+      secondNanny: booking.secondNanny?.fullName || booking.secondNanny?.nickname || null,
     });
 
     totals.charged += money.charged;
     totals.paidToNannies += money.paidToNannies;
     totals.commission += money.commission;
     totals.refunded += money.refunded;
+    totals.overtimeCollectedByNannies += money.overtimeCollectedByNannies;
+    totals.overtimeCommission += money.overtimeCommission;
     totals.days += money.completedDays;
     totals.bookings += 1;
   }
 
-  for (const key of ['charged', 'paidToNannies', 'commission', 'refunded']) {
+  for (const key of ['charged', 'paidToNannies', 'commission', 'refunded',
+    'overtimeCollectedByNannies', 'overtimeCommission']) {
     totals[key] = round2(totals[key]);
   }
 

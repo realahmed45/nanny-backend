@@ -118,6 +118,9 @@ test('a payout is never scheduled for a time that has already passed', async () 
       due > from,
       `work finished ${from.toDateString()} must wait, not release immediately`,
     );
-    assert.equal(due.getDay(), 1, 'payouts land on a Monday');
+    // A Monday on Bali's calendar, where the business and the release job run.
+    const { default: dayjs } = await import('dayjs');
+    const config = (await import('../src/config/index.js')).default;
+    assert.equal(dayjs(due).tz(config.timezone).day(), 1, 'payouts land on a Monday, Bali time');
   }
 });

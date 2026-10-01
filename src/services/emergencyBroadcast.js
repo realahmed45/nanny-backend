@@ -155,6 +155,27 @@ export async function broadcastEmergency(booking, { limit = 60 } = {}) {
  * than being left to find out on the doorstep.
  */
 export async function claimEmergency(bookingId, nannyId) {
+  const before = await Booking.findById(bookingId);
+  const claimer = await User.findById(nannyId).select('hourlyRate fullName nickname phone role');
+  if (!before || !claimer) return { claimed: false, reason: 'taken' };
+
+  /**
+   * Is she actually free? Asked before she wins.
+   *
+   * A claim used to skip the availability check every other path now makes,
+   * so a nanny already booked that afternoon could take the emergency as well,
+   * leaving one of the two families with nobody.
+   */
+  const { isNannyAvailable } = await import('./matching.js');
+  const free = await isNannyAvailable(claimer, {
+    serviceDays: before.remainingDays(),
+    hoursPerDay: before.hoursPerDay,
+    excludeBookingId: before._id,
+  });
+  if (!free) return { claimed: false, reason: 'busy' };
+
+  const previousNanny = before.nanny ? String(before.nanny) : null;
+
   // Atomic: whoever matches `claimedBy: null` first is the one who gets it.
   const booking = await Booking.findOneAndUpdate(
     {
@@ -170,12 +191,33 @@ export async function claimEmergency(bookingId, nannyId) {
         'emergencyBroadcast.claimedAt': new Date(),
         nanny: nannyId,
         subStatus: BOOKING_SUBSTATUS.NANNY_CONFIRMED,
+        // Her own rate, not the rate of whoever was chosen before her: she is
+        // the one doing the work. And the bonus the offer promised her, which
+        // used to be promised and never paid.
+        nannyHourlyRate: claimer.hourlyRate || before.nannyHourlyRate || 0,
+        emergencyBonusHourly: config.emergencyHourlyBonus || 0,
+        emergencyBonusNanny: nannyId,
+        // The nanny originally asked no longer owns a decision on this booking.
+        // Left open, her timer ran out later and the sweep removed the nanny
+        // who had claimed it — sometimes while she was already at the house.
+        'nannyResponses.$[open].outcome': 'declined',
+        'nannyResponses.$[open].respondedAt': new Date(),
+        'nannyResponses.$[open].declineReason': 'Taken as an emergency by another nanny',
       },
     },
-    { new: true },
+    { new: true, arrayFilters: [{ 'open.outcome': 'pending' }] },
   );
 
   if (!booking) return { claimed: false, reason: 'taken' };
+
+  // The nanny originally chosen is told plainly, so she does not accept a job
+  // that has gone or travel to it.
+  if (previousNanny && previousNanny !== String(nannyId)) {
+    const prev = await User.findById(previousNanny);
+    if (prev) {
+      await notifyUser(prev, `Booking #${booking.bookingNumber} has been taken by another nanny as an emergency, so it is no longer waiting for you. Thank you — nothing is needed from you.`).catch(() => {});
+    }
+  }
 
   const [nanny, family] = await Promise.all([
     User.findById(nannyId),

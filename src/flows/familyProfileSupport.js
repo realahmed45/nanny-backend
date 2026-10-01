@@ -495,8 +495,18 @@ on('FP_DOC_UPLOAD', async (ctx) => {
   if (!ctx.mediaUrl) return '📎 Please attach the image.';
   const type = ctx.get('uploadDocType');
   const user = await User.findById(ctx.session.user);
+  /**
+   * Archived privately, like an ID sent at registration.
+   *
+   * This stored the provider's raw link. That link is public to anyone who has
+   * it, and it expires — so a re-sent ID was both exposed and, a few weeks
+   * later, gone, leaving a verification with no evidence behind it. If the copy
+   * fails, `store` keeps the original link, which is no worse than before.
+   */
+  const { store } = await import('../services/mediaArchive.js');
+  const url = await store(ctx.mediaUrl, { mediaType: ctx.mediaType, private: true });
   user.idDocuments = (user.idDocuments || []).filter((d) => d.type !== type);
-  user.idDocuments.push({ type, url: ctx.mediaUrl, mediaId: ctx.mediaId });
+  user.idDocuments.push({ type, url, mediaId: ctx.mediaId });
   user.idVerified = false;   // needs re-review
   await user.save();
   return backToMenu('✅ Your document has been uploaded and sent for review.', PROFILE_MENU, 'FP_MENU');

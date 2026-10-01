@@ -113,8 +113,29 @@ export function mainMenuState(role) {
  */
 async function handleEmergencyReply(ctx) {
   const said = String(ctx.text || '').trim().toLowerCase();
-  const yes = /^(yes|y|yes i take it|i take it|take it|accept)[.!]?$/.test(said);
-  const no = /^(no|n|nope|cannot|can't|cant|busy)[.!]?$/.test(said);
+
+  /**
+   * Only a reply that is unmistakably meant for the offer.
+   *
+   * A plain "yes" or "no" used to be taken as an answer from any screen —
+   * including an open chat with a family, where "Yes" claimed the emergency
+   * and never reached the family, and "No" silently turned the offer down.
+   * Now the offer's own words (TAKE / PASS) work from anywhere except a chat,
+   * and a bare yes/no only counts from a resting screen such as the main menu,
+   * where it cannot be an answer to anything else.
+   */
+  const { INTERRUPTIBLE } = await import('../services/notify.js');
+  const state = ctx.session.state;
+  if (state === 'NANNY_CHATTING' || state === 'FF_CHATTING') return null;
+  const resting = !state || INTERRUPTIBLE.has(state);
+
+  const take = /^(take|take it|i take it|accept)[.!]?$/.test(said);
+  const pass = /^(pass|cannot take it|can't take it)[.!]?$/.test(said);
+  const bareYes = /^(yes|y)[.!]?$/.test(said);
+  const bareNo = /^(no|n|nope|busy)[.!]?$/.test(said);
+
+  const yes = take || (resting && bareYes);
+  const no = pass || (resting && bareNo);
   if (!yes && !no) return null;
   if (!ctx.session.user) return null;
 
@@ -142,9 +163,11 @@ async function handleEmergencyReply(ctx) {
   const result = await claimEmergency(booking._id, ctx.session.user);
   // claimEmergency sends the address itself on success, so there is nothing
   // to add here; a loser is told plainly rather than left wondering.
-  return result.claimed
-    ? { text: null }
-    : { text: M.emergencyTaken(booking) };
+  if (result.claimed) return { text: null };
+  if (result.reason === 'busy') {
+    return { text: 'You already have a booking at that time, so we cannot give you this one. Thank you for answering.' };
+  }
+  return { text: M.emergencyTaken(booking) };
 }
 
 async function handleGlobalCommand(ctx) {

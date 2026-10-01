@@ -38,6 +38,11 @@ const PaymentSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 /** Money moving out to a nanny. Spec: payouts are released every Monday. */
+PaymentSchema.add({
+  /** Refunds only: 'cancellation' | 'reschedule' | 'manual'. */
+  refundCategory: String,
+});
+
 const PayoutSchema = new mongoose.Schema({
   reference: { type: String, unique: true, index: true },
   nanny: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
@@ -119,6 +124,24 @@ const PayoutSchema = new mongoose.Schema({
    * argued about: the amount she is sent is what is left after this.
    */
   advanceRecovered: { type: Number, default: 0 },
+
+  /**
+   * Overtime on the day this payout is for, and the commission taken for it.
+   *
+   * The family pays overtime to the nanny in person, so it never passes
+   * through us; our share of it comes off her payout instead. `amount` above
+   * is already net of `commissionDeducted`. Anything the payout could not
+   * cover stays on her profile (`overtimeCommissionOwed`) for the next one.
+   */
+  overtime: {
+    hours: Number,
+    collectedByNanny: Number,     // what the family paid her for it
+    nannyShare: Number,           // hers, at her own rate
+    commission: Number,           // ours, owed back
+    grossPay: Number,             // her pay for the day before the deduction
+    commissionDeducted: Number,   // taken from this payout (may include older balance)
+    stillOwed: Number,            // left on her balance afterwards
+  },
 
   failureReason: String,
   notes: String,

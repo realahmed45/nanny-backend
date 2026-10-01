@@ -33,6 +33,21 @@ const earnings = async (n, amount, ref) => {
   return Payout.create({ reference: ref, nanny: n._id, amount, status: 'pending' });
 };
 
+/**
+ * Release a payout on a September Monday, then mark it paid — the order it
+ * happens in. Advances come off at release, so the amount marked paid is
+ * already net of them.
+ */
+async function settle(payout, opts) {
+  const { Payout } = await import('../src/models/index.js');
+  const { releaseDuePayouts, markPayoutPaid } = await import('../src/services/payments.js');
+  await Payout.updateOne({ _id: payout._id }, { $set: { scheduledFor: new Date('2026-09-21T00:00:00Z') } });
+  await releaseDuePayouts(new Date('2026-09-28T02:00:00Z'));
+  const fresh = await Payout.findById(payout._id);
+  const result = await markPayoutPaid(fresh, opts);
+  return { ...result, advance: { recovered: result.payout.advanceRecovered || 0 } };
+}
+
 test('an advance comes off the next payout', async () => {
   const { markPayoutPaid } = await import('../src/services/payments.js');
   const { Payout } = await import('../src/models/index.js');
@@ -41,7 +56,7 @@ test('an advance comes off the next payout', async () => {
   await advance(n, 300000, 'ADV-1');
   const wages = await earnings(n, 1000000, 'PO-1');
 
-  const { payout, advance: rec } = await markPayoutPaid(wages, { proof: { url: '/p.jpg' } });
+  const { payout, advance: rec } = await settle(wages, { proof: { url: '/p.jpg' } });
 
   assert.equal(rec.recovered, 300000);
   assert.equal(payout.amount, 700000, 'she is sent what is left');
@@ -60,7 +75,7 @@ test('an advance bigger than the payout carries forward', async () => {
   await advance(n, 2000000, 'ADV-2');
   const wages = await earnings(n, 1400000, 'PO-2');
 
-  const { payout } = await markPayoutPaid(wages, { proof: { url: '/p.jpg' } });
+  const { payout } = await settle(wages, { proof: { url: '/p.jpg' } });
 
   assert.equal(payout.amount, 0, 'the payout goes to zero, never negative');
 
@@ -80,7 +95,7 @@ test('advances clear oldest first', async () => {
   await advance(n, 500000, 'ADV-4');
 
   const wages = await earnings(n, 300000, 'PO-3');
-  await markPayoutPaid(wages, { proof: { url: '/p.jpg' } });
+  await settle(wages, { proof: { url: '/p.jpg' } });
 
   const older = await Payout.findById(first._id);
   const newer = await Payout.findOne({ reference: 'ADV-4' });
@@ -94,7 +109,7 @@ test('an advance never pays for itself', async () => {
   const n = await nanny();
 
   const adv = await advance(n, 500000, 'ADV-5');
-  const { payout, advance: rec } = await markPayoutPaid(adv, { proof: { url: '/p.jpg' } });
+  const { payout, advance: rec } = await settle(adv, { proof: { url: '/p.jpg' } });
 
   assert.equal(rec.recovered, 0);
   assert.equal(payout.amount, 500000, 'the advance is paid in full, not netted off itself');
@@ -105,7 +120,7 @@ test('a nanny with no advances is paid in full', async () => {
   const n = await nanny();
 
   const wages = await earnings(n, 850000, 'PO-4');
-  const { payout, advance: rec } = await markPayoutPaid(wages, { proof: { url: '/p.jpg' } });
+  const { payout, advance: rec } = await settle(wages, { proof: { url: '/p.jpg' } });
 
   assert.equal(rec.recovered, 0);
   assert.equal(payout.amount, 850000);

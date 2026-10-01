@@ -28,15 +28,24 @@ import * as M from '../utils/messages.js';
 export async function processResponseTimeouts(now = new Date()) {
   const bookings = await Booking.find({
     'nannyResponses.outcome': 'pending',
-    status: { $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING] },
+    // A booking waiting on a top-up can still have a nanny deciding on it, and
+    // her window has to close like anyone else's.
+    status: {
+      $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING, BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT],
+    },
   });
 
   const handled = [];
   for (const booking of bookings) {
     // Per booking, so one that throws does not strand the rest of the batch.
     try {
-    const pending = booking.nannyResponses.find((r) => r.outcome === 'pending');
-    if (!pending || new Date(pending.expiresAt) > now) continue;
+    // The first request that has actually run out. Taking the first pending
+    // one and stopping if it was still live meant an expired request listed
+    // after it (the other nanny on a 24h booking) waited for no reason.
+    const pending = booking.nannyResponses.find(
+      (r) => r.outcome === 'pending' && new Date(r.expiresAt) <= now,
+    );
+    if (!pending) continue;
 
     // No response in time counts as a decline.
     pending.outcome = 'timed_out';
@@ -75,16 +84,23 @@ export async function processResponseTimeouts(now = new Date()) {
       if (nannyId && !booking.rejectedNannies.some((id) => String(id) === String(nannyId))) {
         booking.rejectedNannies.push(nannyId);
       }
-      booking.nanny = undefined;
+      // Her seat only. On a 24h booking this cleared the first nanny — who had
+      // accepted — whenever the second one let her window run out.
+      const { removeNannyFromBooking } = await import('../services/booking.js');
+      if (!removeNannyFromBooking(booking, nannyId)) booking.nanny = undefined;
       booking.subStatus = BOOKING_SUBSTATUS.NANNY_CANCELLED_AWAITING_REPLACEMENT;
       await booking.save();
     }
 
     if (nannyId) {
       const nanny = await User.findById(nannyId);
-      await notifyUser(nanny, `⌛ You did not respond in time to Booking #${booking.bookingNumber}, so it has been passed to another nanny.
-
-Responding quickly helps you get more bookings.`);
+      // A change request that runs out leaves her booking exactly as it was;
+      // telling her it had been "passed to another nanny" made her think she
+      // had lost a job she still had.
+      const text = isChange
+        ? `⌛ You did not respond in time to the requested changes for Booking #${booking.bookingNumber}, so the changes were not made.\n\nThe booking stays as it was and you are still booked for it.`
+        : `⌛ You did not respond in time to Booking #${booking.bookingNumber}, so it has been passed to another nanny.\n\nResponding quickly helps you get more bookings.`;
+      await notifyUser(nanny, text);
     }
 
     await notifyFamilyOfDecline(booking, isChange);
@@ -139,7 +155,15 @@ export async function processServiceDayTransitions(now = new Date()) {
         day.status = SERVICE_DAY_STATUS.AWAITING_ARRIVAL;
         dirty = true;
 
-        if (booking.family) {
+        // Only with a nanny actually confirmed on the booking. The code used to
+        // go out for bookings awaiting a replacement or an answer, and the
+        // family waited at the door with a code for a nanny who was not coming.
+        const confirmed = booking.nanny && ![
+          BOOKING_SUBSTATUS.AWAITING_NANNY_CONFIRMATION,
+          BOOKING_SUBSTATUS.NANNY_CANCELLED_AWAITING_REPLACEMENT,
+        ].includes(booking.subStatus);
+
+        if (booking.family && confirmed) {
           await notifyUser(booking.family, `🔔 *Your service starts now*
 
 Booking #${booking.bookingNumber} — ${prettyDate(day.date)}
@@ -149,8 +173,9 @@ Booking #${booking.bookingNumber} — ${prettyDate(day.date)}
 
 Please give this code to your nanny once she arrives so we can confirm her arrival.`);
         }
-        if (booking.nanny) {
-          await notifyUser(booking.nanny, `🔔 *Your service starts now*
+        // Both nannies on a 24h booking, not only the first.
+        for (const who of confirmed ? [booking.nanny, booking.secondNanny].filter(Boolean) : []) {
+          await notifyUser(who, `🔔 *Your service starts now*
 
 Booking #${booking.bookingNumber} — ${prettyDate(day.date)}
 📍 ${booking.address?.addressLine || ''}
@@ -170,8 +195,8 @@ When you arrive, ask the family for the ARRIVAL code and confirm it from *My Boo
 
 Please give this code to your nanny so we can confirm her service has ended.`);
         }
-        if (booking.nanny) {
-          await notifyUser(booking.nanny, `⏰ Today's service time has ended for Booking #${booking.bookingNumber}.
+        for (const who of [booking.nanny, booking.secondNanny].filter(Boolean)) {
+          await notifyUser(who, `⏰ Today's service time has ended for Booking #${booking.bookingNumber}.
 
 Please ask the family for the END-OF-SERVICE code and confirm it from *My Bookings > Ongoing*.`);
         }
@@ -200,7 +225,11 @@ Please ask the family for the END-OF-SERVICE code and confirm it from *My Bookin
 export async function processReplacementDeadlines(now = new Date()) {
   const bookings = await Booking.find({
     subStatus: BOOKING_SUBSTATUS.NANNY_CANCELLED_AWAITING_REPLACEMENT,
-    status: { $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING] },
+    // A booking still owing a top-up keeps that status when its nanny leaves,
+    // and needs the same deadline, or it sits with no nanny while its days start.
+    status: {
+      $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING, BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT],
+    },
     nanny: { $exists: false },
   }).populate('family');
 
@@ -239,15 +268,8 @@ export async function processReplacementDeadlines(now = new Date()) {
       // paid at the time she completed it, so it is not counted again here.
       // `booking.nanny` is cleared when she steps away, so the payout goes to
       // the nanny the booking recorded as being replaced.
-      const owedTo = booking.replacementOfNanny;
-      if (breakdown.totalNannyCompensation > 0 && owedTo) {
-        await queuePayout(booking, {
-          nannyId: owedTo,
-          amount: breakdown.totalNannyCompensation,
-          isFinal: true,
-          notes: 'Cancellation compensation (no replacement selected)',
-        });
-      }
+      const { payCancellationCompensation } = await import('../services/booking.js');
+      await payCancellationCompensation(booking, breakdown, 'Cancellation compensation (no replacement selected)');
       await notifyUser(booking.family, `🔴 *Booking Cancelled – No Replacement Selected*
 
 Your nanny was unavailable and no replacement was selected before the next service started.
@@ -281,24 +303,70 @@ Go to *My Bookings > Upcoming* to choose a replacement.`);
 export async function processReminders(now = new Date()) {
   const horizon = dayjs(now).add(25, 'hour').toDate();
   const bookings = await Booking.find({
-    status: { $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING] },
+    status: {
+      $in: [BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING, BOOKING_STATUS.PENDING_ADDITIONAL_PAYMENT],
+    },
     subStatus: BOOKING_SUBSTATUS.NANNY_CONFIRMED,
     'serviceDays.startAt': { $gte: now, $lte: horizon },
   }).populate('family nanny');
 
+  /**
+   * Each reminder is sent once, the first time the job runs inside its window,
+   * and recorded on the day.
+   *
+   * The 2-hour reminder used to fire only inside a 12-minute window on a
+   * 15-minute schedule, so a start time not on the quarter hour could fall
+   * between runs and never be reminded. Nannies got no reminders at all,
+   * although accepting a job promised one.
+   */
   const sent = [];
   for (const booking of bookings) {
+    let dirty = false;
+    const nannies = [booking.nanny, booking.secondNanny].filter(Boolean);
+
     for (const day of booking.serviceDays) {
       if (day.status !== SERVICE_DAY_STATUS.SCHEDULED) continue;
       const hoursUntil = (new Date(day.startAt) - now) / 36e5;
+      if (hoursUntil <= 0) continue;
+      day.remindersSent = day.remindersSent || {};
 
-      // Live location becomes available 2 hours before the service.
-      if (hoursUntil > 1.9 && hoursUntil <= 2.1 && booking.family) {
-        await notifyUser(booking.family, `📍 Your service starts in *2 hours*.
+      // The day before, to the nanny.
+      if (hoursUntil <= 24 && hoursUntil > 2 && !day.remindersSent.dayBefore) {
+        for (const n of nannies) {
+          await notifyUser(n, `⏰ *Reminder:* you have a booking coming up.
+
+Booking #${booking.bookingNumber} — ${prettyDate(day.date)}
+⏰ ${timeRange(booking.startTime, booking.hoursPerDay)}
+📍 ${booking.address?.addressLine || ''}`);
+        }
+        day.remindersSent.dayBefore = now;
+        dirty = true;
+      }
+
+      // Two hours before: the nanny, and the family (live location opens).
+      if (hoursUntil <= 2 && !day.remindersSent.twoHours) {
+        for (const n of nannies) {
+          await notifyUser(n, `⏰ *Your booking starts in 2 hours.*
+
+Booking #${booking.bookingNumber} — ${prettyDate(day.date)}
+📍 ${booking.address?.addressLine || ''}
+
+When you arrive, ask the family for the ARRIVAL code.`);
+        }
+        if (booking.family) {
+          await notifyUser(booking.family, `📍 Your service starts in *2 hours*.
 
 You can now share your live location with your nanny from *My Bookings*.`);
+        }
+        day.remindersSent.twoHours = now;
+        dirty = true;
         sent.push(booking.bookingNumber);
       }
+    }
+
+    if (dirty) {
+      booking.markModified('serviceDays');
+      await booking.save();
     }
   }
   return sent;
@@ -396,8 +464,12 @@ export async function processDailyBackup() {
     try {
       const { send } = await import('../providers/email.js');
       const { brandedEmail } = await import('../providers/email.js');
+      // The office's backup list: there is no built-in address any more.
+      const { backupRecipients } = await import('../services/settings.js');
+      const to = (await backupRecipients().catch(() => [])).join(',') || config.backup.email;
+      if (!to) throw new Error('no backup recipients configured');
       await send({
-        to: config.backup.email,
+        to,
         subject: '⚠️ Daily backup FAILED',
         text: `Tonight's backup did not run.
 

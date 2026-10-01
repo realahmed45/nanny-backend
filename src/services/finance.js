@@ -219,23 +219,55 @@ export async function salaryForecast({ days = 10, from = new Date() } = {}) {
   let total = 0;
   let advanceTotal = 0;
 
+  /**
+   * Advances still to be recovered, by nanny.
+   *
+   * Advances are recorded as already paid, so they were never among the
+   * pending payouts this loop reads, and the subtraction below never ran: the
+   * forecast always showed the full wages as cash needed. They are loaded on
+   * their own and taken off each nanny's next payouts, from the month they
+   * are due — the same rule the release applies.
+   */
+  const openAdvances = await Payout.find({
+    kind: 'advance',
+    'advance.outstanding': { $gt: 0 },
+  }).sort({ createdAt: 1 }).lean();
+  const owedBy = new Map();
+  for (const a of openAdvances) {
+    const key = String(a.nanny);
+    owedBy.set(key, [...(owedBy.get(key) || []), {
+      left: round2(a.advance.outstanding), from: a.advance.recoverFrom || '',
+    }]);
+  }
+
   for (const p of due) {
-    const key = dayjs(p.scheduledFor).format('YYYY-MM-DD');
+    const when = dayjs(p.scheduledFor).tz(TZ());
+    const key = when.format('YYYY-MM-DD');
     const row = byDay.get(key);
     if (!row) continue;
 
     const amount = round2(p.amount);
     const name = p.nanny?.fullName || p.nanny?.nickname || 'Unknown';
 
-    if (p.kind === 'advance') {
-      // Already in her hands. It reduces what is still to be sent.
-      row.advances = round2(row.advances + amount);
-      advanceTotal += amount;
-    } else {
-      row.amount = round2(row.amount + amount);
-      total += amount;
-      row.count += 1;
-      if (!row.nannies.includes(name)) row.nannies.push(name);
+    if (p.kind === 'advance') continue;
+
+    row.amount = round2(row.amount + amount);
+    total += amount;
+    row.count += 1;
+    if (!row.nannies.includes(name)) row.nannies.push(name);
+
+    // Already recovered when it was released: nothing more comes off it.
+    if (p.status === PAYOUT_STATUS.PENDING) {
+      let available = amount;
+      for (const adv of owedBy.get(String(p.nanny?._id || p.nanny)) || []) {
+        if (available <= 0) break;
+        if (adv.left <= 0 || (adv.from && adv.from > when.format('YYYY-MM'))) continue;
+        const take = Math.min(adv.left, available);
+        adv.left = round2(adv.left - take);
+        available = round2(available - take);
+        row.advances = round2(row.advances + take);
+        advanceTotal += take;
+      }
     }
     byDay.set(key, row);
   }
@@ -320,7 +352,10 @@ export async function outstandingAdvances() {
  * detail is wiped, once, the first time this runs after her month ends.
  */
 export async function redactExpiredAdvances(now = new Date()) {
-  const monthStart = dayjs(now).startOf('month').toDate();
+  // Bali's month, not the server's. On a UTC server the month "began" at 8am
+  // Bali time, so an advance made on the 1st before then was wiped the next
+  // night — a month early, while it could still be outstanding.
+  const monthStart = dayjs(now).tz(TZ()).startOf('month').toDate();
 
   const due = await Payout.find({
     kind: 'advance',
@@ -379,26 +414,45 @@ export async function financeSummary({ from, to } = {}) {
 
   /* ---- Revenue and profit per nanny ---- */
   const nannies = new Map();
+  const nannyRow = (id, name) => nannies.get(id) || {
+    nannyId: id,
+    name: name || 'Unknown',
+    charged: 0,
+    earned: 0,
+    profit: 0,
+    bookings: 0,
+    days: 0,
+    missingRate: false,
+  };
   for (const r of earnings.rows) {
     const id = String(r.nannyId || r.nanny || 'unknown');
-    const row = nannies.get(id) || {
-      nannyId: id,
-      name: r.nanny || 'Unknown',
-      charged: 0,
-      earned: 0,
-      profit: 0,
-      bookings: 0,
-      days: 0,
-      missingRate: false,
-    };
+    const row = nannyRow(id, r.nanny);
+
+    // Each nanny is credited with what she herself earned. On a two-nanny
+    // booking the whole booking's pay used to land on the first nanny's row
+    // and the second nanny had no row at all.
+    const shares = new Map((r.nannyShares || []).map((s) => [String(s.nannyId), s.earned]));
+    const ownShare = shares.has(id) ? shares.get(id) : (r.paidToNannies || 0);
+
     row.charged = round2(row.charged + (r.charged || 0));
-    row.earned = round2(row.earned + (r.paidToNannies || 0));
+    row.earned = round2(row.earned + ownShare);
     row.profit = round2(row.profit + (r.commission || 0));
     row.bookings += 1;
     row.days += r.completedDays || 0;
     // One unpriced booking makes her whole row unreliable, so it is carried.
     if (r.missingNannyRate) row.missingRate = true;
     nannies.set(id, row);
+
+    // The second nanny: her own earnings and days. Revenue and profit stay
+    // with the booking's row above so they are not counted twice.
+    const secondId = r.secondNannyId && String(r.secondNannyId);
+    if (secondId && secondId !== id && shares.has(secondId)) {
+      const second = nannyRow(secondId, r.secondNanny);
+      second.earned = round2(second.earned + shares.get(secondId));
+      second.bookings += 1;
+      second.days += r.completedDays || 0;
+      nannies.set(secondId, second);
+    }
   }
 
   const sortByProfit = (a, b) => b.profit - a.profit;
@@ -422,6 +476,11 @@ export async function financeSummary({ from, to } = {}) {
       revenue: round2(earnings.totals.charged),
       paidToNannies: round2(earnings.totals.paidToNannies),
       refunded: round2(earnings.totals.refunded),
+      // Overtime is paid by the family to the nanny in person, so it is inside
+      // revenue without ever reaching our bank; our part of it is recovered
+      // from her payouts. Shown so the bank balance can be reconciled.
+      overtimeCollectedByNannies: round2(earnings.totals.overtimeCollectedByNannies || 0),
+      overtimeCommission: round2(earnings.totals.overtimeCommission || 0),
       grossProfit,
       costs: costs.total,
       netProfit,

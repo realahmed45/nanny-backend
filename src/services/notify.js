@@ -1,4 +1,4 @@
-import { sendText } from '../providers/ultramsg.js';
+import { sendText, sendImage } from '../providers/ultramsg.js';
 import { User, Session } from '../models/index.js';
 
 /**
@@ -89,7 +89,7 @@ export async function notifyAndSetState(userOrId, body, state, data = {}) {
  * that question. Interrupting there would feed her reply into a field, and on a
  * booking request a "1" would accept the job.
  */
-const INTERRUPTIBLE = new Set([
+export const INTERRUPTIBLE = new Set([
   'START',
   'FAMILY_MAIN_MENU',
   'NANNY_MAIN_MENU',
@@ -109,7 +109,7 @@ const INTERRUPTIBLE = new Set([
  * Returns whether she can reply right now, so the caller can say so rather than
  * implying a conversation that is not open.
  */
-export async function relayChatMessage(userOrId, body, { threadId } = {}) {
+export async function relayChatMessage(userOrId, body, { threadId, mediaUrl = null } = {}) {
   const user = typeof userOrId === 'object' && userOrId?.phone
     ? userOrId
     : await User.findById(userOrId);
@@ -121,12 +121,37 @@ export async function relayChatMessage(userOrId, body, { threadId } = {}) {
   let live = false;
   if (session) {
     // Already in this chat, or somewhere safe to be moved into it.
-    const inThisChat = String(session.activeChat || '') === String(threadId || '');
+    // In this chat means on the chat screen for this thread. A nanny moved onto
+    // a booking request keeps `activeChat` set, and treating that as "in the
+    // chat" pulled her off the request, so her "1" to accept was relayed to
+    // the family as chat text.
+    const inThisChat = session.state === chatState
+      && String(session.activeChat || '') === String(threadId || '');
     if (inThisChat || INTERRUPTIBLE.has(session.state)) {
       session.state = chatState;
       session.activeChat = threadId;
       await session.save();
       live = true;
+    }
+  }
+
+  /**
+   * A photo goes as a photo, with the sender's name as its caption.
+   *
+   * Only the text used to be sent, so a photo with no caption arrived as a
+   * bare "Name:" with nothing after it. If the image cannot be sent, the text
+   * still goes, saying a photo was sent, so the recipient is never left with
+   * an empty message.
+   */
+  if (mediaUrl) {
+    try {
+      await sendImage(user.phone, mediaUrl, body);
+      return { sent: true, live };
+    } catch (err) {
+      console.warn(`[notify] photo relay to ${user.phone} failed: ${err.message}`);
+      const fallback = `${body}\n📷 (sent a photo that could not be delivered)`;
+      const sent = await notifyPhone(user.phone, fallback, { role: user.role, state: session?.state });
+      return { ...sent, live };
     }
   }
 
